@@ -14,6 +14,7 @@
   --eval --skill <name>         replay only records that used <name>
   --eval --drift-budget X       exit non-zero if avg interp_drift > X (CI gate)
   --eval --output-format json   emit the full report as JSON on stdout
+  --version, -V                 print the version string and exit
   --logo                        print the ASCII logo + version (pipeable)
   --logo --svg                  print the SVG markup
   --logo --plain                print the bare logo lines (no version/tagline)
@@ -336,6 +337,10 @@ def main():
         _run_reindex(); return
     if sub == "--eval":
         _run_eval(); return
+    if sub in ("--version", "-V"):
+        from . import branding
+        print(f"janus {branding.VERSION}")
+        return
     if sub == "--logo":
         _run_logo(args); return
     if sub == "--conversations":

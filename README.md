@@ -28,6 +28,7 @@ with structural safety as the **default** rather than an opt-in.
 - [Install](#install)
 - [Configure](#configure)
 - [Quickstart](#quickstart)
+- [Updating](#updating)
 - [Slash commands](#slash-commands)
 - [Architecture](#architecture)
 - [Where state lives](#where-state-lives)
@@ -92,6 +93,23 @@ source .venv/bin/activate
 
 ### 3. Install
 
+#### Option A — pipx (recommended on Linux & macOS)
+
+`pipx` puts `janus` on your PATH globally without needing to activate a
+venv each shell. This is the durable install for servers and dev boxes.
+
+```bash
+sudo apt install -y pipx          # Ubuntu / Debian
+# or: brew install pipx           # macOS
+pipx ensurepath                    # adds ~/.local/bin to PATH (once)
+
+pipx install -e ".[rich]"          # editable install + rich TUI
+```
+
+To later switch extras: `pipx uninstall janus-agent && pipx install -e ".[all]"`.
+
+#### Option B — pip in a venv (works everywhere)
+
 ```bash
 pip install -e .                   # core only (just `requests`)
 pip install -e ".[rich]"           # + polished TUI (recommended)
@@ -100,13 +118,17 @@ pip install -e ".[browser]"        # + headless Chromium tools
 pip install -e ".[all]"            # everything
 ```
 
-After install, `janus` is on your PATH.
+After install, `janus` is on your PATH **as long as the venv is
+activated**. Open a new shell and you'll need to `source .venv/bin/activate`
+again, or use Option A above.
 
 ### 4. Smoke test
 
 ```bash
-janus --logo        # prints the bifurcation logo + version
+janus --version     # janus 0.13
+janus --logo        # prints the bifurcation logo
 janus --help        # subcommands and flags
+janus --doctor      # config + environment diagnostics
 ```
 
 ---
@@ -184,6 +206,37 @@ A typical session:
     Add a docstring section to cli_rich.py explaining …
 
 pick [1-3], (r)efine, (s)kip, (q)uit:
+```
+
+---
+
+## Updating
+
+Janus follows simple SemVer tags (`v0.13.0`, `v0.14.0`, …). Pull the
+latest tag and reinstall in place:
+
+```bash
+cd /path/to/janus
+git pull --tags
+janus --version            # confirm the new version
+```
+
+Then **reinstall** so the new code is picked up:
+
+```bash
+# If installed via pipx:
+pipx reinstall janus-agent
+
+# If installed via pip in a venv:
+source .venv/bin/activate
+pip install -e ".[rich]" --upgrade
+```
+
+To pin to a specific release:
+
+```bash
+git checkout v0.13.0
+pipx reinstall janus-agent      # or: pip install -e ".[rich]" --upgrade
 ```
 
 ---

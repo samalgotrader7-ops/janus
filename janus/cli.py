@@ -934,7 +934,13 @@ def main():
 
         try:
             t0 = time.time()
-            interps = interpreter.interpret(req, memory_preamble=preamble, skill_hints=skill_hints)
+            interps = interpreter.interpret(
+                req,
+                memory_preamble=preamble,
+                skill_hints=skill_hints,
+                tool_count=len(default_registry().names()),
+                skill_count=len(all_skills),
+            )
             record["interpret_ms"] = int((time.time() - t0) * 1000)
             record["interpretations"] = interps
         except Exception as e:

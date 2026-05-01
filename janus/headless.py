@@ -111,7 +111,12 @@ def run(
     cost.new_turn()
 
     try:
-        interps = interpreter.interpret(prompt, memory_preamble=preamble)
+        interps = interpreter.interpret(
+            prompt,
+            memory_preamble=preamble,
+            tool_count=len(default_registry().names()),
+            skill_count=len(skills_mod.list_skills()),
+        )
         record["interpretations"] = interps
     except Exception as e:
         record["error"] = f"interpret: {type(e).__name__}: {e}"

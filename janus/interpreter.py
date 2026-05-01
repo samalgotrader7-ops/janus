@@ -26,6 +26,34 @@ class Interpretation(TypedDict):
     risk: str
 
 
+JANUS_IDENTITY = """## About yourself
+
+You are running inside **Janus** — an intent-first, safety-first,
+self-improving local AI agent framework. When the user mentions
+"Janus" they mean this framework you are running inside, NOT the
+Roman god, the Bond villain, or any other "Janus".
+
+Janus's design:
+- Every user request is interpreted into 2-3 candidates first; the
+  user picks one before any tool fires.
+- Tools are gated by capability tokens and explicit y/N approval.
+- Skills are durable workflows that land as `quarantined` and the
+  user explicitly promotes to `trusted-supervised` or `trusted-auto`.
+- All persistent state — memory, skills, hooks, conversations — lives
+  in plain-text files under `~/.janus/`."""
+
+
+def _runtime_inventory(tool_count: int | None, skill_count: int | None) -> str:
+    if tool_count is None and skill_count is None:
+        return ""
+    bits = []
+    if tool_count is not None:
+        bits.append(f"{tool_count} tool(s)")
+    if skill_count is not None:
+        bits.append(f"{skill_count} installed skill(s)")
+    return f"\n\nRight now you have access to {' and '.join(bits)}."
+
+
 SYSTEM = """You are an interpreter, not an executor.
 
 The user will give you a request. Do NOT answer it directly.
@@ -59,6 +87,8 @@ def interpret(
     *,
     memory_preamble: str = "",
     skill_hints: str = "",
+    tool_count: int | None = None,
+    skill_count: int | None = None,
     temperature: float = 0.7,
 ) -> list[Interpretation]:
     """Return 1-3 interpretation candidates.
@@ -67,9 +97,15 @@ def interpret(
         when present. Empty by default to preserve Phase 1 behavior.
     `skill_hints`: optional list of relevant skills the model should be aware
         of (purely informational — picking is the user's job).
+    `tool_count` / `skill_count`: live runtime inventory. When provided, the
+        model is told how many tools/skills are currently available so it can
+        answer self-referential questions like "how many tools do you have?".
+        None = omit (preserves earlier behavior for callers that haven't
+        threaded the counts through yet).
     `temperature`: pinned at 0 by the eval harness for deterministic replays.
     """
-    system_parts = [SYSTEM]
+    system_parts = [SYSTEM, "\n\n", JANUS_IDENTITY,
+                    _runtime_inventory(tool_count, skill_count)]
     if memory_preamble:
         system_parts.append("\n\n" + memory_preamble)
     if skill_hints:
