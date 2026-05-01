@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "janus-agent"
+version = "0.12.0"
+description = "Intent-first, safety-first, self-improving local AI agent framework."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Sam" }]
+keywords = ["agent", "llm", "cli", "local-first", "safety"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+]
+
+# Core runtime — minimal on purpose (P6: no fat SDK in model-call path).
+dependencies = [
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# Polished TUI (Phase 5).
+rich = [
+    "prompt_toolkit>=3.0",
+    "rich>=13.0",
+]
+# Local web UI (Phase 11).
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+]
+# Headless browser tools (Phase 9 — needs `playwright install chromium` after).
+browser = [
+    "playwright>=1.40",
+]
+# Test dependencies.
+test = [
+    "pytest>=8.0",
+]
+# Everything bundled.
+all = [
+    "prompt_toolkit>=3.0",
+    "rich>=13.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "playwright>=1.40",
+]
+
+[project.scripts]
+janus = "janus.__main__:main"
+
+[project.urls]
+Source = "https://github.com/samalgotrader7-ops/janus"
+Issues = "https://github.com/samalgotrader7-ops/janus/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["janus*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

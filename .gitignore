@@ -1,0 +1,41 @@
+# Local secrets — never commit.
+.env
+.env.local
+
+# Janus runtime state (per-machine).
+.janus/
+~/.janus/
+
+# Python.
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+*.egg
+
+# Editors / OS.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Test / cache.
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Playwright (Phase 9 browser tools).
+.playwright/
+playwright-report/
+
+# Personal / collaboration scratch — kept out of the public repo.
+NEXT_SESSION_AGENDA.md
+CLI_ENHANCEMENT_PLAN.md
+.claude/
