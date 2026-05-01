@@ -59,6 +59,11 @@ WORKSPACE: Path = Path(os.getenv("JANUS_WORKSPACE", str(Path.cwd()))).resolve()
 # --- Loop limits ---
 MAX_STEPS: int = int(os.getenv("JANUS_MAX_STEPS", "25"))
 LLM_TIMEOUT: int = int(os.getenv("JANUS_LLM_TIMEOUT", "180"))
+# Hard cap on shell tool timeout so the model can't hang the agent for
+# hours by passing timeout=600000 (a v1.1 incident: model thought the
+# value was milliseconds, sent 600s × 1000, subprocess.run blocked
+# 166 hours on a daemon that never exits). 300s = 5 min.
+SHELL_TIMEOUT_MAX: int = int(os.getenv("JANUS_SHELL_TIMEOUT_MAX", "300"))
 
 # --- Approval policy ---
 APPROVAL_MODE: str = os.getenv("JANUS_APPROVAL", "manual")
