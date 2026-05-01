@@ -51,6 +51,7 @@ class FsMultiEdit(base.Tool):
         "required": ["edits"],
     }
     dangerous = True
+    risk = "write"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         edits = args.get("edits") or []

@@ -38,6 +38,7 @@ class ImageDescribe(base.Tool):
         "required": ["path"],
     }
     dangerous = False
+    risk = "read"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         try:

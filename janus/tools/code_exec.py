@@ -120,6 +120,7 @@ class CodeExecPython(base.Tool):
         "required": ["code"],
     }
     dangerous = True
+    risk = "exec"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         code = str(args.get("code") or "")

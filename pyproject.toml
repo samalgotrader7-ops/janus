@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "janus-agent"
-version = "0.13.0"
-description = "Intent-first, safety-first, self-improving local AI agent framework."
+version = "1.0.0"
+description = "Claude Code's UX, on any model, with plain-text state and a learning loop."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

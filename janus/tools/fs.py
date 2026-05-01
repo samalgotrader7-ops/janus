@@ -50,6 +50,7 @@ class FsRead(base.Tool):
         "required": ["path"],
     }
     dangerous = False
+    risk = "read"
 
     def run(self, args: dict, approver: Callable[[str, str], bool]) -> str:
         p = _resolve_within_workspace(args["path"])
@@ -79,6 +80,7 @@ class FsWrite(base.Tool):
         "required": ["path", "content"],
     }
     dangerous = True
+    risk = "write"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         from .. import diff as diff_mod
@@ -132,6 +134,7 @@ class FsList(base.Tool):
         "required": ["path"],
     }
     dangerous = False
+    risk = "read"
 
     def run(self, args: dict, approver: Callable[[str, str], bool]) -> str:
         p = _resolve_within_workspace(args["path"])

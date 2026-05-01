@@ -54,6 +54,7 @@ class Shell(base.Tool):
         "required": ["command"],
     }
     dangerous = True
+    risk = "exec"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         cmd: str = args["command"]

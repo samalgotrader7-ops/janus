@@ -2,23 +2,28 @@
 
 # Janus
 
-**An intent-first, safety-first, self-improving local AI agent framework.**
+**Claude Code's UX, on any model, with plain-text state and a learning loop.**
 
 </div>
 
-Janus reads every request you give it, proposes 2–3 candidate
-interpretations, and waits for you to pick one before any tool fires. It
-runs the chosen interpretation through a small hardened tool set gated
-by capability tokens and explicit approvals, remembers what matters in a
-plain-text user model you can edit, learns durable workflows as
-**skills** the user explicitly promotes, and decomposes complex work
-into sub-tasks executed by parallel sub-agents — all locally, all in
-files you can read.
+Janus is a local AI agent that talks to you the way Claude Code does —
+streaming responses, inline tool calls, permission modes you set and
+forget — but runs against any OpenAI-compatible model (Anthropic,
+OpenRouter, Ollama, OpenAI, llama.cpp, …). Memory, skills, hooks, and
+every interaction live as plain-text files under `~/.janus/` that you
+can `cat`, `grep`, version-control, or hand-edit.
 
-The competitive thesis lives in [`docs/HERMES_AUDIT.md`](docs/HERMES_AUDIT.md):
-agentic frameworks today optimize for autonomy at the cost of
-structural safety. Janus's lane is the same self-improving substrate
-with structural safety as the **default** rather than an opt-in.
+What makes it useful:
+
+- **Model-agnostic.** Swap providers with one env var. No vendor lock-in.
+- **Plain-text everywhere.** Memory is markdown, conversations are JSON,
+  the audit log is JSONL. No opaque database.
+- **Skills you teach it.** Durable workflows land as `quarantined`
+  markdown files; you `/promote` them to trusted state when ready.
+- **Permission modes copied from Claude Code.** `default` /
+  `acceptEdits` / `plan` / `bypassPermissions`, switchable mid-session
+  with `/mode`.
+- **Self-hostable.** No cloud dependencies. No SaaS user model.
 
 ---
 
@@ -28,11 +33,11 @@ with structural safety as the **default** rather than an opt-in.
 - [Install](#install)
 - [Configure](#configure)
 - [Quickstart](#quickstart)
+- [Permission modes](#permission-modes)
 - [Updating](#updating)
 - [Slash commands](#slash-commands)
 - [Architecture](#architecture)
 - [Where state lives](#where-state-lives)
-- [Safety invariants (P1–P10)](#safety-invariants-p1p10)
 - [Testing](#testing)
 - [Documentation](#documentation)
 - [License](#license)
@@ -41,19 +46,20 @@ with structural safety as the **default** rather than an opt-in.
 
 ## Why Janus
 
-| | Janus | Typical agent CLI |
-|---|---|---|
-| **Interpretation gate** | 2–3 candidates surfaced before any tool runs | Tool fires on the first plausible plan |
-| **Capability tokens** | Each dangerous action is bounded by a token + y/N | Coarse "yolo / ask" toggle |
-| **Skills** | Land as `quarantined`; only the user can `/promote` to `trusted-auto` | Auto-evolve, hard to roll back |
-| **Memory** | Plain-text `user.md` + diff propose + manual approve | Opaque embeddings |
-| **Logs** | Every interaction → `~/.janus/log.jsonl`, FTS5-indexed | Best-effort |
-| **Model-call path** | ~50 lines of `requests`, no SDK | litellm / openai-python / anthropic-python |
-| **State format** | Markdown, JSON, JSONL, SQLite — all human-readable | Database-backed |
+| | Janus | Claude Code | Typical agent CLI |
+|---|---|---|---|
+| **Model** | Any OpenAI-compatible | Anthropic only | Provider-locked |
+| **State** | Plain text under `~/.janus/` (cat, grep, git) | Opaque | Database-backed |
+| **Permission modes** | `default` / `acceptEdits` / `plan` / `bypass` | Same | Coarse "yolo / ask" |
+| **Skills** | Markdown files; quarantined → user `/promote`s | None first-class | Auto-evolve, hard to roll back |
+| **Memory** | Plain `user.md` + diff propose + manual approve | None first-class | Opaque embeddings |
+| **Logs** | Every turn → `~/.janus/log.jsonl`, FTS5-indexed | n/a | Best-effort |
+| **Model-call path** | ~50 lines of `requests`, no SDK | n/a | litellm / openai-python |
+| **Self-hostable** | Yes | No | Varies |
 
-If you want a self-improving local agent that you can audit, edit, and
-unwind by hand, Janus is for you. If you want a fully autonomous shell
-co-pilot, look elsewhere.
+If you want Claude Code's ergonomics without Anthropic lock-in, with
+state you can audit and a skill system you actually control, Janus is
+for you.
 
 ---
 
@@ -125,7 +131,7 @@ again, or use Option A above.
 ### 4. Smoke test
 
 ```bash
-janus --version     # janus 0.13
+janus --version     # janus 1.0
 janus --logo        # prints the bifurcation logo
 janus --help        # subcommands and flags
 janus --doctor      # config + environment diagnostics
@@ -196,17 +202,53 @@ A typical session:
 ```
 ›  refactor janus/cli_rich.py to extract the dispatcher into its own module
 
-[1] surgical refactor                                    risk: medium
-    Move _dispatch + helpers into janus/dispatcher.py …
+I'll start by reading the current cli_rich.py to see what's in the
+dispatcher.
 
-[2] split + add tests for new module                     risk: medium
-    Same as [1] plus a tests/test_dispatcher.py covering …
+   → fs_read(path=janus/cli_rich.py)
+   ✓ 1209 lines
 
-[3] leave it alone, just document the boundary           risk: low
-    Add a docstring section to cli_rich.py explaining …
+The dispatcher is roughly 280 lines (_dispatch + helpers). I'll move it to
+janus/dispatcher.py and re-export. Approve the new file?
 
-pick [1-3], (r)efine, (s)kip, (q)uit:
+   ⚠ approval needed: fs_write: create  (risk=write, mode=default)
+   create janus/dispatcher.py  (8412 bytes)
+   --- proposed contents ---
+   ...
+
+approve? [y/N]: y
 ```
+
+No interpretation picker — just chat with tool calls inline, gated by
+the active permission mode. Use `/why` if you want the model to surface
+2–3 alternative readings of a message before acting.
+
+---
+
+## Permission modes
+
+Copied from Claude Code so muscle memory transfers. Switch with
+`/mode <name>` or set `JANUS_APPROVAL` in `.env`. The decision matrix:
+
+| mode | read | write | exec |
+|---|---|---|---|
+| `default` | allow | ask | ask |
+| `acceptEdits` | allow | allow | ask |
+| `plan` | allow | **DENY** | **DENY** |
+| `bypassPermissions` | allow | allow | allow |
+
+- **default** — start here. The model can read freely, asks before
+  writing files or running commands.
+- **acceptEdits** — for trusted refactors when you don't want to babysit
+  every diff. Shell commands still ask.
+- **plan** — read-only thinking. The model can browse the codebase and
+  propose a plan; nothing mutates. Switch to `default` when ready to act.
+- **bypassPermissions** — fully autonomous. Use only in throwaway
+  workspaces.
+
+Skills can grant capability tokens (e.g. `shell.exec: ["git *"]`) that
+short-circuit the prompt for narrow targets without flipping the whole
+session into bypass.
 
 ---
 
@@ -248,6 +290,8 @@ descriptions; the menu is grouped by source (built-in vs. user-defined).
 
 | Command | Purpose |
 |---|---|
+| `/mode [name]` | Switch permission mode: `default` / `acceptEdits` / `plan` / `bypassPermissions` |
+| `/why` | Re-interpret your last message and show 2–3 candidate readings |
 | `/workspace [path]` | Show or change the active workspace directory |
 | `/analyze` | Scan the workspace for tools, skills, project hints |
 | `/memory` | Show the `user.md` memory file |
@@ -266,8 +310,6 @@ descriptions; the menu is grouped by source (built-in vs. user-defined).
 | `/output-style` | Switch output rendering (markdown / plain / json / …) |
 | `/commands` | List user-defined slash commands |
 | `/eval [--last N] [--skill <name>]` | Replay last N turns at temp=0 (drift check) |
-| `/plan on\|off` | Toggle plan-tree mode (decompose into sub-tasks) |
-| `/parallel on\|off` | Toggle parallel sub-agent execution |
 | `/mcp list \| connect \| disconnect` | Manage MCP servers |
 | `/triggers` | List configured triggers |
 | `/help` | Full grouped command list |
@@ -293,41 +335,37 @@ Refactor this code:
 ## Architecture
 
 ```
-user request
+user types
    │
    ▼
-gateway  (cli / cli_rich / telegram / web / whatsapp / headless)
+slash command? handle and continue
    │
    ▼
-memory.prepend_for_prompt()  +  conversation.recent_context_block()
+skills.match()  →  trusted-auto skill attaches (if any)
    │
    ▼
-interpreter.interpret()  →  2–3 candidates
+executor.chat(messages, user_input, tools, approver, mode, …)
    │
    ▼
-user picks  (or first candidate in headless / trusted-auto)
-   │
-   ▼
-skills.match()  →  optional skill attach
-   │
-   ▼
-planner.plan()  (when /plan on)  →  plan tree
-   │
-   ▼
-orchestrator.run()  →  for each leaf:
-   │   (parallel mode = subagent subprocess; serial = in-process)
-   ▼
-executor.execute()  →  tool-use loop:
-   │     hooks.fire(PreToolUse) → maybe deny
-   │     tools.call() → approver(action, details, capability=(...))
-   │     hooks.fire(PostToolUse)
-   ▼
-final output
+loop:
+   llm.chat_stream(messages, tools=registry.schemas())
+   if tool_calls:
+      for each call:
+         hooks.fire(PreToolUse) → maybe deny
+         tools.call() → approver(action, details, risk=…, capability=(…))
+                       → permissions.decide(risk, mode) → allow / ask / deny
+         hooks.fire(PostToolUse)
+         append tool result
+   else:
+      final text → return
    │
    ▼
 cost.record()  ·  conversation.add_turn()  ·  skill.record_run()
 memory.propose_diff()  ·  logger.write()
 ```
+
+The legacy interpretation-gated flow is preserved on `/why` for users
+who want to inspect ambiguity before acting.
 
 ---
 
@@ -356,26 +394,6 @@ opaque database.
 
 ---
 
-## Safety invariants (P1–P10)
-
-These are the rules every code change must respect. Full version in
-[`docs/BUILD_GUIDE_FOR_CLAUDE_CODE.md`](docs/BUILD_GUIDE_FOR_CLAUDE_CODE.md) §3.
-
-| | Invariant |
-|---|---|
-| **P1** | **Interpretation first** — no tool call ever fires before either the user picked an interpretation or a `trusted-auto` skill matched. |
-| **P2** | **Capability-bounded execution** — every dangerous tool action is gated by capability tokens or explicit y/N. |
-| **P3** | **Workspace as geometric boundary** — all fs/shell access resolves through `janus.security.resolve_within`. NOT a regex. |
-| **P4** | **Manual skill promotion** — skills land as `quarantined`. Promotion is the user typing `/promote`. Never auto-promote. |
-| **P5** | **Plain-text persistent state** — memory, skills, hooks, MCP config, conversations — all human-readable files. |
-| **P6** | **No fat SDK in the model-call path** — the HTTP client is ~50 lines of `requests`. No litellm / openai-python / anthropic-python. |
-| **P7** | **Bounded everything** — steps, depth, fanout, output bytes, fetch bytes, log retention, sub-agent count. |
-| **P8** | **Errors are observations** — tool failures return strings the model reads; they do not raise into the executor loop. |
-| **P9** | **Forward-compatible classes, not decorators** — each tool is a class. |
-| **P10** | **Logged is owned** — every interaction, every tool call, every approval decision lands in `~/.janus/log.jsonl`. |
-
----
-
 ## Testing
 
 ```bash
@@ -383,8 +401,8 @@ pip install -e ".[test]"
 pytest tests/ -q
 ```
 
-The suite is fast (~12 s for 340+ tests) and uses no network or LLM
-calls — `fake_llm` and `janus_home` fixtures isolate every run.
+The suite is fast (~12 s for 390 tests as of v1.0) and uses no network
+or LLM calls — `fake_llm` and `janus_home` fixtures isolate every run.
 
 ---
 

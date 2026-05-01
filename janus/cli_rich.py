@@ -23,6 +23,7 @@ from . import config, interpreter, executor, logger, memory, index, skills
 from . import eval as eval_mod, planner, orchestrator, skill_evolution
 from . import skills_market, cache, branding, conversation, cost, statusline
 from . import commands as commands_mod, doctor, init_codebase, output_styles
+from . import permissions
 from .mcp import client as mcp_client
 from .tools import default_registry, make_capability_aware, CapabilitySet
 
@@ -60,6 +61,8 @@ class SlashCommand:
 
 
 BUILTIN_COMMANDS: list[SlashCommand] = [
+    SlashCommand("/mode",         "switch permission mode: default | acceptEdits | plan | bypassPermissions", "built-in"),
+    SlashCommand("/why",          "re-interpret your last message and show 2-3 candidate readings", "built-in"),
     SlashCommand("/workspace",    "show or change the active workspace directory",       "built-in"),
     SlashCommand("/analyze",      "scan the workspace for tools, skills, project hints", "built-in"),
     SlashCommand("/memory",       "show the user.md memory file",                        "built-in"),
@@ -80,8 +83,6 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/output-style", "switch output rendering (markdown, plain, json, …)",  "built-in"),
     SlashCommand("/commands",     "list user-defined slash commands and their files",    "built-in"),
     SlashCommand("/eval",         "replay last N records at temp=0 to check stability",  "built-in"),
-    SlashCommand("/plan",         "toggle plan-tree mode (decompose into sub-tasks)",    "built-in"),
-    SlashCommand("/parallel",     "toggle parallel sub-agent execution (with /plan)",    "built-in"),
     SlashCommand("/mcp",          "manage MCP servers — list | connect | disconnect",    "built-in"),
     SlashCommand("/triggers",     "list configured triggers",                            "built-in"),
     SlashCommand("/help",         "show all available slash commands grouped by source", "built-in"),
@@ -268,25 +269,45 @@ def _show_skill_table(console, items) -> None:
     console.print(t)
 
 
-def _make_approver(console):
-    mode = config.APPROVAL_MODE
+def _make_mode_approver(console, mode_state: permissions.ModeState):
+    """v1.0 approver: consults the active permission mode + tool risk class.
 
-    def base(action_label: str, details: str) -> bool:
-        if mode == "auto":
-            console.print(f"[dim][auto-approved][/] {action_label}")
+    Tool risk arrives via the `risk=` kwarg the Registry injects (see
+    tools/base.py). Capability tokens still short-circuit to True
+    upstream via make_capability_aware() so a skill with explicit
+    grants doesn't have to ask.
+
+    Decision matrix per mode lives in permissions.decide().
+    """
+    def approver(action_label: str, details: str, **kw) -> bool:
+        risk = kw.get("risk") or permissions.risk_from_verb(
+            (kw.get("capability") or (None, "", None))[1]
+        )
+        decision = permissions.decide(risk, mode_state.current)
+
+        if decision == permissions.ALLOW:
             return True
-        if mode == "dry-run":
-            console.print(f"[yellow][dry-run, not executing][/] {action_label}\n  {details}")
+        if decision == permissions.DENY:
+            console.print(
+                f"[yellow]✗ {action_label}[/] "
+                f"[dim]blocked by mode '{mode_state.current}' (risk={risk})[/]"
+            )
             return False
-        console.print(Panel(details, title=f"[yellow]⚠ approval needed[/]: {action_label}",
-                            border_style="yellow"))
+
+        # ASK — show panel + y/N.
+        console.print(Panel(
+            details,
+            title=f"[yellow]⚠ approval needed[/]: {action_label}  "
+                  f"[dim](risk={risk}, mode={mode_state.current})[/]",
+            border_style="yellow",
+        ))
         try:
             ans = input("approve? [y/N]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return False
         return ans in ("y", "yes")
 
-    return base
+    return approver
 
 
 # ---------- Slash command dispatcher ----------
@@ -311,6 +332,10 @@ def _dispatch(console, line: str, state: dict) -> bool:
     if cmd in ("/quit", "/exit"):
         state["quit"] = True
         return True
+    if cmd == "/mode":
+        return _cmd_mode(console, arg, state)
+    if cmd == "/why":
+        return _cmd_why(console, state)
     if cmd == "/help":
         cmds = _all_slash_commands(state.get("custom_commands"))
         t = Table(show_header=True, header_style="bold")
@@ -410,35 +435,6 @@ def _dispatch(console, line: str, state: dict) -> bool:
             console.print(eval_mod.render_summary(report))
         except Exception as e:
             console.print(f"[red]eval failed:[/] {e}")
-        return True
-    if cmd == "/plan":
-        v = arg.strip().lower()
-        if v in ("on", "true", "1"):
-            state["plan"] = True
-            console.print("  [green]plan-tree mode ON[/]")
-        elif v in ("off", "false", "0"):
-            state["plan"] = False
-            console.print("  [yellow]plan-tree mode OFF[/]")
-        else:
-            console.print(f"  plan-tree mode: {'on' if state.get('plan') else 'off'}")
-        return True
-    if cmd == "/parallel":
-        v = arg.strip().lower()
-        if v in ("on", "true", "1"):
-            state["parallel"] = True
-            console.print(
-                f"  [green]subagent parallel mode ON[/] "
-                f"(concurrency={config.SUBAGENT_CONCURRENCY})"
-            )
-        elif v in ("off", "false", "0"):
-            state["parallel"] = False
-            console.print("  [yellow]subagent parallel mode OFF[/]")
-        else:
-            console.print(
-                f"  subagent parallel mode: "
-                f"{'on' if state.get('parallel') else 'off'}  "
-                f"(only effective when /plan is on)"
-            )
         return True
     if cmd == "/mcp":
         return _cmd_mcp_rich(console, arg)
@@ -619,6 +615,92 @@ def _dispatch(console, line: str, state: dict) -> bool:
         return True
 
     console.print(f"[red]unknown command:[/] {cmd}")
+    return True
+
+
+def _cmd_mode(console, arg: str, state: dict) -> bool:
+    """`/mode [name]` — show or switch the active permission mode."""
+    mode_state: permissions.ModeState = state["mode_state"]
+    target = arg.strip()
+    if not target:
+        # Show current + list options.
+        rows = [
+            (permissions.DEFAULT, "read auto · write/exec ask"),
+            (permissions.ACCEPT_EDITS, "read+write auto · exec ask"),
+            (permissions.PLAN, "read auto · write/exec DENY"),
+            (permissions.BYPASS, "everything auto · no prompts"),
+        ]
+        t = Table(show_header=True, header_style="bold")
+        t.add_column("mode"); t.add_column("behavior")
+        for name, desc in rows:
+            marker = "● " if name == mode_state.current else "  "
+            color = "magenta" if name == mode_state.current else "white"
+            t.add_row(f"[{color}]{marker}{name}[/]", desc)
+        console.print(t)
+        console.print(
+            f"[dim]usage: /mode <name>  ·  current: "
+            f"[bold]{mode_state.current}[/][/dim]"
+        )
+        return True
+    if target not in permissions.ALL_MODES:
+        # Try legacy name normalization (manual/auto/dry-run).
+        normalized = permissions.normalize(target)
+        if normalized != permissions.DEFAULT or target.lower() in (
+            "manual", "auto", "dry-run", "default"
+        ):
+            target = normalized
+        else:
+            console.print(
+                f"[red]unknown mode:[/] {target}  "
+                f"[dim]valid: {', '.join(permissions.ALL_MODES)}[/]"
+            )
+            return True
+    mode_state.set(target)
+    color = "red" if target == permissions.BYPASS else "green"
+    console.print(f"  [{color}]mode → {mode_state.current}[/]")
+    if target == permissions.BYPASS:
+        console.print(
+            "  [red]warning:[/] every tool will run without asking. "
+            "[dim]/mode default to disable.[/]"
+        )
+    logger.write({
+        "ts": logger.now_iso(),
+        "type": "mode_switch",
+        "new_mode": target,
+    })
+    return True
+
+
+def _cmd_why(console, state: dict) -> bool:
+    """`/why` — re-run the last user input through the legacy interpreter
+    and show 2-3 candidate readings. Power-user escape hatch for users
+    who want to inspect what alternatives the model considered."""
+    last = state.get("last_user_input", "")
+    if not last:
+        console.print("[dim]nothing to interpret yet — type a message first[/]")
+        return True
+    console.print(f"[dim]re-interpreting:[/] {last[:80]}{'…' if len(last) > 80 else ''}")
+    conv = state.get("conv")
+    cache_snap = cache.snapshot()
+    preamble = cache_snap.preamble + (conv.recent_context_block() if conv else "")
+    try:
+        interps = interpreter.interpret(
+            last,
+            memory_preamble=preamble,
+            tool_count=len(default_registry().names()),
+            skill_count=len(skills.list_skills()),
+        )
+    except Exception as e:
+        console.print(f"[red]interpreter failed:[/] {e}")
+        return True
+    if not interps:
+        console.print("[dim](no interpretations returned)[/]")
+        return True
+    _show_interpretations(console, interps)
+    console.print(
+        "[dim]This is read-only — none of these were executed. "
+        "Send a new message to act.[/]"
+    )
     return True
 
 
@@ -841,6 +923,14 @@ def _maybe_propose_memory(console, req: str, output: str,
 
 
 def main() -> None:
+    """v1.0 main loop — Claude-Code-shaped chat with mode-gated tool use.
+
+    No more interpretation picker. The user types a message, the model
+    streams a response, tools fire inline (with permission gates per
+    mode), and the next turn picks up where this one ended. Slash
+    commands handle meta-actions; `/why` exposes the old interpreter
+    flow on demand for users who want to inspect ambiguity.
+    """
     _need_libs()
     config.assert_configured()
     config.ensure_home()
@@ -854,19 +944,35 @@ def main() -> None:
     except Exception as e:
         console.print(f"[dim]index sync skipped: {e}[/]")
 
+    # v1.0 mode state. Seeded from legacy JANUS_APPROVAL for back-compat.
+    mode_state = permissions.ModeState(
+        current=permissions.normalize(config.APPROVAL_MODE)
+    )
+    if mode_state.current == permissions.BYPASS:
+        console.print(
+            "[red bold]⚠ bypassPermissions mode active —[/] "
+            "[red]every tool will run without asking. /mode default to disable.[/]"
+        )
+
     bindings = KeyBindings()
-    base_approver = _make_approver(console)
+    base_approver = _make_mode_approver(console, mode_state)
     state: dict[str, Any] = {
-        "plan": False, "quit": False, "parallel": False,
-        "conv": None, "verbose": False, "turn": 0, "stream": True,
+        "quit": False,
+        "conv": None,
+        "verbose": False,
+        "turn": 0,
+        "stream": True,
         "output_style": config.OUTPUT_STYLE,
         "custom_commands": {},
+        "mode_state": mode_state,
+        # v1.0: full conversation message list, persisted across turns
+        # so the model sees prior context. system message lives at index 0
+        # and is rebuilt by executor.chat() each turn.
+        "messages": [],
+        # Last user input — used by /why to re-interpret on demand.
+        "last_user_input": "",
     }
     history = FileHistory(str(config.HISTORY_FILE))
-    # Closure so the completer always sees the current custom-commands dict
-    # (it's populated below, after this line). reserve_space_for_menu=12
-    # gives roughly twice the default vertical room so descriptions are
-    # readable and the styled scrollbar handles overflow.
     session = PromptSession(
         history=history,
         completer=SlashCompleter(lambda: state.get("custom_commands") or {}),
@@ -874,10 +980,7 @@ def main() -> None:
         reserve_space_for_menu=12,
     )
 
-    # Phase 12: snapshot the memory preamble at session boot.
     cache_snap = cache.snapshot()
-    # Phase 13: bind a conversation. __main__ may have stashed one via
-    # --continue / --resume; otherwise start fresh.
     pending = conversation.take_pending()
     state["conv"] = pending if pending is not None else conversation.new()
     if pending is not None:
@@ -885,8 +988,17 @@ def main() -> None:
             f"[dim]   resumed conversation {state['conv'].id} "
             f"({len(state['conv'].turns)} turns)[/]\n"
         )
+        # Rebuild messages from saved turns so the model has prior context.
+        # We only restore user/assistant text — tool calls and tool results
+        # were ephemeral to the original turn.
+        for t in state["conv"].turns:
+            req = (t.get("request") or "").strip()
+            out = (t.get("output") or "").strip()
+            if req:
+                state["messages"].append({"role": "user", "content": req})
+            if out:
+                state["messages"].append({"role": "assistant", "content": out})
 
-    # Phase 15: load user-defined slash commands.
     try:
         state["custom_commands"] = commands_mod.load_all()
         n = len(state["custom_commands"])
@@ -897,22 +1009,19 @@ def main() -> None:
 
     prompt_text = FormattedText([("bold ansigreen", f" {branding.PROMPT_GLYPH}  ")])
     cont_text = FormattedText([("ansigray", "   …  ")])
+
     while not state["quit"]:
-        # Phase 14: status line above the prompt.
         st = statusline.render(statusline.StatusInputs(
             model=config.MODEL,
             turn=state.get("turn", 0),
-            plan_on=state.get("plan", False),
-            parallel_on=state.get("parallel", False),
+            plan_on=False,
+            parallel_on=False,
             verbose=state.get("verbose", False),
-            permission_mode=config.APPROVAL_MODE,
+            permission_mode=mode_state.current,
             conv_turns=len(state["conv"].turns) if state.get("conv") else 0,
         ))
         console.print(f"[dim]{st}[/]")
         try:
-            # Phase 14: backslash-continuation multi-line input. prompt_toolkit
-            # also supports its own `multiline=True` mode (Esc+Enter to submit),
-            # but backslash matches the basic CLI's affordance.
             line = session.prompt(prompt_text)
             collected = []
             while line.endswith("\\") and not line.endswith("\\\\"):
@@ -931,159 +1040,66 @@ def main() -> None:
             break
         if _dispatch(console, req, state):
             continue
-        # Phase 15: a custom slash command stashed a rewritten request.
         if state.get("_pending_custom"):
             req = state.pop("_pending_custom")
+
+        state["last_user_input"] = req
 
         record: dict[str, Any] = {
             "ts": logger.now_iso(),
             "model": config.MODEL,
             "workspace": str(config.WORKSPACE),
             "request": req,
+            "mode": mode_state.current,
         }
 
-        # Phase 13: reset per-turn cost counters at the top of each request.
         cost.new_turn()
-        # Phase 14: per-turn counter for the status line.
         state["turn"] = state.get("turn", 0) + 1
 
-        # Interpret with memory + skill hints.
-        # Phase 12+13: cache snapshot is the long-term memory; the conversation
-        # recap is per-turn (it changes each turn) so we concatenate without
-        # mutating the snapshot.
         conv = state["conv"]
         preamble = cache_snap.preamble + conv.recent_context_block()
+
+        # Skill auto-attach: trusted-auto matches only. Non-auto matches
+        # are surfaced as a hint but never block the turn.
         all_skills = skills.list_skills()
         matches = skills.match(req, all_skills)
-        skill_hints = "\n".join(
-            f"- {s.name} ({s.state}): {s.description}" for s in matches[:5]
-        )
-        try:
-            t0 = time.time()
-            interps = interpreter.interpret(
-                req,
-                memory_preamble=preamble,
-                skill_hints=skill_hints,
-                tool_count=len(default_registry().names()),
-                skill_count=len(all_skills),
-            )
-            record["interpret_ms"] = int((time.time() - t0) * 1000)
-            record["interpretations"] = interps
-        except Exception as e:
-            console.print(f"[red]interpreter failed:[/] {e}")
-            record["error"] = f"interpret: {e}"
-            logger.write(record)
-            continue
-
-        if len(interps) == 1:
-            console.print("[dim](unambiguous — single interpretation)[/]")
-            _show_interpretations(console, interps)
-            chosen = interps[0]
-            record["choice"] = "auto-single"
-        else:
-            _show_interpretations(console, interps)
-            try:
-                ch = input(f"pick [1-{len(interps)}], (r)efine, (s)kip, (q)uit: ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                break
-            if ch == "q":
-                break
-            if ch == "r":
-                try:
-                    correction = input("what did you actually mean: ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    continue
-                record["choice"] = "refine"
-                record["correction"] = correction
-                chosen = {"label": "user-corrected", "action": correction, "risk": ""}
-            elif ch == "s":
-                record["choice"] = "skip"
-                chosen = {"label": "skip-clarification", "action": req, "risk": ""}
-            elif ch.isdigit() and 1 <= int(ch) <= len(interps):
-                record["choice"] = int(ch)
-                chosen = interps[int(ch) - 1]
-            else:
-                console.print("[red]invalid pick[/]")
-                continue
-
-        # Skill attach.
         attached_skill = None
-        if matches:
-            top = matches[0]
-            if top.state == "trusted-auto":
-                attached_skill = top
-                console.print(f"[dim]auto-attached skill:[/] {top.name}")
-            else:
-                _show_skill_table(console, matches[:5])
-                try:
-                    ch2 = input(
-                        f"attach skill? [1-{min(5, len(matches))} / enter to skip]: "
-                    ).strip()
-                except (EOFError, KeyboardInterrupt):
-                    ch2 = ""
-                if ch2.isdigit() and 1 <= int(ch2) <= min(5, len(matches)):
-                    attached_skill = matches[int(ch2) - 1]
+        for s in matches:
+            if s.state == "trusted-auto":
+                attached_skill = s
+                console.print(f"[dim]auto-attached skill:[/] {s.name}")
+                break
         if attached_skill:
             record["skill"] = attached_skill.name
             record["skill_state"] = attached_skill.state
+        elif matches:
+            names = ", ".join(s.name for s in matches[:3])
+            console.print(
+                f"[dim]matching skills (not auto):[/] {names} "
+                f"[dim](promote one to attach automatically)[/]"
+            )
 
-        # Plan or linear?
-        run_plan = state.get("plan")
-        plan_tree = None
-        if run_plan:
-            console.print("[dim]planning…[/]")
-            try:
-                plan_tree = planner.plan(
-                    chosen["action"],
-                    available_skills=[s.name for s in all_skills],
-                )
-                console.print(Panel(planner.render(plan_tree), title="plan",
-                                    border_style="green"))
-                record["plan"] = _serialize_plan(plan_tree)
-            except Exception as e:
-                console.print(f"[red]planner failed:[/] {e}")
-                plan_tree = None
+        caps = attached_skill.capabilities if attached_skill else CapabilitySet()
+        tools = default_registry(capabilities=caps)
+        approver = make_capability_aware(base_approver, caps)
 
-        # Execute.
-        console.print(f"[dim]   ┄ executing ┄[/]")
         try:
             t0 = time.time()
             step_renderer = _render_step_factory(console, state)
-            if plan_tree is not None:
-                rr = orchestrator.run(
-                    original_request=req,
-                    chosen_label=chosen["label"],
-                    chosen_action=chosen["action"],
-                    plan=plan_tree,
-                    base_approver=base_approver,
-                    on_step=step_renderer,
-                    on_leaf_start=lambda n: console.print(
-                        f"   [bold cyan]{branding.LEAF_START} leaf {n.id}[/] {n.goal}"),
-                    on_leaf_done=lambda lr: console.print(
-                        f"   [bold]{branding.TOOL_OK if not lr.error else branding.TOOL_FAIL} {lr.id}[/]"),
-                    memory_preamble=preamble,
-                    attached_skill=attached_skill,
-                    parallel=state.get("parallel", False),
-                    parent_id=record["ts"],
-                )
-                output = rr.final_output
-                trace = [{"leaf": lr.id, "trace": lr.trace,
-                          "error": lr.error} for lr in rr.leaves]
-            else:
-                caps = attached_skill.capabilities if attached_skill else CapabilitySet()
-                tools = default_registry(capabilities=caps)
-                approver = make_capability_aware(base_approver, caps)
-                output, trace = executor.execute(
-                    original_request=req,
-                    chosen_label=chosen["label"],
-                    chosen_action=chosen["action"],
-                    tools=tools,
-                    approver=approver,
-                    on_step=step_renderer,
-                    skill_body=(attached_skill.body if attached_skill else ""),
-                    memory_preamble=preamble,
-                    stream=state.get("stream", True),
-                )
+            output, trace = executor.chat(
+                messages=state["messages"],
+                user_input=req,
+                tools=tools,
+                approver=approver,
+                on_step=step_renderer,
+                skill_body=(attached_skill.body if attached_skill else ""),
+                memory_preamble=preamble,
+                mode=mode_state.current,
+                workspace=str(config.WORKSPACE),
+                tool_count=len(tools.names()),
+                skill_count=len(all_skills),
+                stream=state.get("stream", True),
+            )
             _flush_stream(console, state)
             record["execute_ms"] = int((time.time() - t0) * 1000)
             record["trace"] = trace
@@ -1094,27 +1110,24 @@ def main() -> None:
             logger.write(record)
             continue
 
-        # Phase 15: apply output style.
+        # Render any final text the model produced. Stream already wrote
+        # most of it; this is the markdown re-render for fenced code blocks
+        # etc. only when a long markdown-shaped reply came back without
+        # streaming, or when the user wants a different output style.
         rendered = output_styles.render(output, state.get("output_style", "markdown"))
-        console.print(Panel(
-            Markdown(rendered)
-            if state.get("output_style") == "markdown"
-               and "\n" in rendered and len(rendered) > 80
-            else rendered,
-            title="output", border_style="blue",
-        ))
-
-        try:
-            fb = input(f"   feedback  +good  -bad  enter to skip  {branding.PROMPT_GLYPH} ").strip()
-        except (EOFError, KeyboardInterrupt):
-            fb = ""
-        if fb in ("+", "-"):
-            record["feedback"] = "good" if fb == "+" else "bad"
+        if not state.get("stream", True) or not output:
+            # Streaming already painted it; only print again when we didn't.
+            if rendered.strip():
+                console.print()
+                console.print(
+                    Markdown(rendered)
+                    if state.get("output_style") == "markdown"
+                       and "\n" in rendered and len(rendered) > 80
+                    else rendered
+                )
 
         if attached_skill:
-            success = skill_evolution.resolve_success(
-                output, trace, record.get("feedback"),
-            )
+            success = skill_evolution.resolve_success(output, trace, None)
             try:
                 updated = skills.record_run(attached_skill.name, success=success)
             except Exception:
@@ -1127,11 +1140,10 @@ def main() -> None:
                 )
         logger.write(record)
 
-        # Phase 13: append to the conversation + persist.
         try:
             conv.add_turn(
                 request=req, output=output,
-                choice=record.get("choice"),
+                choice="chat",
                 skill=(attached_skill.name if attached_skill else None),
                 ts=record.get("ts"),
             )

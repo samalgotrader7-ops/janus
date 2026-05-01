@@ -43,6 +43,7 @@ class FsGrep(base.Tool):
         "required": ["pattern"],
     }
     dangerous = False
+    risk = "read"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         pattern = args.get("pattern", "")

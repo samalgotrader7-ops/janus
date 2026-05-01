@@ -62,6 +62,7 @@ class WebFetch(base.Tool):
         "required": ["url"],
     }
     dangerous = False
+    risk = "read"
 
     def run(self, args: dict, approver: Callable[[str, str], bool]) -> str:
         url: str = args["url"]

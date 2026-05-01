@@ -30,6 +30,7 @@ class NbRead(base.Tool):
         "required": ["path"],
     }
     dangerous = False
+    risk = "read"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         try:
@@ -82,6 +83,7 @@ class NbEdit(base.Tool):
         "required": ["path", "cell_index", "operation"],
     }
     dangerous = True
+    risk = "write"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         try:

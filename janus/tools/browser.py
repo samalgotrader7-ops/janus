@@ -80,6 +80,7 @@ class BrowserNavigate(base.Tool):
         "required": ["url"],
     }
     dangerous = False
+    risk = "exec"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         url = args.get("url", "")
@@ -104,6 +105,7 @@ class BrowserText(base.Tool):
         "required": ["url"],
     }
     dangerous = False
+    risk = "exec"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         url = args.get("url", "")
@@ -129,6 +131,7 @@ class BrowserSnapshot(base.Tool):
         "required": ["url"],
     }
     dangerous = False
+    risk = "exec"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         url = args.get("url", "")
@@ -149,6 +152,7 @@ class BrowserLinks(base.Tool):
         "required": ["url"],
     }
     dangerous = False
+    risk = "exec"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         url = args.get("url", "")
@@ -183,6 +187,7 @@ class BrowserGetImage(base.Tool):
         "required": ["url", "selector"],
     }
     dangerous = False
+    risk = "exec"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         url = args.get("url", "")

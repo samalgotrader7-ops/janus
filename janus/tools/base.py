@@ -34,13 +34,19 @@ class Tool:
     description: str = ""
     parameters: dict = {"type": "object", "properties": {}}
     dangerous: bool = False  # if True, run() must call approver before side-effects
+    # v1.0: risk class for the permission-mode matrix.
+    # "read" — pure observation; "write" — file/state mutation; "exec" —
+    # arbitrary code or external side effects. Subclasses override.
+    risk: str = "exec"
 
     def run(self, args: dict, approver: Approver) -> str:
         """Execute the tool. Return a string the model will read as observation.
 
-        approver(action_label, details, *, capability=(tool, verb, target)) -> bool:
+        approver(action_label, details, *, capability=(tool, verb, target),
+                 risk="read"|"write"|"exec") -> bool:
         If dangerous, call this before any side-effect. Returns False → return a
-        refusal string.
+        refusal string. The Registry injects `risk=` automatically based on the
+        tool's class attribute, so individual tools never need to pass it.
         """
         raise NotImplementedError
 
@@ -74,8 +80,17 @@ class Registry:
         tool = self._tools.get(name)
         if tool is None:
             return f"error: unknown tool '{name}'"
+        # v1.0: inject the tool's risk class into every approver call so
+        # the permission-mode approver can decide allow / ask / deny without
+        # each individual tool having to opt in.
+        risk = getattr(tool, "risk", "exec")
+
+        def tool_approver(action_label: str, details: str, **kw: Any) -> bool:
+            kw.setdefault("risk", risk)
+            return approver(action_label, details, **kw)
+
         try:
-            return tool.run(args, approver)
+            return tool.run(args, tool_approver)
         except Exception as e:
             # Errors are observations, not crashes. The model sees them
             # and can correct course.

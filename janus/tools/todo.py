@@ -44,6 +44,7 @@ class TodoRead(base.Tool):
     )
     parameters = {"type": "object", "properties": {}}
     dangerous = False
+    risk = "read"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         items = _read()
@@ -86,6 +87,7 @@ class TodoWrite(base.Tool):
         "required": ["todos"],
     }
     dangerous = False
+    risk = "write"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         todos = args.get("todos") or []

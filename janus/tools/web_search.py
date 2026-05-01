@@ -41,6 +41,7 @@ class WebSearch(base.Tool):
         "required": ["query"],
     }
     dangerous = False
+    risk = "read"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         provider = (config.WEB_SEARCH_PROVIDER or "brave").lower()

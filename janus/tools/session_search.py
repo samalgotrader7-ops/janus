@@ -27,6 +27,7 @@ class SessionSearch(base.Tool):
         "required": ["query"],
     }
     dangerous = False
+    risk = "read"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         query = args.get("query", "").strip()
@@ -61,6 +62,7 @@ class SessionRecent(base.Tool):
         },
     }
     dangerous = False
+    risk = "read"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         k = min(int(args.get("limit") or 10), 25)

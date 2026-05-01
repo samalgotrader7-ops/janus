@@ -37,6 +37,7 @@ class FsEdit(base.Tool):
         "required": ["path", "old_string", "new_string"],
     }
     dangerous = True
+    risk = "write"
 
     def run(self, args: dict, approver: Callable[..., bool]) -> str:
         try:
