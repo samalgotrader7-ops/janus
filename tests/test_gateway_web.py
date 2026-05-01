@@ -1,10 +1,10 @@
-"""Tests for Phase 11 — web gateway.
+"""Tests for the web gateway (v1.0 chat-shaped).
 
 The web module lazy-imports FastAPI; tests skip cleanly when it isn't
 installed. We verify:
   - host/port resolution and the non-localhost refusal rule
   - that serve() exits cleanly when FastAPI is missing
-  - (when FastAPI is present) the GET / and POST /run endpoints work
+  - (when FastAPI is present) GET /, GET /favicon.svg, POST /chat
 """
 from __future__ import annotations
 import pytest
@@ -48,10 +48,11 @@ def test_serve_without_fastapi_returns_clear_error(janus_home, monkeypatch, caps
 
 
 def test_serve_refuses_non_localhost_without_env(janus_home, monkeypatch, capsys):
-    # Stub fastapi import so we get past the dep check.
+    # Stub fastapi import so we get past the dep check. v1.0 _try_import_fastapi
+    # returns a 5-tuple (FastAPI, Body, HTMLResponse, JSONResponse, uvicorn).
     monkeypatch.setattr(
         web_mod, "_try_import_fastapi",
-        lambda: ("a", "b", "c", "d", "e", _FakeUvicorn()),
+        lambda: ("a", "b", "c", "d", _FakeUvicorn()),
     )
     monkeypatch.setattr(config, "WEB_HOST_OK", False)
     monkeypatch.setattr(config, "API_KEY", "test")  # assert_configured() pass
@@ -107,26 +108,47 @@ def test_favicon_route_serves_svg(janus_home):
 
 
 @pytest.mark.skipif(not _HAS_FASTAPI, reason="fastapi not installed")
-def test_run_endpoint_returns_interpretations(janus_home, fake_llm):
-    """POST /run drives the interpreter; we stub the LLM."""
+def test_chat_endpoint_returns_output(janus_home, fake_llm):
+    """v1.0: POST /chat drives executor.chat() against a session-scoped
+    messages list. Single LLM call returns assistant text directly."""
     from fastapi.testclient import TestClient
-    fake_llm.append({"content": '{"interpretations": ['
-                     '{"label": "lookup", "action": "do x", "risk": "low"}'
-                     ']}'})
+    fake_llm.append({"role": "assistant", "content": "hi back"})
     app = web_mod._build_app()
     c = TestClient(app)
-    r = c.post("/run", json={"request": "do something"})
+    r = c.post("/chat", json={"request": "hi", "session_id": "s1"})
     assert r.status_code == 200
     data = r.json()
-    assert "interpretations" in data
-    assert data["interpretations"][0]["label"] == "lookup"
+    assert data["output"] == "hi back"
+    assert data["session_id"] == "s1"
 
 
 @pytest.mark.skipif(not _HAS_FASTAPI, reason="fastapi not installed")
-def test_run_endpoint_rejects_empty_request(janus_home):
+def test_chat_endpoint_rejects_empty_request(janus_home):
     from fastapi.testclient import TestClient
     app = web_mod._build_app()
     c = TestClient(app)
-    r = c.post("/run", json={"request": ""})
+    r = c.post("/chat", json={"request": ""})
     assert r.status_code == 200
     assert "error" in r.json()
+
+
+@pytest.mark.skipif(not _HAS_FASTAPI, reason="fastapi not installed")
+def test_chat_endpoint_keeps_session_history(janus_home, fake_llm):
+    """Two requests with the same session_id should accumulate messages
+    in the per-session list — second turn's context includes the first."""
+    from fastapi.testclient import TestClient
+    fake_llm.append({"role": "assistant", "content": "first"})
+    fake_llm.append({"role": "assistant", "content": "second"})
+    # Reset session store so prior tests don't pollute.
+    web_mod._SESSIONS.clear()
+
+    app = web_mod._build_app()
+    c = TestClient(app)
+    c.post("/chat", json={"request": "one", "session_id": "abc"})
+    c.post("/chat", json={"request": "two", "session_id": "abc"})
+
+    msgs = web_mod._SESSIONS["abc"]
+    # system + user1 + assistant1 + user2 + assistant2
+    assert len(msgs) == 5
+    assert msgs[1]["content"] == "one"
+    assert msgs[3]["content"] == "two"

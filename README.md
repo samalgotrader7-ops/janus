@@ -131,7 +131,7 @@ again, or use Option A above.
 ### 4. Smoke test
 
 ```bash
-janus --version     # janus 1.0
+janus --version     # janus 1.1
 janus --logo        # prints the bifurcation logo
 janus --help        # subcommands and flags
 janus --doctor      # config + environment diagnostics
@@ -401,7 +401,7 @@ pip install -e ".[test]"
 pytest tests/ -q
 ```
 
-The suite is fast (~12 s for 390 tests as of v1.0) and uses no network
+The suite is fast (~12 s for 401 tests as of v1.1) and uses no network
 or LLM calls — `fake_llm` and `janus_home` fixtures isolate every run.
 
 ---

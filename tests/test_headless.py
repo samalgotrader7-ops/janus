@@ -1,4 +1,4 @@
-"""Tests for Phase 16 — headless mode + JSON output + exit codes."""
+"""Tests for headless mode — v1.0 chat-shaped + JSON output + exit codes."""
 from __future__ import annotations
 import json
 import subprocess
@@ -17,10 +17,8 @@ def _approve(*a, **kw):
 
 
 def test_headless_run_text_format(janus_home, fake_llm, capsys):
-    fake_llm.append({"content": json.dumps({"interpretations": [
-        {"label": "do x", "action": "do x", "risk": "low"},
-    ]})})
-    fake_llm.append({"content": "result text", "tool_calls": []})
+    # v1.0 chat() makes a single LLM call (no separate interpret pass).
+    fake_llm.append({"role": "assistant", "content": "result text"})
     rc = headless.run(prompt="please do x")
     out = capsys.readouterr().out
     assert rc == headless.EXIT_OK
@@ -28,30 +26,25 @@ def test_headless_run_text_format(janus_home, fake_llm, capsys):
 
 
 def test_headless_run_json_format_envelope(janus_home, fake_llm, capsys):
-    fake_llm.append({"content": json.dumps({"interpretations": [
-        {"label": "do x", "action": "do x", "risk": "low"},
-    ]})})
-    fake_llm.append({"content": "ok", "tool_calls": []})
+    fake_llm.append({"role": "assistant", "content": "ok"})
     rc = headless.run(prompt="x", output_format="json")
     out = capsys.readouterr().out
     assert rc == headless.EXIT_OK
     envelope = json.loads(out.strip())
     assert envelope["request"] == "x"
     assert envelope["output"] == "ok"
-    assert envelope["choice"] == "auto-first"
+    assert envelope["choice"] == "chat"
     assert "tokens" in envelope
     assert "trace" in envelope
+    # v1.0: no more "interpretations" field in the envelope.
+    assert "interpretations" not in envelope
 
 
 def test_headless_run_jsonl_format_one_line_per_step(janus_home, fake_llm, capsys):
-    fake_llm.append({"content": json.dumps({"interpretations": [
-        {"label": "do x", "action": "do x", "risk": "low"},
-    ]})})
-    fake_llm.append({"content": "done", "tool_calls": []})
+    fake_llm.append({"role": "assistant", "content": "done"})
     rc = headless.run(prompt="x", output_format="jsonl")
     lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
     assert rc == headless.EXIT_OK
-    # Each line is valid JSON.
     parsed = [json.loads(l) for l in lines]
     types = [p.get("type") for p in parsed]
     # Final line is the output envelope.
@@ -73,21 +66,21 @@ def test_headless_run_unknown_format_is_usage_error(janus_home, capsys):
     assert "output-format" in err
 
 
-def test_headless_run_interpreter_failure_is_runtime_error(
+def test_headless_run_executor_failure_is_runtime_error(
     janus_home, fake_llm, capsys,
 ):
-    # Empty queue → fake_llm raises RuntimeError when interpreter calls it.
+    # Empty queue → fake_llm raises RuntimeError when chat() calls it.
     rc = headless.run(prompt="x")
     err = capsys.readouterr().err
     assert rc == headless.EXIT_RUNTIME_ERROR
-    assert "interpreter error" in err
+    assert "executor error" in err
 
 
 def test_headless_no_color_strips_ansi(janus_home, fake_llm, capsys):
-    fake_llm.append({"content": json.dumps({"interpretations": [
-        {"label": "x", "action": "x", "risk": "low"},
-    ]})})
-    fake_llm.append({"content": "\033[32mgreen\033[0m text", "tool_calls": []})
+    fake_llm.append({
+        "role": "assistant",
+        "content": "\033[32mgreen\033[0m text",
+    })
     rc = headless.run(prompt="x", no_color=True)
     out = capsys.readouterr().out
     assert rc == headless.EXIT_OK
@@ -97,10 +90,7 @@ def test_headless_no_color_strips_ansi(janus_home, fake_llm, capsys):
 
 def test_headless_persists_conversation(janus_home, fake_llm):
     from janus import conversation
-    fake_llm.append({"content": json.dumps({"interpretations": [
-        {"label": "x", "action": "x", "risk": "low"},
-    ]})})
-    fake_llm.append({"content": "done", "tool_calls": []})
+    fake_llm.append({"role": "assistant", "content": "done"})
     headless.run(prompt="hi")
     items = conversation.list_all()
     assert len(items) == 1

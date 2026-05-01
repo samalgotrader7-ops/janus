@@ -40,8 +40,13 @@ from typing import Any
 
 import requests
 
-from .. import config, interpreter, executor, logger, memory
+from .. import config, executor, logger, memory, skills, permissions
 from ..tools import default_registry, make_capability_aware, CapabilitySet
+
+
+# Per-sender conversation state. Keyed by phone number. In-process; restart
+# loses sessions. v1.x can persist alongside ~/.janus/conversations/.
+_SESSIONS: dict[str, list[dict]] = {}
 
 
 _GRAPH_URL = "https://graph.facebook.com/v20.0"
@@ -105,9 +110,24 @@ def parse_inbound(body: dict) -> list[dict]:
     return out
 
 
+def _make_whatsapp_approver(mode: str):
+    """Mode-aware approver. ASK becomes DENY because there's no inline
+    approval UI on WhatsApp. Use acceptEdits/bypassPermissions via
+    JANUS_APPROVAL or attach a skill with capability tokens."""
+    def approver(action_label: str, details: str, **kw) -> bool:
+        risk = kw.get("risk") or permissions.risk_from_verb(
+            (kw.get("capability") or (None, "", None))[1]
+        )
+        decision = permissions.decide(risk, mode)
+        if decision == permissions.ALLOW:
+            return True
+        return False
+    return approver
+
+
 def _handle_inbound(msg: dict) -> str | None:
-    """Run interpreter+executor for one inbound message. Returns the reply
-    text (or None to swallow)."""
+    """v1.0 chat-shaped handler: run executor.chat() for one inbound message
+    against this sender's messages list. Returns the reply text (or None)."""
     sender = msg.get("from", "")
     text = msg.get("text", "")
     allow = _allowed_numbers()
@@ -116,37 +136,35 @@ def _handle_inbound(msg: dict) -> str | None:
     if not text:
         return None
 
-    preamble = memory.prepend_for_prompt()
-    try:
-        interps = interpreter.interpret(
-            text, memory_preamble=preamble, skill_hints="",
-        )
-    except Exception as e:
-        return f"interpreter error: {e}"
-
-    chosen = interps[0] if interps else {"label": "raw", "action": text, "risk": ""}
-
-    def deny_approver(*a, **kw):
-        return False  # gateway has no TTY for approval
-
+    messages = _SESSIONS.setdefault(sender, [])
+    mode = permissions.normalize(config.APPROVAL_MODE)
+    base_approver = _make_whatsapp_approver(mode)
     caps = CapabilitySet()
     tools = default_registry(capabilities=caps)
-    approver = make_capability_aware(deny_approver, caps)
+    approver = make_capability_aware(base_approver, caps)
+    preamble = memory.prepend_for_prompt()
 
     record: dict[str, Any] = {
-        "ts": logger.now_iso(), "model": config.MODEL,
-        "workspace": str(config.WORKSPACE), "request": text,
-        "gateway": "whatsapp", "sender": sender,
-        "interpretations": interps, "choice": "auto-first",
+        "ts": logger.now_iso(),
+        "model": config.MODEL,
+        "workspace": str(config.WORKSPACE),
+        "request": text,
+        "gateway": "whatsapp",
+        "sender": sender,
+        "mode": mode,
     }
     try:
-        output, trace = executor.execute(
-            original_request=text,
-            chosen_label=chosen["label"],
-            chosen_action=chosen["action"],
+        output, trace = executor.chat(
+            messages=messages,
+            user_input=text,
             tools=tools,
             approver=approver,
             memory_preamble=preamble,
+            mode=mode,
+            workspace=str(config.WORKSPACE),
+            tool_count=len(tools.names()),
+            skill_count=len(skills.list_skills()),
+            stream=False,
         )
         record["output"] = output
         record["trace"] = trace

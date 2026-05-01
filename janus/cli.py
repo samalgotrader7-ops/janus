@@ -1,4 +1,10 @@
-"""cli.py -- basic terminal UI (input() loop). cli_rich provides the polished one."""
+"""cli.py -- basic terminal UI (input() loop). cli_rich provides the polished one.
+
+v1.0: Claude-Code-shaped chat loop. The interpretation picker moved to
+the /why slash command. Mode-aware approver consults permissions.decide().
+Mirror of cli_rich's behavior in plain ANSI for users without
+prompt_toolkit/rich installed.
+"""
 from __future__ import annotations
 import sys
 import time
@@ -8,7 +14,7 @@ from . import config, interpreter, executor, logger, memory, index, skills
 from . import eval as eval_mod, planner, orchestrator, skill_evolution
 from . import skills_market, hooks, cache, branding, conversation, cost
 from . import statusline, commands as commands_mod, doctor, init_codebase
-from . import output_styles
+from . import output_styles, permissions
 from .mcp import client as mcp_client
 from .tools import default_registry, make_capability_aware, CapabilitySet
 
@@ -20,10 +26,14 @@ class C:
 
 
 _RUN_STATE: dict = {
-    "plan": False, "parallel": False, "conv": None,
+    "conv": None,
     "verbose": False, "turn": 0,
     "output_style": config.OUTPUT_STYLE,
     "custom_commands": {},  # populated at session start
+    "mode_state": permissions.ModeState(),
+    # v1.0: full conversation message list across turns.
+    "messages": [],
+    "last_user_input": "",
 }
 
 
@@ -139,14 +149,30 @@ def prompt_skill_attach(matches):
     return None
 
 
-def make_approver():
-    mode = config.APPROVAL_MODE
-    def approver(label, details):
-        if mode == "auto":
-            print(f"{C.DIM}[auto] {label}{C.R}"); return True
-        if mode == "dry-run":
-            print(f"{C.YELLOW}[dry-run] {label}{C.R}\n  {details}"); return False
-        print(f"\n{C.YELLOW}[approval] {C.BOLD}{label}{C.R}")
+def make_mode_approver(mode_state: permissions.ModeState):
+    """v1.0 approver: consults permission mode + tool risk class.
+
+    Same matrix as cli_rich, plain ANSI rendering.
+    """
+    def approver(label, details, **kw):
+        risk = kw.get("risk") or permissions.risk_from_verb(
+            (kw.get("capability") or (None, "", None))[1]
+        )
+        decision = permissions.decide(risk, mode_state.current)
+
+        if decision == permissions.ALLOW:
+            return True
+        if decision == permissions.DENY:
+            print(
+                f"  {C.YELLOW}✗ {label}{C.R} "
+                f"{C.DIM}blocked by mode '{mode_state.current}' (risk={risk}){C.R}"
+            )
+            return False
+        # ASK — show the panel + y/N.
+        print(
+            f"\n{C.YELLOW}[approval] {C.BOLD}{label}{C.R}  "
+            f"{C.DIM}(risk={risk}, mode={mode_state.current}){C.R}"
+        )
         for line in details.splitlines():
             print(f"  {line}")
         try:
@@ -154,6 +180,10 @@ def make_approver():
         except (EOFError, KeyboardInterrupt):
             return False
     return approver
+
+
+# Back-compat alias for any external caller.
+make_approver = make_mode_approver
 
 
 def render_step(step):
@@ -223,6 +253,10 @@ def handle_command(line):
         _RUN_STATE["_pending_custom"] = rendered
         return False  # NOT a built-in: main loop reads _pending_custom
 
+    if cmd == "/mode":
+        return _cmd_mode(arg)
+    if cmd == "/why":
+        return _cmd_why()
     if cmd == "/workspace":
         return _cmd_workspace(arg)
     if cmd == "/analyze":
@@ -239,10 +273,6 @@ def handle_command(line):
         return _cmd_skill_new(arg)
     if cmd == "/eval":
         return _cmd_eval(arg)
-    if cmd == "/plan":
-        return _cmd_plan(arg)
-    if cmd == "/parallel":
-        return _cmd_parallel(arg)
     if cmd == "/mcp":
         return _cmd_mcp(arg)
     if cmd == "/cost":
@@ -279,9 +309,86 @@ def handle_command(line):
     if cmd == "/triggers":
         return _cmd_triggers()
     if cmd == "/help":
-        print("/workspace /memory /search /skills /promote /skill {new|review|import} /cost /clear /compact /resume [id] /continue /eval [--last N] [--skill <n>] /plan /parallel /mcp {list|connect|disconnect} /triggers /analyze q")
+        print("/mode /why /workspace /memory /search /skills /promote /skill {new|review|import} /cost /clear /compact /resume [id] /continue /eval [--last N] [--skill <n>] /mcp {list|connect|disconnect} /triggers /analyze q")
         return True
     print(f"  {C.RED}unknown: {cmd}{C.R}")
+    return True
+
+
+def _cmd_mode(arg: str) -> bool:
+    """`/mode [name]` — show or switch the active permission mode."""
+    mode_state: permissions.ModeState = _RUN_STATE["mode_state"]
+    target = arg.strip()
+    if not target:
+        rows = [
+            (permissions.DEFAULT, "read auto · write/exec ask"),
+            (permissions.ACCEPT_EDITS, "read+write auto · exec ask"),
+            (permissions.PLAN, "read auto · write/exec DENY"),
+            (permissions.BYPASS, "everything auto · no prompts"),
+        ]
+        print()
+        for name, desc in rows:
+            marker = "● " if name == mode_state.current else "  "
+            color = C.MAGENTA if name == mode_state.current else C.R
+            print(f"  {color}{marker}{name:<18}{C.R}  {C.DIM}{desc}{C.R}")
+        print(f"\n  {C.DIM}usage: /mode <name>  ·  current: {C.BOLD}{mode_state.current}{C.R}")
+        return True
+    normalized = permissions.normalize(target)
+    if normalized == permissions.DEFAULT and target.lower() not in (
+        "manual", "default"
+    ) and target not in permissions.ALL_MODES:
+        print(
+            f"  {C.RED}unknown mode: {target}{C.R}  "
+            f"{C.DIM}valid: {', '.join(permissions.ALL_MODES)}{C.R}"
+        )
+        return True
+    mode_state.set(normalized)
+    color = C.RED if normalized == permissions.BYPASS else C.GREEN
+    print(f"  {color}mode -> {mode_state.current}{C.R}")
+    if normalized == permissions.BYPASS:
+        print(
+            f"  {C.RED}warning:{C.R} every tool will run without asking. "
+            f"{C.DIM}/mode default to disable.{C.R}"
+        )
+    logger.write({
+        "ts": logger.now_iso(),
+        "type": "mode_switch",
+        "new_mode": normalized,
+    })
+    return True
+
+
+def _cmd_why() -> bool:
+    """`/why` — re-interpret the last user message and surface 2-3 candidates."""
+    last = _RUN_STATE.get("last_user_input", "")
+    if not last:
+        print(f"  {C.DIM}nothing to interpret yet — type a message first{C.R}")
+        return True
+    print(
+        f"  {C.DIM}re-interpreting:{C.R} "
+        f"{last[:80]}{'...' if len(last) > 80 else ''}"
+    )
+    conv = _RUN_STATE.get("conv")
+    cache_snap = cache.snapshot()
+    preamble = cache_snap.preamble + (conv.recent_context_block() if conv else "")
+    try:
+        interps = interpreter.interpret(
+            last,
+            memory_preamble=preamble,
+            tool_count=len(default_registry().names()),
+            skill_count=len(skills.list_skills()),
+        )
+    except Exception as e:
+        print(f"  {C.RED}interpreter failed: {e}{C.R}")
+        return True
+    if not interps:
+        print(f"  {C.DIM}(no interpretations returned){C.R}")
+        return True
+    show_interpretations(interps)
+    print(
+        f"  {C.DIM}This is read-only — none of these were executed. "
+        f"Send a new message to act.{C.R}"
+    )
     return True
 
 
@@ -777,13 +884,20 @@ def _cmd_triggers():
 
 
 def analyze():
-    records = [r for r in logger.read_all() if r.get("interpretations")]
+    # v1.0: interactions no longer always carry `interpretations`. Count any
+    # record that has either a request (chat-shaped) or interpretations
+    # (legacy interpretation-confirmed flow).
+    records = [
+        r for r in logger.read_all()
+        if r.get("request") or r.get("interpretations")
+    ]
     if not records:
         print("  no log yet."); return
     n = len(records)
     choices: dict = {}
     for r in records:
-        choices[str(r.get("choice"))] = choices.get(str(r.get("choice")), 0) + 1
+        key = str(r.get("choice") or "—")
+        choices[key] = choices.get(key, 0) + 1
     print(f"\n  {C.BOLD}log analysis{C.R}")
     print(f"  total interactions: {n}")
     for k, v in sorted(choices.items()):
@@ -827,11 +941,15 @@ def maybe_propose_memory(req, output, cache_snap=None):
 
 
 def main():
+    """v1.0 main loop — Claude-Code-shaped chat with mode-gated tool use.
+
+    No more interpretation picker. Same shape as cli_rich's main(), in
+    plain ANSI for users without prompt_toolkit/rich.
+    """
     config.assert_configured()
     config.ensure_home()
     banner()
 
-    # Phase 11: SessionStart hook (observation; injected_context is logged).
     try:
         ctx = hooks.fire(hooks.SESSION_START, {"workspace": str(config.WORKSPACE)})
         if ctx.injected_context:
@@ -846,23 +964,33 @@ def main():
     except Exception as e:
         print(f"{C.DIM}index sync skipped: {e}{C.R}")
 
-    base_approver = make_approver()
+    # v1.0 mode state. Seeded from legacy JANUS_APPROVAL.
+    mode_state: permissions.ModeState = _RUN_STATE["mode_state"]
+    mode_state.set(permissions.normalize(config.APPROVAL_MODE))
+    if mode_state.current == permissions.BYPASS:
+        print(
+            f"{C.RED}{C.BOLD}WARNING:{C.R} {C.RED}bypassPermissions mode active — "
+            f"every tool will run without asking. /mode default to disable.{C.R}"
+        )
+    base_approver = make_mode_approver(mode_state)
 
-    # Phase 12: snapshot the memory preamble at session start. Reused below
-    # so the leading prompt bytes are byte-identical across turns and the
-    # provider's prompt cache hits.
     cache_snap = cache.snapshot()
 
-    # Phase 13: bind a conversation. __main__ may have stashed one via
-    # --continue / --resume; otherwise start fresh.
     pending = conversation.take_pending()
     _RUN_STATE["conv"] = pending if pending is not None else conversation.new()
     conv = _RUN_STATE["conv"]
     if pending is not None:
         print(f"{C.DIM}   resumed conversation {conv.id} "
               f"({len(conv.turns)} turns){C.R}\n")
+        # Rebuild messages from saved turns so the model has context.
+        for t in conv.turns:
+            req_t = (t.get("request") or "").strip()
+            out_t = (t.get("output") or "").strip()
+            if req_t:
+                _RUN_STATE["messages"].append({"role": "user", "content": req_t})
+            if out_t:
+                _RUN_STATE["messages"].append({"role": "assistant", "content": out_t})
 
-    # Phase 15: load user-defined slash commands from disk.
     try:
         _RUN_STATE["custom_commands"] = commands_mod.load_all()
         n = len(_RUN_STATE["custom_commands"])
@@ -872,14 +1000,13 @@ def main():
         _RUN_STATE["custom_commands"] = {}
 
     while True:
-        # Phase 14: status line above the prompt — model, tokens, mode flags.
         st = statusline.render(statusline.StatusInputs(
             model=config.MODEL,
             turn=_RUN_STATE.get("turn", 0),
-            plan_on=_RUN_STATE.get("plan", False),
-            parallel_on=_RUN_STATE.get("parallel", False),
+            plan_on=False,
+            parallel_on=False,
             verbose=_RUN_STATE.get("verbose", False),
-            permission_mode=config.APPROVAL_MODE,
+            permission_mode=mode_state.current,
             conv_turns=len(_RUN_STATE["conv"].turns) if _RUN_STATE.get("conv") else 0,
         ))
         print(f"{C.DIM}{st}{C.R}")
@@ -896,12 +1023,9 @@ def main():
             break
         if handle_command(req):
             continue
-        # Phase 15: a custom slash command stashed a rewritten request.
         if _RUN_STATE.get("_pending_custom"):
             req = _RUN_STATE.pop("_pending_custom")
-            print(f"{C.DIM}   /{req[:60]}...{C.R}" if len(req) > 60 else "")
 
-        # Phase 11: UserPromptSubmit hook can deny or rewrite the request.
         try:
             up = hooks.fire(hooks.USER_PROMPT_SUBMIT, {"request": req})
             if not up.allow:
@@ -913,110 +1037,59 @@ def main():
         except Exception:
             pass
 
+        _RUN_STATE["last_user_input"] = req
+
         record: dict[str, Any] = {
             "ts": logger.now_iso(), "model": config.MODEL,
             "workspace": str(config.WORKSPACE), "request": req,
+            "mode": mode_state.current,
         }
 
-        # Phase 13: reset per-turn cost counters at the top of each request.
         cost.new_turn()
-        # Phase 14: per-turn counter for the status line.
         _RUN_STATE["turn"] = _RUN_STATE.get("turn", 0) + 1
 
-        # Phase 12+13: cache snapshot is the long-term memory; the conversation
-        # recap is per-turn (it changes each turn) so we concatenate without
-        # mutating the snapshot.
         conv = _RUN_STATE["conv"]
         preamble = cache_snap.preamble + conv.recent_context_block()
+
+        # Skill auto-attach: trusted-auto only.
         all_skills = skills.list_skills()
         matches = skills.match(req, all_skills)
-        skill_hints = "\n".join(f"- {s.name} ({s.state}): {s.description}" for s in matches[:5])
-
-        try:
-            t0 = time.time()
-            interps = interpreter.interpret(
-                req,
-                memory_preamble=preamble,
-                skill_hints=skill_hints,
-                tool_count=len(default_registry().names()),
-                skill_count=len(all_skills),
-            )
-            record["interpret_ms"] = int((time.time() - t0) * 1000)
-            record["interpretations"] = interps
-        except Exception as e:
-            print(f"{C.RED}interpreter failed:{C.R} {e}")
-            record["error"] = f"interpret: {e}"
-            logger.write(record); continue
-
-        if len(interps) == 1:
-            print(f"{C.DIM}(unambiguous){C.R}")
-            show_interpretations(interps)
-            chosen = interps[0]; record["choice"] = "auto-single"
-        else:
-            show_interpretations(interps)
-            ch = prompt_choice(len(interps))
-            if ch == "q":
-                logger.write(record); break
-            if ch == "r":
-                try:
-                    correction = input("what did you actually mean: ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    logger.write(record); continue
-                record["choice"] = "refine"; record["correction"] = correction
-                chosen = {"label": "user-corrected", "action": correction, "risk": ""}
-            elif ch == "s":
-                record["choice"] = "skip"
-                chosen = {"label": "skip-clarification", "action": req, "risk": ""}
-            else:
-                record["choice"] = ch
-                chosen = interps[ch - 1]
-
-        attached_skill = prompt_skill_attach(matches) if matches else None
+        attached_skill = None
+        for s in matches:
+            if s.state == "trusted-auto":
+                attached_skill = s
+                print(f"{C.DIM}auto-attached skill:{C.R} {s.name}")
+                break
         if attached_skill:
             record["skill"] = attached_skill.name
             record["skill_state"] = attached_skill.state
-
-        plan_tree = None
-        if _RUN_STATE.get("plan"):
-            try:
-                print(f"{C.DIM}planning...{C.R}")
-                plan_tree = planner.plan(chosen["action"],
-                                         available_skills=[s.name for s in all_skills])
-                print(planner.render(plan_tree))
-                record["plan"] = _serialize_plan(plan_tree)
-            except Exception as e:
-                print(f"{C.RED}planner failed: {e}{C.R}"); plan_tree = None
+        elif matches:
+            names = ", ".join(s.name for s in matches[:3])
+            print(
+                f"{C.DIM}matching skills (not auto):{C.R} {names} "
+                f"{C.DIM}(promote one to attach automatically){C.R}"
+            )
 
         skill_caps = attached_skill.capabilities if attached_skill else CapabilitySet()
         tools = default_registry(capabilities=skill_caps)
         approver = make_capability_aware(base_approver, skill_caps)
 
-        print(f"\n{C.DIM}   ┄ executing ┄{C.R}")
         try:
             t0 = time.time()
-            if plan_tree is not None:
-                rr = orchestrator.run(
-                    original_request=req, chosen_label=chosen["label"],
-                    chosen_action=chosen["action"], plan=plan_tree,
-                    base_approver=base_approver, on_step=render_step,
-                    on_leaf_start=lambda n: print(f"   {C.BOLD}{branding.LEAF_START} leaf {n.id}{C.R} {n.goal}"),
-                    on_leaf_done=lambda lr: print(
-                        f"   {C.GREEN if not lr.error else C.RED}{branding.TOOL_OK if not lr.error else branding.TOOL_FAIL} {lr.id}{C.R}"),
-                    memory_preamble=preamble, attached_skill=attached_skill,
-                    parallel=_RUN_STATE.get("parallel", False),
-                    parent_id=record["ts"],
-                )
-                output = rr.final_output
-                trace = [{"leaf": lr.id, "trace": lr.trace, "error": lr.error}
-                         for lr in rr.leaves]
-            else:
-                output, trace = executor.execute(
-                    original_request=req, chosen_label=chosen["label"],
-                    chosen_action=chosen["action"], tools=tools, approver=approver,
-                    on_step=render_step,
-                    skill_body=(attached_skill.body if attached_skill else ""),
-                    memory_preamble=preamble,
-                )
+            output, trace = executor.chat(
+                messages=_RUN_STATE["messages"],
+                user_input=req,
+                tools=tools,
+                approver=approver,
+                on_step=render_step,
+                skill_body=(attached_skill.body if attached_skill else ""),
+                memory_preamble=preamble,
+                mode=mode_state.current,
+                workspace=str(config.WORKSPACE),
+                tool_count=len(tools.names()),
+                skill_count=len(all_skills),
+                stream=False,
+            )
             record["execute_ms"] = int((time.time() - t0) * 1000)
             record["trace"] = trace
             record["output"] = output
@@ -1025,13 +1098,11 @@ def main():
             record["error"] = f"execute: {e}"
             logger.write(record); continue
 
-        # Phase 15: apply output style (markdown/plain/terse/json).
-        output = output_styles.render(
+        # Apply output style and render.
+        rendered = output_styles.render(
             output, _RUN_STATE.get("output_style", "markdown"),
         )
-
-        # Output panel — bordered for visual clarity (mockup §design).
-        out_lines = output.splitlines() or [""]
+        out_lines = rendered.splitlines() or [""]
         max_w = min(80, max(40, max(len(l) for l in out_lines) + 4))
         bar = "─" * (max_w - 2)
         print(f"\n  {C.BOLD}{C.BLUE}┌{bar[:6]} output {bar[14:]}┐{C.R}")
@@ -1055,11 +1126,10 @@ def main():
                       f"consider /skill review {updated.name}{C.R}")
         logger.write(record)
 
-        # Phase 13: append to the conversation + persist for --continue.
         try:
             conv.add_turn(
                 request=req, output=output,
-                choice=record.get("choice"),
+                choice="chat",
                 skill=(attached_skill.name if attached_skill else None),
                 ts=record.get("ts"),
             )
@@ -1067,12 +1137,10 @@ def main():
         except Exception:
             pass
 
-        # If the conversation got long enough, hint to compact (don't auto).
         if len(conv.turns) >= config.COMPACT_THRESHOLD_TURNS:
             print(f"  {C.DIM}({len(conv.turns)} turns this conversation; "
                   f"consider /compact){C.R}")
 
-        # Phase 11: Stop / StopFailure hook fires after each turn.
         try:
             ev = hooks.STOP_FAILURE if record.get("error") else hooks.STOP
             hooks.fire(ev, {"request": req, "output": output, "ts": record["ts"]})
@@ -1086,7 +1154,7 @@ def main():
         maybe_propose_memory(req, output, cache_snap=cache_snap)
         print()
 
-    n = len([r for r in logger.read_all() if r.get("interpretations")])
+    n = len(logger.read_all())
     print(f"{C.DIM}{n} interactions logged at {config.LOG_FILE}{C.R}")
 
 

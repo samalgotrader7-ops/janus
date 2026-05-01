@@ -1,32 +1,33 @@
 """
-gateways/web.py — Phase 11: local web UI on FastAPI + HTMX.
+gateways/web.py — v1.0 chat-shaped local web UI on FastAPI.
 
 WHY:
-- A user-facing surface beyond the CLI/Telegram. Same interpreter +
-  executor, no business logic in the gateway.
+A web surface for the same `executor.chat()` loop the CLI uses. Same
+permission model, same skills, same hooks. No business logic in the
+gateway.
 
 SAFETY POSTURE:
 - Binds 127.0.0.1 by default. Refuses non-localhost unless the user
   explicitly passes `--host` AND sets `JANUS_WEB_HOST_OK=1` (the env
   var is the deliberate friction).
-- Approval prompts go through a per-request approval queue: if the
-  underlying executor needs y/N, the request fails fast with a hint
-  to re-run with explicit capabilities. Phase 11 does not implement an
-  in-browser approval UX; that's Phase 12+.
-- All output is escaped before rendering.
+- The web approver is mode-aware via permissions.decide(). ASK becomes
+  DENY because the page has no inline approval UI. Use acceptEdits or
+  bypassPermissions via JANUS_APPROVAL, or attach a skill with
+  capability tokens, to authorize writes/exec.
+- All text is escaped before rendering.
 
 DEPENDENCIES:
-- FastAPI is OPTIONAL. Lazy-imported. If missing, the `serve()` entry
-  point prints a clear hint instead of crashing the agent.
+- FastAPI is OPTIONAL. Lazy-imported. If missing, `serve()` prints a
+  hint instead of crashing the agent.
 """
 
 from __future__ import annotations
 import html
-import json
 import time
+import uuid
 from typing import Any
 
-from .. import config, interpreter, executor, logger, memory, skills, hooks
+from .. import config, executor, logger, memory, skills, hooks, permissions
 from .. import branding
 from ..tools import default_registry, make_capability_aware, CapabilitySet
 
@@ -38,12 +39,31 @@ _FASTAPI_HINT = (
 
 def _try_import_fastapi():
     try:
-        from fastapi import FastAPI, Body, HTTPException
+        from fastapi import FastAPI, Body
         from fastapi.responses import HTMLResponse, JSONResponse
         import uvicorn
-        return FastAPI, Body, HTTPException, HTMLResponse, JSONResponse, uvicorn
+        return FastAPI, Body, HTMLResponse, JSONResponse, uvicorn
     except ImportError:
         return None
+
+
+# Per-session conversation state. Keyed by browser-generated session ID.
+# In-process only — restart loses sessions. v1.x can persist.
+_SESSIONS: dict[str, list[dict]] = {}
+
+
+def _make_web_approver(mode: str):
+    """Mode-aware approver for the web gateway. ASK falls through to DENY
+    because there's no inline approval UI yet."""
+    def approver(action_label: str, details: str, **kw) -> bool:
+        risk = kw.get("risk") or permissions.risk_from_verb(
+            (kw.get("capability") or (None, "", None))[1]
+        )
+        decision = permissions.decide(risk, mode)
+        if decision == permissions.ALLOW:
+            return True
+        return False  # ASK and DENY both fall to deny.
+    return approver
 
 
 _INDEX_HTML = """<!doctype html>
@@ -52,10 +72,9 @@ _INDEX_HTML = """<!doctype html>
 <title>janus &mdash; local web UI</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
-body { font-family: system-ui, sans-serif; max-width: 800px;
+body { font-family: system-ui, sans-serif; max-width: 820px;
        margin: 24px auto; padding: 16px; color: #222; }
-.brand { display: flex; align-items: center; gap: 18px;
-         color: __BRAND__; }
+.brand { display: flex; align-items: center; gap: 18px; color: __BRAND__; }
 .brand svg { width: 56px; height: 56px; flex: none; }
 .brand h1 { margin: 0; font-size: 1.6em; font-weight: 600;
             color: __BRAND__; line-height: 1.05; }
@@ -66,21 +85,27 @@ body { font-family: system-ui, sans-serif; max-width: 800px;
 .status { color: #666; font-size: 0.85em; margin: 16px 0 4px 0;
           font-family: ui-monospace, monospace; }
 .status span { margin-right: 18px; }
-textarea { width: 100%; height: 6em; font-family: ui-monospace, monospace;
-           font-size: 0.95em; padding: 8px; }
-.interps { margin-top: 12px; }
-.interp { border: 1px solid #aaa; padding: 12px; margin: 8px 0;
-          border-radius: 4px; position: relative; }
-.interp .label { font-weight: 600; }
-.interp .risk  { color: #b08000; font-size: 0.85em; position: absolute;
-                 top: 8px; right: 12px; font-family: ui-monospace, monospace; }
-.output { margin-top: 16px; background: #f6f6f6; padding: 12px;
-          white-space: pre-wrap; border-left: 3px solid __BRAND__;
-          font-family: ui-monospace, monospace; font-size: 0.9em; }
-.muted  { color: #888; font-size: 0.85em; }
-button { padding: 6px 14px; border-radius: 3px; cursor: pointer;
-         border: 1px solid #888; background: #fff; }
-button:hover { border-color: __BRAND__; color: __BRAND__; }
+#chat { margin: 16px 0; max-height: 60vh; overflow-y: auto;
+        border: 1px solid #e0e0e0; border-radius: 6px; padding: 12px;
+        background: #fafafa; }
+.turn { margin-bottom: 14px; }
+.turn .who { font-size: 0.78em; font-weight: 600; color: #666;
+             margin-bottom: 4px; text-transform: uppercase;
+             letter-spacing: 0.05em; }
+.turn.user .who { color: __BRAND__; }
+.turn .body { white-space: pre-wrap; font-family: ui-monospace, monospace;
+              font-size: 0.92em; line-height: 1.45; }
+.turn.assistant .body { color: #222; }
+form { display: flex; gap: 8px; }
+textarea { flex: 1; height: 5em; font-family: ui-monospace, monospace;
+           font-size: 0.95em; padding: 8px;
+           border: 1px solid #ccc; border-radius: 4px; }
+button { padding: 8px 18px; border-radius: 4px; cursor: pointer;
+         border: 1px solid __BRAND__; background: __BRAND__; color: #fff;
+         font-weight: 600; }
+button:hover { opacity: 0.9; }
+.muted { color: #888; font-size: 0.85em; }
+.err { color: #a00; }
 </style>
 </head><body>
 <header class="brand">
@@ -91,75 +116,73 @@ button:hover { border-color: __BRAND__; color: __BRAND__; }
 <p class="status">
   <span>model &middot; __MODEL__</span>
   <span>workspace &middot; __WORKSPACE__</span>
+  <span>mode &middot; __MODE__</span>
 </p>
-<form id="form" method="post" action="/run">
-  <textarea name="request" placeholder="What do you want done?"
-            autofocus></textarea>
-  <p><button type="submit">interpret</button></p>
+<div id="chat"></div>
+<form id="form" method="post" action="/chat">
+  <textarea name="request" placeholder="message janus..." autofocus></textarea>
+  <button type="submit">send</button>
 </form>
-<div id="result"></div>
 <script>
-const f = document.getElementById('form');
-f.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const fd = new FormData(f);
-  const r = document.getElementById('result');
-  r.innerHTML = '<p class="muted">working...</p>';
-  const resp = await fetch('/run', {
-    method: 'POST',
-    body: JSON.stringify({request: fd.get('request')}),
-    headers: {'content-type': 'application/json'}
-  });
-  const data = await resp.json();
-  if (data.error) {
-    r.innerHTML = '<p style="color:#a00">'
-      + data.error.replace(/[<>&]/g, c=>({ '<':'&lt;','>':'&gt;','&':'&amp;'}[c]))
-      + '</p>';
-    return;
+const SESSION_ID = (function() {
+  let id = sessionStorage.getItem('janus_session');
+  if (!id) {
+    id = (crypto.randomUUID && crypto.randomUUID()) || Math.random().toString(36).slice(2);
+    sessionStorage.setItem('janus_session', id);
   }
-  let html = '<div class="interps"><h3>interpretations</h3>';
-  data.interpretations.forEach((i, idx) => {
-    html += '<div class="interp"><div class="label">['
-      + (idx+1) + '] ' + i.label
-      + '</div><div>' + i.action
-      + '</div><div class="risk">risk: ' + i.risk + '</div>'
-      + '<button onclick="pick(' + idx + ')">run this</button>'
-      + '</div>';
-  });
-  html += '</div>';
-  html += '<div id="run-result"></div>';
-  r.innerHTML = html;
-  window._lastInterps = data.interpretations;
-  window._lastReq = fd.get('request');
-});
-async function pick(i) {
-  const rr = document.getElementById('run-result');
-  rr.innerHTML = '<p class="muted">running...</p>';
-  const resp = await fetch('/execute', {
-    method: 'POST',
-    body: JSON.stringify({
-      request: window._lastReq,
-      interpretation: window._lastInterps[i]
-    }),
-    headers: {'content-type': 'application/json'}
-  });
-  const d = await resp.json();
-  if (d.error) {
-    rr.innerHTML = '<div class="output" style="color:#a00">'
-      + d.error.replace(/[<>&]/g, c=>({ '<':'&lt;','>':'&gt;','&':'&amp;'}[c]))
-      + '</div>';
-    return;
-  }
-  rr.innerHTML = '<div class="output">'
-    + d.output.replace(/[<>&]/g, c=>({ '<':'&lt;','>':'&gt;','&':'&amp;'}[c]))
-    + '</div>';
+  return id;
+})();
+const chat = document.getElementById('chat');
+const form = document.getElementById('form');
+
+function escapeHTML(s) {
+  return String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
 }
+function appendTurn(role, body, isError) {
+  const div = document.createElement('div');
+  div.className = 'turn ' + role;
+  div.innerHTML = '<div class="who">' + role + '</div>' +
+                  '<div class="body' + (isError ? ' err' : '') + '">' +
+                  escapeHTML(body) + '</div>';
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(form);
+  const req = (fd.get('request') || '').toString().trim();
+  if (!req) return;
+  appendTurn('user', req);
+  form.querySelector('textarea').value = '';
+  const pending = appendTurn('assistant', '...');
+
+  try {
+    const resp = await fetch('/chat', {
+      method: 'POST',
+      body: JSON.stringify({request: req, session_id: SESSION_ID}),
+      headers: {'content-type': 'application/json'}
+    });
+    const data = await resp.json();
+    if (data.error) {
+      pending.querySelector('.body').textContent = data.error;
+      pending.querySelector('.body').classList.add('err');
+    } else {
+      pending.querySelector('.body').textContent = data.output || '(no output)';
+    }
+  } catch (e) {
+    pending.querySelector('.body').textContent = 'request failed: ' + e;
+    pending.querySelector('.body').classList.add('err');
+  }
+});
 </script>
 </body></html>
 """
 
 
 def _index_page() -> str:
+    mode = permissions.normalize(config.APPROVAL_MODE)
     return (
         _INDEX_HTML
         .replace("__LOGO_SVG__", branding.svg_logo("currentColor"))
@@ -168,18 +191,17 @@ def _index_page() -> str:
         .replace("__TAGLINE__", html.escape(branding.TAGLINE))
         .replace("__MODEL__", html.escape(config.MODEL))
         .replace("__WORKSPACE__", html.escape(str(config.WORKSPACE)))
+        .replace("__MODE__", html.escape(mode))
     )
 
 
 def _build_app():
-    """Build the FastAPI app. Returns the app object, or raises ImportError
-    via the caller when FastAPI is missing."""
     deps = _try_import_fastapi()
     if deps is None:
         raise ImportError(_FASTAPI_HINT)
-    FastAPI, Body, HTTPException, HTMLResponse, JSONResponse, _uvicorn = deps
+    FastAPI, Body, HTMLResponse, JSONResponse, _uvicorn = deps
 
-    app = FastAPI(title="janus", version="0.11")
+    app = FastAPI(title="janus", version=branding.VERSION)
 
     @app.get("/")
     async def index():
@@ -187,19 +209,21 @@ def _build_app():
 
     @app.get("/favicon.svg")
     async def favicon():
-        # Browsers ignore page CSS for favicons, so the favicon uses the
-        # literal brand color rather than `currentColor`.
         return HTMLResponse(
             branding.svg_logo(branding.BRAND_COLOR),
             media_type="image/svg+xml",
         )
 
-    @app.post("/run")
-    async def run(body: dict = Body(default={})):
-        req = (body.get("request") or "").strip() if isinstance(body, dict) else ""
+    @app.post("/chat")
+    async def chat(body: dict = Body(default={})):
+        if not isinstance(body, dict):
+            body = {}
+        req = (body.get("request") or "").strip()
+        sid = (body.get("session_id") or "").strip() or uuid.uuid4().hex
         if not req:
             return JSONResponse({"error": "empty request"})
-        # Phase 11: UserPromptSubmit hook can deny / rewrite.
+
+        # UserPromptSubmit hook can deny / rewrite.
         try:
             up = hooks.fire(hooks.USER_PROMPT_SUBMIT, {"request": req})
             if not up.allow:
@@ -209,65 +233,53 @@ def _build_app():
         except Exception:
             pass
 
-        preamble = memory.prepend_for_prompt()
-        try:
-            interps = interpreter.interpret(
-                req, memory_preamble=preamble, skill_hints="",
-            )
-        except Exception as e:
-            return JSONResponse({"error": f"interpret failed: {e}"})
-        return JSONResponse({"interpretations": interps})
+        messages = _SESSIONS.setdefault(sid, [])
 
-    @app.post("/execute")
-    async def execute(body: dict = Body(default={})):
-        if not isinstance(body, dict):
-            body = {}
-        req = (body.get("request") or "").strip()
-        chosen = body.get("interpretation") or {}
-        if not req or not chosen.get("action"):
-            return JSONResponse({"error": "missing request or interpretation"})
-
-        # Approver: in the web gateway we can't prompt. Auto-deny dangerous
-        # actions outside capabilities — the user must attach a skill or
-        # rerun in CLI for ad-hoc dangerous work.
-        def web_approver(label, details, **kw):
-            return False
-
+        mode = permissions.normalize(config.APPROVAL_MODE)
+        base_approver = _make_web_approver(mode)
         caps = CapabilitySet()
         tools = default_registry(capabilities=caps)
-        approver = make_capability_aware(web_approver, caps)
+        approver = make_capability_aware(base_approver, caps)
         preamble = memory.prepend_for_prompt()
 
         record: dict[str, Any] = {
-            "ts": logger.now_iso(), "model": config.MODEL,
-            "workspace": str(config.WORKSPACE), "request": req,
+            "ts": logger.now_iso(),
+            "model": config.MODEL,
+            "workspace": str(config.WORKSPACE),
+            "request": req,
             "gateway": "web",
+            "session_id": sid,
+            "mode": mode,
         }
+
         try:
             t0 = time.time()
-            output, trace = executor.execute(
-                original_request=req,
-                chosen_label=chosen.get("label", ""),
-                chosen_action=chosen["action"],
+            output, trace = executor.chat(
+                messages=messages,
+                user_input=req,
                 tools=tools,
                 approver=approver,
                 memory_preamble=preamble,
+                mode=mode,
+                workspace=str(config.WORKSPACE),
+                tool_count=len(tools.names()),
+                skill_count=len(skills.list_skills()),
+                stream=False,
             )
             record["execute_ms"] = int((time.time() - t0) * 1000)
             record["output"] = output
             record["trace"] = trace
-            record["interpretations"] = [chosen]
-            record["choice"] = "web"
         except Exception as e:
             record["error"] = f"execute: {e}"
             logger.write(record)
             return JSONResponse({"error": str(e)})
+
         logger.write(record)
         try:
             hooks.fire(hooks.STOP, {"request": req, "output": output})
         except Exception:
             pass
-        return JSONResponse({"output": output})
+        return JSONResponse({"output": output, "session_id": sid})
 
     return app
 
