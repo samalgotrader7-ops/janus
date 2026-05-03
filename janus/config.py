@@ -169,6 +169,21 @@ OUTPUT_STYLE: str = os.getenv("JANUS_OUTPUT_STYLE", "markdown")
 # cache to apply (OpenRouter honors the marker; OpenAI ignores it).
 PROMPT_CACHE_MARKERS: bool = os.getenv("JANUS_PROMPT_CACHE", "0") in ("1", "true", "yes")
 
+# --- v1.4: agent swarms ---
+# Hard ceilings the spec validator enforces — a spec cannot request more
+# than these regardless of what its `budget:` block says. Defense in depth.
+SWARMS_DIR: Path = HOME / "swarms"
+SWARM_SPECS_DIR: Path = SWARMS_DIR / "specs"
+SWARM_RUNS_DIR: Path = SWARMS_DIR / "runs"
+SWARM_MAX_SUBAGENTS: int = int(os.getenv("JANUS_SWARM_MAX_SUBAGENTS", "30"))
+SWARM_MAX_BUDGET_USD: float = float(os.getenv("JANUS_SWARM_MAX_BUDGET_USD", "10"))
+SWARM_MAX_WALLCLOCK_S: int = int(os.getenv("JANUS_SWARM_MAX_WALLCLOCK_S", "1800"))
+SWARM_MAX_RECURSION_DEPTH: int = int(os.getenv("JANUS_SWARM_MAX_RECURSION_DEPTH", "2"))
+SWARM_DEFAULT_CONCURRENCY: int = int(os.getenv("JANUS_SWARM_CONCURRENCY", "5"))
+SWARM_MAX_COMPLETION_TOKENS_PER_ROLE: int = int(
+    os.getenv("JANUS_SWARM_MAX_COMPLETION_TOKENS", "800")
+)
+
 
 def ensure_home() -> None:
     HOME.mkdir(parents=True, exist_ok=True)
@@ -179,6 +194,8 @@ def ensure_home() -> None:
     CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
     COMMANDS_DIR.mkdir(parents=True, exist_ok=True)
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    SWARM_SPECS_DIR.mkdir(parents=True, exist_ok=True)
+    SWARM_RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def memory_model() -> str:
