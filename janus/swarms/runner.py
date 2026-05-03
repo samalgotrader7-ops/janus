@@ -1,0 +1,353 @@
+"""
+swarms/runner.py — coordinator that runs a swarm spec.
+
+A swarm fans work across N sub-agents per phase, runs them concurrently,
+collapses their outputs via an aggregator, then chains phases in
+declaration order (phase B receives phase A's aggregated output).
+
+Sub-agent dispatch uses ThreadPoolExecutor calling
+`subagent._run_in_process` directly — bypasses the subprocess `_RUNNER`
+default (which is for plan trees). Threads share the LLM module's
+connection pool; the GIL is released during HTTP I/O so 5–30 parallel
+sub-agents are genuinely concurrent.
+
+For v1.4 phase 3 (this commit): single-phase pattern only. Aggregator
+output is the raw list of sub-agent outputs (real aggregators land in
+phase 5). Sequential phase chaining via `depends_on` lands in phase 6.
+Budget enforcement lands in phase 4. Cancellation in phase 7.
+"""
+
+from __future__ import annotations
+import json as _json
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Any
+
+from .. import config, subagent
+from . import spec as spec_mod
+from . import state
+
+
+# ---------- Result dataclasses ----------
+
+
+@dataclass
+class SubagentRunSummary:
+    agent_id: str
+    role: str
+    phase_name: str
+    output: str
+    error: str | None
+    trace_step_count: int
+
+
+@dataclass
+class PhaseRunSummary:
+    name: str
+    aggregated: Any
+    sub_agents: list[SubagentRunSummary] = field(default_factory=list)
+    error: str | None = None
+
+
+@dataclass
+class SwarmRunResult:
+    run_id: str
+    spec_name: str
+    inputs: dict
+    phases: list[PhaseRunSummary] = field(default_factory=list)
+    final: Any = None
+    error: str | None = None
+
+
+# ---------- Entry point ----------
+
+
+def run_swarm(
+    spec: spec_mod.Spec,
+    *,
+    inputs: dict,
+    parent_chat_id: str | None = None,
+    parent_run_id: str | None = None,
+) -> SwarmRunResult:
+    """Run a swarm spec end-to-end.
+
+    Validates inputs (raises SpecError on bad input — $0 spent),
+    creates the run directory, dispatches each phase, chains aggregated
+    outputs, writes final.json.
+    """
+    validated = spec_mod.validate_inputs(spec, inputs)
+    run_id = state.new_run_id()
+    state.init_run_dir(run_id)
+
+    # Freeze the spec for replay/audit.
+    if spec.path is not None:
+        try:
+            state.freeze_spec(run_id, spec.path.read_text(encoding="utf-8"))
+        except OSError:
+            pass
+
+    state.write_inputs(run_id, validated)
+    state.write_metadata(run_id, {
+        "started": state._now_iso(),
+        "spec_name": spec.name,
+        "spec_version": spec.version,
+        "parent_chat_id": parent_chat_id,
+        "parent_run_id": parent_run_id,
+        "default_mode": spec.permissions.default_mode,
+        "models_per_role": {
+            p.role: p.model for p in spec.phases if p.model
+        },
+    })
+    state.append_timeline(run_id, {
+        "type": "swarm_start",
+        "spec": spec.name,
+        "n_phases": len(spec.phases),
+    })
+
+    phase_results: list[PhaseRunSummary] = []
+    last_aggregated: Any = validated  # phase 0 input = swarm inputs
+
+    try:
+        for i, phase in enumerate(spec.phases):
+            phase_input = _phase_input_for(
+                phase, last_aggregated, phase_results,
+            )
+            state.init_phase_dir(run_id, i, phase.name)
+            state.write_phase_input(run_id, i, phase.name, phase_input)
+            state.append_timeline(run_id, {
+                "type": "phase_start",
+                "phase": phase.name, "phase_num": i,
+            })
+
+            result = _run_phase(
+                spec=spec, phase=phase, phase_num=i,
+                phase_input=phase_input, run_id=run_id,
+            )
+            phase_results.append(result)
+            last_aggregated = result.aggregated
+            state.write_phase_aggregated(
+                run_id, i, phase.name, result.aggregated,
+            )
+            state.append_timeline(run_id, {
+                "type": "phase_done",
+                "phase": phase.name, "phase_num": i,
+                "n_subagents": len(result.sub_agents),
+                "n_errors": sum(1 for s in result.sub_agents if s.error),
+            })
+    except Exception as e:
+        state.append_timeline(run_id, {
+            "type": "swarm_error", "error": f"{type(e).__name__}: {e}",
+        })
+        state.write_final(run_id, {"error": f"{type(e).__name__}: {e}"})
+        return SwarmRunResult(
+            run_id=run_id, spec_name=spec.name, inputs=validated,
+            phases=phase_results, final=None,
+            error=f"{type(e).__name__}: {e}",
+        )
+
+    final = phase_results[-1].aggregated if phase_results else None
+    state.write_final(run_id, final)
+    state.append_timeline(run_id, {"type": "swarm_done"})
+
+    return SwarmRunResult(
+        run_id=run_id, spec_name=spec.name, inputs=validated,
+        phases=phase_results, final=final,
+    )
+
+
+# ---------- Phase-input resolution ----------
+
+
+def _phase_input_for(
+    phase: spec_mod.Phase,
+    last_aggregated: Any,
+    prior_results: list[PhaseRunSummary],
+) -> Any:
+    """Resolve a phase's input.
+
+    - phase[0] (no depends_on, first in list) → swarm inputs
+    - phase[i>0] (no depends_on)                → prior phase's aggregated output
+    - any phase with `depends_on: <name>`       → that named phase's aggregated output
+    """
+    if phase.depends_on is None:
+        return last_aggregated
+    for p in prior_results:
+        if p.name == phase.depends_on:
+            return p.aggregated
+    # Spec validator catches unknown / forward refs; this is unreachable.
+    return last_aggregated
+
+
+# ---------- Phase dispatch ----------
+
+
+def _run_phase(
+    *,
+    spec: spec_mod.Spec,
+    phase: spec_mod.Phase,
+    phase_num: int,
+    phase_input: Any,
+    run_id: str,
+) -> PhaseRunSummary:
+    """Build sub-agent specs, dispatch concurrently, collect results,
+    aggregate (placeholder until phase 5 wires real aggregators)."""
+    tasks = _partition(phase, phase_input)
+
+    specs: list[tuple[str, subagent.SubagentSpec]] = []
+    for idx, task in enumerate(tasks):
+        agent_id = state.new_agent_id(phase.role, idx)
+        body = _format_body(spec, phase, agent_id, task)
+        sub_spec = subagent.SubagentSpec(
+            leaf_id=agent_id,
+            parent_id=run_id,
+            description=f"{spec.name}/{phase.name}/{phase.role}#{idx}",
+            request=body,
+            label=f"{spec.name} :: {phase.name} :: {agent_id}",
+            action=body,
+            skill_body="",
+            memory_preamble="",
+            tool_names=phase.tool_names if phase.tool_names else None,
+            capability_set=dict(phase.capabilities) if phase.capabilities else None,
+            model=phase.model,
+        )
+        specs.append((agent_id, sub_spec))
+
+    state.append_timeline(run_id, {
+        "type": "phase_dispatch",
+        "phase": phase.name, "n_subagents": len(specs),
+    })
+
+    n = max(1, min(len(specs), config.SWARM_DEFAULT_CONCURRENCY))
+    results: dict[str, subagent.SubagentResult] = {}
+
+    def _run_one(agent_id: str, sub_spec: subagent.SubagentSpec) -> None:
+        state.append_timeline(run_id, {
+            "type": "subagent_start",
+            "phase": phase.name, "agent_id": agent_id, "role": phase.role,
+        })
+        try:
+            result = subagent._run_in_process(sub_spec)
+        except Exception as e:
+            result = subagent.SubagentResult(
+                leaf_id=agent_id, parent_id=run_id,
+                output="", trace=[],
+                error=f"{type(e).__name__}: {e}",
+            )
+        results[agent_id] = result
+        state.write_agent_transcript(
+            run_id, phase_num, phase.name, agent_id, result.trace or [],
+        )
+        state.append_timeline(run_id, {
+            "type": "subagent_done",
+            "phase": phase.name, "agent_id": agent_id,
+            "error": result.error,
+        })
+
+    if len(specs) == 0:
+        # Empty phase — nothing to dispatch. Return empty aggregated.
+        return PhaseRunSummary(name=phase.name, aggregated=[])
+
+    if n == 1 or len(specs) == 1:
+        for agent_id, sub_spec in specs:
+            _run_one(agent_id, sub_spec)
+    else:
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            futures = [pool.submit(_run_one, aid, s) for aid, s in specs]
+            for f in futures:
+                f.result()  # propagate any unhandled exception
+
+    # Build per-sub-agent summaries in deterministic input order.
+    summaries: list[SubagentRunSummary] = []
+    for agent_id, _ in specs:
+        r = results.get(agent_id)
+        summaries.append(SubagentRunSummary(
+            agent_id=agent_id,
+            role=phase.role,
+            phase_name=phase.name,
+            output=r.output if r else "",
+            error=r.error if r else "no_result",
+            trace_step_count=len(r.trace) if r and r.trace else 0,
+        ))
+
+    # Phase 3 placeholder aggregator: collect non-error outputs as a list.
+    # Phase 5 wires the real aggregator dispatch (concat/dedupe_by/llm_summarize/...).
+    aggregated = [s.output for s in summaries if not s.error and s.output]
+
+    return PhaseRunSummary(
+        name=phase.name,
+        aggregated=aggregated,
+        sub_agents=summaries,
+    )
+
+
+# ---------- Input partitioning ----------
+
+
+def _partition(phase: spec_mod.Phase, phase_input: Any) -> list[Any]:
+    """Split phase input into N tasks per the phase's input_partition.
+
+    - pattern=single             → one task with the entire input (regardless of partition)
+    - pattern=map_reduce, full   → one task with the entire input
+    - pattern=map_reduce, per_item: input must be a list; one task per item,
+                                    capped at max_per_batch tasks
+    - pattern=map_reduce, regional_batches: input must be a list; chunk into
+                                            roughly equal batches up to max_per_batch
+    """
+    if phase.pattern == "single":
+        return [phase_input]
+
+    if phase.input_partition == "full":
+        return [phase_input]
+
+    if not isinstance(phase_input, list):
+        # Non-list input under a list-expecting partition: degrade to one task.
+        return [phase_input]
+
+    if phase.input_partition == "per_item":
+        return phase_input[:phase.max_per_batch]
+
+    if phase.input_partition == "regional_batches":
+        if not phase_input:
+            return []
+        n_batches = min(phase.max_per_batch, len(phase_input))
+        batch_size = max(1, (len(phase_input) + n_batches - 1) // n_batches)
+        out: list[Any] = []
+        for i in range(0, len(phase_input), batch_size):
+            out.append(phase_input[i:i + batch_size])
+            if len(out) >= phase.max_per_batch:
+                break
+        return out
+
+    return [phase_input]
+
+
+# ---------- Body interpolation ----------
+
+
+def _format_body(
+    spec: spec_mod.Spec,
+    phase: spec_mod.Phase,
+    agent_id: str,
+    task_input: Any,
+) -> str:
+    """Render the spec body with {role}, {phase}, {input}, {spec_name},
+    {agent_id} placeholders interpolated. Uses .replace (NOT .format)
+    so user content with literal braces doesn't blow up."""
+    body = spec.body
+    if isinstance(task_input, str):
+        input_str = task_input
+    else:
+        try:
+            input_str = _json.dumps(task_input, default=str)
+        except (TypeError, ValueError):
+            input_str = repr(task_input)
+    placeholders = {
+        "{role}": phase.role,
+        "{phase}": phase.name,
+        "{spec_name}": spec.name,
+        "{agent_id}": agent_id,
+        "{input}": input_str,
+    }
+    for k, v in placeholders.items():
+        body = body.replace(k, v)
+    return body

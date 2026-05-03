@@ -62,6 +62,7 @@ class SubagentSpec:
     memory_preamble: str = ""
     tool_names: list[str] | None = None
     capability_set: dict | None = None   # serialized {tool.verb: [globs]}
+    model: str | None = None             # v1.4: per-sub-agent model override
 
     def to_json(self) -> str:
         return json.dumps({
@@ -75,6 +76,7 @@ class SubagentSpec:
             "memory_preamble": self.memory_preamble,
             "tool_names": self.tool_names,
             "capability_set": self.capability_set,
+            "model": self.model,
         })
 
     @classmethod
@@ -91,6 +93,7 @@ class SubagentSpec:
             memory_preamble=str(d.get("memory_preamble", "")),
             tool_names=d.get("tool_names"),
             capability_set=d.get("capability_set"),
+            model=d.get("model"),
         )
 
 
@@ -138,6 +141,11 @@ def _run_in_process(spec: SubagentSpec) -> SubagentResult:
     tools = default_registry(capabilities=caps, tool_names=spec.tool_names)
     approver = capability_only_approver(caps)
 
+    # v1.4: only forward model= when set so legacy callers (and test
+    # stubs of executor.execute that don't accept the kwarg) keep working.
+    exec_kwargs: dict = {}
+    if spec.model:
+        exec_kwargs["model"] = spec.model
     try:
         output, trace = executor.execute(
             original_request=spec.request,
@@ -148,6 +156,7 @@ def _run_in_process(spec: SubagentSpec) -> SubagentResult:
             on_step=None,
             skill_body=spec.skill_body,
             memory_preamble=spec.memory_preamble,
+            **exec_kwargs,
         )
         result = SubagentResult(
             leaf_id=spec.leaf_id, parent_id=spec.parent_id,

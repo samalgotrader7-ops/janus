@@ -41,6 +41,7 @@ def execute(
     memory_preamble: str = "",
     temperature: float = 0.7,
     stream: bool = False,
+    model: str | None = None,
 ) -> tuple[str, list[dict]]:
     """Run the executor loop. Returns (final_text, trace).
 
@@ -49,6 +50,8 @@ def execute(
     `skill_body` (Phase 3): if non-empty, prepended to the system prompt.
     `memory_preamble` (Phase 2): if non-empty, prepended above the skill body.
     `temperature`: pinned at 0 by the eval harness for deterministic replays.
+    `model` (v1.4): if set, overrides config.MODEL for this run only.
+        Used by swarm sub-agents to mix cheap/expensive models per role.
     """
     head = ""
     if memory_preamble:
@@ -76,6 +79,10 @@ def execute(
     # Phase 11: load hooks once per execute() call. No-hook path is O(1).
     hooks_index = hooks.load_hooks()
 
+    # Only forward model= to llm when explicitly set (back-compat with
+    # fake_llm test stubs that don't accept the kwarg).
+    model_kw = {"model": model} if model is not None else {}
+
     for step in range(config.MAX_STEPS):
         if stream:
             # Stream the assistant turn token-by-token; the last yield is
@@ -84,7 +91,7 @@ def execute(
             try:
                 gen = llm.chat_stream(
                     messages=messages, tools=tools.schemas(),
-                    temperature=temperature,
+                    temperature=temperature, **model_kw,
                 )
                 for chunk in gen:
                     if isinstance(chunk, str):
@@ -96,10 +103,10 @@ def execute(
             except Exception as e:
                 # Fall back to non-streaming on any stream error.
                 msg = llm.chat(messages=messages, tools=tools.schemas(),
-                               temperature=temperature)
+                               temperature=temperature, **model_kw)
         else:
             msg = llm.chat(messages=messages, tools=tools.schemas(),
-                           temperature=temperature)
+                           temperature=temperature, **model_kw)
 
         # Append the assistant turn verbatim (preserves tool_calls structure).
         messages.append(msg)
