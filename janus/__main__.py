@@ -64,8 +64,33 @@ def _stash_conversation_from_flags(args):
         conversation.set_pending(conv)
 
 
+def _maybe_install_bundled_skills():
+    """First-run hook: copy bundled skills into ~/.janus/skills/ if empty.
+
+    Suppressed by JANUS_NO_BUNDLED=1. Quiet by default; only prints if
+    something was installed. Failures never abort launch (P8).
+    """
+    import os
+    if os.environ.get("JANUS_NO_BUNDLED", "").lower() in ("1", "true", "yes"):
+        return
+    try:
+        from . import skill_catalog
+        if not skill_catalog.is_first_run():
+            return
+        result = skill_catalog.install_bundled()
+        n = len(result["installed"])
+        if n:
+            sys.stderr.write(
+                f"janus: installed {n} bundled skill(s) (all quarantined). "
+                f"Run /skills to browse.\n"
+            )
+    except Exception:
+        pass
+
+
 def _run_chat():
     _stash_conversation_from_flags(sys.argv[1:])
+    _maybe_install_bundled_skills()
     if "--basic" in sys.argv:
         from .cli import main; main(); return
     try:

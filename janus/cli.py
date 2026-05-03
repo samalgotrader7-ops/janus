@@ -12,7 +12,7 @@ from typing import Any
 
 from . import config, interpreter, executor, logger, memory, index, skills
 from . import eval as eval_mod, planner, orchestrator, skill_evolution
-from . import skills_market, hooks, cache, branding, conversation, cost
+from . import skills_market, hooks, cache, branding, conversation, cost, skill_catalog
 from . import statusline, commands as commands_mod, doctor, init_codebase
 from . import output_styles, permissions
 from .mcp import client as mcp_client
@@ -266,7 +266,7 @@ def handle_command(line):
     if cmd == "/search":
         return _cmd_search(arg)
     if cmd == "/skills":
-        return _cmd_skills()
+        return _cmd_skills(arg)
     if cmd == "/promote":
         return _cmd_promote(arg)
     if cmd == "/skill":
@@ -428,10 +428,19 @@ def _cmd_search(arg):
     return True
 
 
-def _cmd_skills():
+def _cmd_skills(arg=""):
+    arg = (arg or "").strip()
+    if arg.startswith("install-bundled"):
+        rest = arg[len("install-bundled"):].strip()
+        return _cmd_skills_install_bundled(force=(rest == "--force"))
     items = skills.list_skills()
-    if not items:
-        print(f"  {C.DIM}no skills yet -- /skill new{C.R}"); return True
+    if arg:
+        items = skill_catalog.filter_skills(items, arg)
+        if not items:
+            print(f"  {C.DIM}no skills match '{arg}'{C.R}"); return True
+    elif not items:
+        print(f"  {C.DIM}no skills yet -- /skills install-bundled or /skill new{C.R}")
+        return True
     print()
     for s in items:
         score = s.trust_score()
@@ -445,6 +454,34 @@ def _cmd_skills():
         )
         print(f"  {C.BOLD}{s.name}{C.R} ({s.state}) -- {s.description}")
         print(f"    {runs_part}")
+    return True
+
+
+def _cmd_skills_install_bundled(*, force=False):
+    result = skill_catalog.install_bundled(force=force)
+    inst, skip, errs = result["installed"], result["skipped"], result["errors"]
+    if not inst and not skip and not errs:
+        print(f"  {C.DIM}no bundled skills to install{C.R}")
+        return True
+    if inst:
+        print(f"  {C.GREEN}installed {len(inst)}{C.R}: {', '.join(inst)}")
+    if skip:
+        print(f"  {C.DIM}skipped {len(skip)} (already installed): "
+              f"{', '.join(skip)}{C.R}")
+    if errs:
+        print(f"  {C.RED}errors:{C.R}")
+        for name, msg in errs:
+            print(f"    {C.RED}{name}: {msg}{C.R}")
+    if inst:
+        print(f"  {C.YELLOW}all installed skills are quarantined.{C.R} "
+              f"review with /skills, then /promote <name> trusted-supervised")
+    logger.write({
+        "ts": logger.now_iso(),
+        "type": "bundled_install",
+        "installed": inst,
+        "skipped": skip,
+        "errors": [name for name, _ in errs],
+    })
     return True
 
 

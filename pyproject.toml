@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "janus-agent"
-version = "1.1.1"
+version = "1.2.0"
 description = "Claude Code's UX, on any model, with plain-text state and a learning loop."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -65,6 +65,11 @@ Issues = "https://github.com/samalgotrader7-ops/janus/issues"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["janus*"]
+
+# v1.2.0: bundled skill catalog — 58 .md files copied to ~/.janus/skills/
+# on first run. Listed explicitly here because they're not Python source.
+[tool.setuptools.package-data]
+"janus.skills_bundled" = ["*.md", "*/SKILL.md", "*/scripts/*", "*/references/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

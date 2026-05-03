@@ -21,7 +21,7 @@ from typing import Any, Callable
 
 from . import config, interpreter, executor, logger, memory, index, skills
 from . import eval as eval_mod, planner, orchestrator, skill_evolution
-from . import skills_market, cache, branding, conversation, cost, statusline
+from . import skills_market, cache, branding, conversation, cost, statusline, skill_catalog
 from . import commands as commands_mod, doctor, init_codebase, output_styles
 from . import permissions
 from .mcp import client as mcp_client
@@ -67,7 +67,7 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/analyze",      "scan the workspace for tools, skills, project hints", "built-in"),
     SlashCommand("/memory",       "show the user.md memory file",                        "built-in"),
     SlashCommand("/search",       "search prior interactions in the log index",          "built-in"),
-    SlashCommand("/skills",       "list installed skills with state and trust score",    "built-in"),
+    SlashCommand("/skills",       "list/filter skills, or install-bundled to copy the starter catalog", "built-in"),
     SlashCommand("/promote",      "promote a quarantined skill to a trusted state",      "built-in"),
     SlashCommand("/skill",        "skill authoring — subcommands: new | review | import","built-in"),
     SlashCommand("/cost",         "show token + cost summary for this session",          "built-in"),
@@ -243,6 +243,67 @@ def _show_interpretations(console, interps) -> None:
         ))
 
 
+def _cmd_skills_rich(console, arg: str) -> bool:
+    """`/skills` — list, filter, or install bundled.
+
+    Usage:
+      /skills                       list all installed skills
+      /skills <query>               filter by name/description substring
+      /skills install-bundled       copy janus/skills_bundled/ → ~/.janus/skills/
+      /skills install-bundled --force   overwrite existing skill files
+    """
+    arg = (arg or "").strip()
+    if arg.startswith("install-bundled"):
+        rest = arg[len("install-bundled"):].strip()
+        return _cmd_skills_install_bundled_rich(console, force=(rest == "--force"))
+    items = skills.list_skills()
+    if arg:
+        items = skill_catalog.filter_skills(items, arg)
+        if not items:
+            console.print(f"[dim]no skills match '{arg}'[/dim]")
+            return True
+    elif not items:
+        console.print(
+            "[dim]no skills yet — try /skills install-bundled or /skill new[/dim]"
+        )
+        return True
+    _show_skill_table(console, items)
+    return True
+
+
+def _cmd_skills_install_bundled_rich(console, *, force: bool = False) -> bool:
+    result = skill_catalog.install_bundled(force=force)
+    inst, skip, errs = result["installed"], result["skipped"], result["errors"]
+    if not inst and not skip and not errs:
+        console.print("[dim]no bundled skills to install[/dim]")
+        return True
+    if inst:
+        console.print(
+            f"[green]installed {len(inst)}[/]: {', '.join(inst)}"
+        )
+    if skip:
+        console.print(
+            f"[dim]skipped {len(skip)} (already installed): {', '.join(skip)}[/dim]"
+        )
+    if errs:
+        console.print("[red]errors:[/]")
+        for name, msg in errs:
+            console.print(f"  [red]{name}: {msg}[/]")
+    if inst:
+        console.print(
+            "[yellow]all installed skills are quarantined.[/] "
+            "review with /skills, then /promote <name> trusted-supervised"
+        )
+    logger.write({
+        "ts": logger.now_iso(),
+        "type": "bundled_install",
+        "installed": inst,
+        "skipped": skip,
+        "errors": [name for name, _ in errs],
+    })
+    return True
+
+
 def _show_skill_table(console, items) -> None:
     if not items:
         console.print("[dim]no skills yet — try /skill new[/dim]")
@@ -390,8 +451,7 @@ def _dispatch(console, line: str, state: dict) -> bool:
         console.print(t)
         return True
     if cmd == "/skills":
-        _show_skill_table(console, skills.list_skills())
-        return True
+        return _cmd_skills_rich(console, arg)
     if cmd == "/promote":
         parts = arg.split()
         if len(parts) != 2:
