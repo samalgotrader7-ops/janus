@@ -40,7 +40,9 @@ from . import _common as gw
 
 
 try:
-    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram import (
+        Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand,
+    )
     from telegram.ext import (
         Application, CommandHandler, MessageHandler, CallbackQueryHandler,
         ContextTypes, filters,
@@ -48,6 +50,23 @@ try:
     HAVE_TG = True
 except ImportError:  # pragma: no cover
     HAVE_TG = False
+
+
+# Commands surfaced in Telegram's `/` autocomplete menu via setMyCommands.
+# Without this call, the commands STILL work when typed, but Telegram's
+# UI won't suggest them — which is what made v1.3 feel like the new
+# commands "didn't exist" even after the upgrade.
+_BOT_COMMANDS = [
+    ("start",   "introduce the bot + show current mode and commands"),
+    ("mode",    "show or switch permission mode (default/acceptEdits/plan/bypassPermissions)"),
+    ("sethome", "set this chat as the home channel for cron/cross-platform"),
+    ("skills",  "list installed skills with state and trust score"),
+    ("memory",  "show all memory categories, or /memory <cat> for one"),
+    ("cost",    "per-chat cost ledger"),
+    ("search",  "search prior interactions in the log index"),
+    ("clear",   "reset this chat's conversation"),
+    ("logo",    "print the bifurcation logo"),
+]
 
 
 MAX_MSG = 3500  # leave headroom under Telegram's 4096
@@ -639,11 +658,29 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ---------- Public entry point ----------
 
 
+async def _post_init(app) -> None:
+    """v1.3.2: register the slash-command menu with Telegram so the `/`
+    autocomplete UI shows our commands.
+
+    Without this, commands work when TYPED but never appear in the
+    suggestion popup — which is what made v1.3 feel broken even after
+    the upgrade.
+    """
+    try:
+        await app.bot.set_my_commands(
+            [BotCommand(name, desc) for name, desc in _BOT_COMMANDS]
+        )
+    except Exception:
+        # Best-effort — never block startup on Telegram API hiccups.
+        pass
+
+
 def serve() -> None:
     if not HAVE_TG:
         raise SystemExit(
             "python-telegram-bot is not installed.\n"
-            "  pip install 'python-telegram-bot>=20'"
+            "  pipx install '/opt/quantumapex/janus[telegram]'   # or [all]\n"
+            "  pipx inject janus-agent 'python-telegram-bot>=20' # if already installed"
         )
     if not config.TELEGRAM_BOT_TOKEN:
         raise SystemExit(
@@ -655,7 +692,12 @@ def serve() -> None:
     config.assert_configured()
     config.ensure_home()
 
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(config.TELEGRAM_BOT_TOKEN)
+        .post_init(_post_init)
+        .build()
+    )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("logo", cmd_logo))
     app.add_handler(CommandHandler("mode", cmd_mode))
