@@ -14,15 +14,89 @@ Why not use openai-python or litellm?
 
 This is the executor's bridge to the world. Tool calling format follows the
 OpenAI spec (Anthropic, OpenRouter, Mistral, DeepSeek all match it).
+
+v1.4: `model=` parameter overrides config.MODEL per call (used by swarms
+to mix cheap/expensive models per role). Retry/backoff wraps the POST to
+absorb transient 5xx and ConnectionError — without it, long-running swarms
+die on first hiccup.
 """
 
 from __future__ import annotations
 import json
+import random
+import time
 from typing import Any
 
 import requests
 
 from . import config
+
+
+# ---------- Retry / backoff ----------
+#
+# Used by both chat() and streaming.chat_stream(). Retries on transient
+# failures (HTTP 429, HTTP 5xx, ConnectionError, Timeout). Does NOT retry
+# on 4xx other than 429 — those are deterministic client errors.
+
+
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def _backoff_sleep(attempt: int) -> None:
+    """Exponential backoff with jitter. attempt is 0-indexed (0 = first try).
+
+    Sleep length: base * 2^attempt + uniform(0, base).
+    Patched out in tests via monkeypatching `time.sleep`."""
+    base = config.LLM_RETRY_BACKOFF_BASE_S
+    delay = base * (2 ** attempt) + random.uniform(0, base)
+    time.sleep(delay)
+
+
+def _post_with_retry(
+    url: str,
+    *,
+    headers: dict,
+    json_payload: dict,
+    timeout: int,
+    stream: bool = False,
+) -> requests.Response:
+    """POST with bounded retry on transient failures.
+
+    Returns the requests.Response. On the LAST attempt, returns whatever
+    response we got (5xx included) so the caller's `raise_for_status()`
+    surfaces the error normally. Raises ConnectionError/Timeout if the
+    last attempt also fails to connect.
+    """
+    # Build kwargs once. Only pass `stream=` when True so existing test
+    # mocks of requests.post (which don't model the full signature) keep
+    # working — requests.post defaults to non-streaming anyway.
+    post_kwargs: dict = {
+        "headers": headers, "json": json_payload, "timeout": timeout,
+    }
+    if stream:
+        post_kwargs["stream"] = True
+
+    last_exc: Exception | None = None
+    for attempt in range(config.LLM_RETRY_MAX_ATTEMPTS):
+        is_last_attempt = attempt + 1 == config.LLM_RETRY_MAX_ATTEMPTS
+        try:
+            r = requests.post(url, **post_kwargs)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            last_exc = e
+            if is_last_attempt:
+                raise
+            _backoff_sleep(attempt)
+            continue
+        if r.status_code in _RETRYABLE_STATUS and not is_last_attempt:
+            r.close()
+            _backoff_sleep(attempt)
+            continue
+        return r
+    # Unreachable: loop body always returns or raises on last attempt.
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("retry loop fell through")
 
 
 def apply_cache_markers(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -62,15 +136,21 @@ def chat(
     tools: list[dict] | None = None,
     json_mode: bool = False,
     temperature: float = 0.7,
+    model: str | None = None,
 ) -> dict:
-    """Single chat completion. Returns the raw 'message' object from the response."""
+    """Single chat completion. Returns the raw 'message' object from the response.
+
+    `model` overrides config.MODEL for this call only. Used by swarm
+    sub-agents to mix cheap/expensive models per role.
+    """
     url = f"{config.API_BASE}/chat/completions"
     headers = {
         "Authorization": f"Bearer {config.API_KEY}",
         "Content-Type": "application/json",
     }
+    chosen_model = model or config.MODEL
     payload: dict[str, Any] = {
-        "model": config.MODEL,
+        "model": chosen_model,
         "messages": apply_cache_markers(messages),
         "temperature": temperature,
     }
@@ -80,25 +160,31 @@ def chat(
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
-    r = requests.post(url, headers=headers, json=payload, timeout=config.LLM_TIMEOUT)
+    r = _post_with_retry(
+        url, headers=headers, json_payload=payload, timeout=config.LLM_TIMEOUT,
+    )
     r.raise_for_status()
     body = r.json()
     # Phase 13: feed token usage to the cost tracker. Non-fatal — providers
     # that omit `usage` (some local backends) are silently treated as zero.
     try:
         from . import cost
-        cost.record(payload.get("model") or config.MODEL, body.get("usage"))
+        cost.record(chosen_model, body.get("usage"))
     except Exception:
         pass
     return body["choices"][0]["message"]
 
 
-def chat_stream(messages, tools=None, temperature=0.7):
+def chat_stream(messages, tools=None, temperature=0.7, model: str | None = None):
     """Re-export of streaming.chat_stream so callers don't need to import
     a second module just to switch modes. See streaming.py for shape.
+
+    `model` overrides config.MODEL for this call only.
     """
     from . import streaming
-    return streaming.chat_stream(messages, tools=tools, temperature=temperature)
+    return streaming.chat_stream(
+        messages, tools=tools, temperature=temperature, model=model,
+    )
 
 
 def parse_json_loose(raw: str) -> Any:

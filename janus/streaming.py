@@ -33,6 +33,7 @@ def chat_stream(
     messages: list[dict[str, Any]],
     tools: list[dict] | None = None,
     temperature: float = 0.7,
+    model: str | None = None,
 ) -> Iterator[Any]:
     """Streaming chat completion.
 
@@ -41,6 +42,13 @@ def chat_stream(
       dict (final yield) — the assembled message:
             {"role": "assistant", "content": "...", "tool_calls": [...]}
         Caller can read tool_calls from this for the next loop iteration.
+
+    `model` overrides config.MODEL per call (v1.4 — used by swarms to
+    mix cheap/expensive models per role).
+
+    Retry/backoff applies only to the INITIAL connect. Mid-stream
+    failures (server hangs up partway through SSE) are not resumable —
+    the partial response is returned.
     """
     url = f"{config.API_BASE}/chat/completions"
     headers = {
@@ -49,8 +57,9 @@ def chat_stream(
         "Accept": "text/event-stream",
     }
     from . import llm
+    chosen_model = model or config.MODEL
     payload: dict[str, Any] = {
-        "model": config.MODEL,
+        "model": chosen_model,
         "messages": llm.apply_cache_markers(messages),
         "temperature": temperature,
         "stream": True,
@@ -59,9 +68,9 @@ def chat_stream(
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
 
-    with requests.post(
-        url, headers=headers, json=payload, stream=True,
-        timeout=config.LLM_TIMEOUT,
+    with llm._post_with_retry(
+        url, headers=headers, json_payload=payload,
+        timeout=config.LLM_TIMEOUT, stream=True,
     ) as r:
         r.raise_for_status()
         accumulated = ""
@@ -116,7 +125,7 @@ def chat_stream(
     # Push usage to the cost tracker (same path as llm.chat).
     try:
         from . import cost
-        cost.record(payload.get("model") or config.MODEL, usage)
+        cost.record(chosen_model, usage)
     except Exception:
         pass
 

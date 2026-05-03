@@ -184,6 +184,14 @@ SWARM_MAX_COMPLETION_TOKENS_PER_ROLE: int = int(
     os.getenv("JANUS_SWARM_MAX_COMPLETION_TOKENS", "800")
 )
 
+# v1.4: retry/backoff at the llm.chat boundary. A long-running swarm
+# (12hr unattended runs Sam wants) will hit transient HTTP 5xx and
+# ConnectionError; without retries it dies on the first hiccup. Bounded
+# by max attempts (the call counts as attempt 1; default 3 = 1 try + 2
+# retries). Backoff is exponential with jitter: base * 2^attempt + U(0, base).
+LLM_RETRY_MAX_ATTEMPTS: int = int(os.getenv("JANUS_LLM_RETRY_MAX_ATTEMPTS", "3"))
+LLM_RETRY_BACKOFF_BASE_S: float = float(os.getenv("JANUS_LLM_RETRY_BACKOFF_BASE", "2.0"))
+
 
 def ensure_home() -> None:
     HOME.mkdir(parents=True, exist_ok=True)

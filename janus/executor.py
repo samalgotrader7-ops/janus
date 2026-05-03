@@ -283,12 +283,16 @@ def chat(
     skill_count: int | None = None,
     temperature: float = 0.7,
     stream: bool = True,
+    model: str | None = None,
 ) -> tuple[str, list[dict]]:
     """v1.0 Claude-Code-shaped chat turn.
 
     `messages` — the running conversation. MUTATED IN PLACE: this turn's
     user / assistant / tool messages are appended so the next call sees
     them. The caller keeps a single list reference across turns.
+
+    `model` (v1.4) — overrides config.MODEL for this turn only. Swarm
+    sub-agents pass it to mix cheap/expensive models per role.
 
     Returns `(final_text, trace)`. The trace is the per-turn tool-call
     audit (same shape as execute()'s trace) for logging.
@@ -316,13 +320,18 @@ def chat(
     trace: list[dict] = []
     hooks_index = hooks.load_hooks()
 
+    # Only pass `model=` when explicitly set so existing fake_llm stubs
+    # (and any other test doubles that don't accept the kwarg yet) keep
+    # working. Real llm.chat / chat_stream always accept it.
+    model_kw = {"model": model} if model is not None else {}
+
     for step in range(config.MAX_STEPS):
         if stream:
             msg: dict = {}
             try:
                 gen = llm.chat_stream(
                     messages=messages, tools=tools.schemas(),
-                    temperature=temperature,
+                    temperature=temperature, **model_kw,
                 )
                 for chunk in gen:
                     if isinstance(chunk, str):
@@ -333,10 +342,10 @@ def chat(
                         msg = chunk
             except Exception:
                 msg = llm.chat(messages=messages, tools=tools.schemas(),
-                               temperature=temperature)
+                               temperature=temperature, **model_kw)
         else:
             msg = llm.chat(messages=messages, tools=tools.schemas(),
-                           temperature=temperature)
+                           temperature=temperature, **model_kw)
 
         messages.append(msg)
         tool_calls = msg.get("tool_calls") or []
