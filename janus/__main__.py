@@ -6,6 +6,7 @@
   pair approve <CODE>           approve a pairing code (owner authorization)
   pair revoke <gateway> <id>    remove a previously-approved chat
   pair approved                 list all approved (gateway, chat_id) pairs
+  uninstall [--yes] [--dry-run] inventory and remove ~/.janus/ state directory
   daemon                        run the proactive trigger daemon
   daemon --once                 single iteration of the daemon loop (cron/systemd)
   fire <trigger>                fire one named trigger immediately
@@ -283,6 +284,173 @@ def _run_pair(args):
     sys.exit(2)
 
 
+def _run_uninstall(args):
+    """`janus uninstall [--yes] [--dry-run]` — remove ~/.janus/ state.
+
+    Interactively inventories what will be removed, requires explicit
+    'yes' confirmation, then `shutil.rmtree`s the home directory. Does
+    NOT remove the pipx package — Python can't reliably uninstall its
+    own running interpreter — so we print the `pipx uninstall` command
+    as the next step.
+
+    Flags:
+      --yes       skip confirmation (for scripts)
+      --dry-run   show inventory without removing anything
+
+    Honors $JANUS_HOME if set; if you have a custom JANUS_HOME, the
+    inventory shows that path so you know exactly what's being removed.
+    """
+    import shutil
+
+    yes = "--yes" in args or "-y" in args
+    dry = "--dry-run" in args or "-n" in args
+
+    home = config.HOME
+    if not home.is_dir():
+        print(f"(no Janus state at {home} — nothing to uninstall)")
+        print("\nTo remove the package: pipx uninstall janus-agent")
+        return
+
+    print(f"Janus state directory: {home}")
+    print()
+    inventory = _inventory_home(home)
+    if not inventory:
+        print("  (directory exists but is empty)")
+    else:
+        for line in inventory:
+            print(f"  {line}")
+    print()
+    total_bytes = _dir_size(home)
+    print(f"Total: {_format_bytes(total_bytes)}")
+    print()
+    print("This does NOT remove the package itself. To finish:")
+    print("  pipx uninstall janus-agent")
+    print()
+
+    if dry:
+        print("(--dry-run: nothing removed)")
+        return
+
+    if not yes:
+        try:
+            ans = input(f"Type 'yes' to remove {home}: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print("aborted.")
+            sys.exit(1)
+        if ans != "yes":
+            print("aborted.")
+            sys.exit(1)
+
+    try:
+        shutil.rmtree(home)
+    except OSError as e:
+        print(f"error removing {home}: {e}")
+        sys.exit(1)
+    print(f"removed: {home}")
+    print()
+    print("To remove the package:  pipx uninstall janus-agent")
+
+
+def _inventory_home(home):
+    """Return a list of human-readable lines describing what's under HOME.
+
+    Tolerates missing/empty subdirs — every category is optional and
+    zero-count lines are omitted to avoid noise. Does NOT recurse into
+    skill directories (just counts top-level entries).
+    """
+    lines = []
+    skills = home / "skills"
+    if skills.is_dir():
+        n = len(list(skills.glob("*.md"))) + len(list(skills.glob("*/SKILL.md")))
+        if n > 0:
+            lines.append(f"skills/        {n} skill(s)")
+    memory = home / "memory"
+    if memory.is_dir():
+        n = len(list(memory.glob("*.md")))
+        if n > 0:
+            lines.append(f"memory/        {n} category file(s)")
+    convos = home / "conversations"
+    if convos.is_dir():
+        n = len(list(convos.glob("*.json")))
+        if n > 0:
+            lines.append(f"conversations/ {n} saved conversation(s)")
+    sessions = home / "sessions"
+    if sessions.is_dir():
+        total = sum(1 for _ in sessions.rglob("*.json"))
+        gw_dirs = [p.name for p in sessions.iterdir() if p.is_dir()]
+        if total > 0:
+            lines.append(
+                f"sessions/      {total} session(s) across {len(gw_dirs)} gateway(s) "
+                f"({', '.join(sorted(gw_dirs))})"
+            )
+    pairing = home / "pairing"
+    if pairing.is_dir():
+        approved_path = pairing / "approved.json"
+        pending_path = pairing / "pending.json"
+        a = _safe_count(approved_path, lambda d: sum(len(v or []) for v in d.values()))
+        p = _safe_count(pending_path, len)
+        if a + p > 0:
+            lines.append(f"pairing/       {a} approved chat(s), {p} pending code(s)")
+    log = home / "log.jsonl"
+    if log.is_file():
+        lines.append(f"log.jsonl      {_format_bytes(log.stat().st_size)} of audit log")
+    cost = home / "cost.jsonl"
+    if cost.is_file():
+        n = sum(1 for _ in cost.open(encoding="utf-8")) if cost.is_file() else 0
+        lines.append(f"cost.jsonl     {n} ledger entries ({_format_bytes(cost.stat().st_size)})")
+    user_md = home / "user.md"
+    if user_md.is_file():
+        lines.append(f"user.md        legacy memory file ({_format_bytes(user_md.stat().st_size)})")
+    home_channels = home / "home_channels.json"
+    if home_channels.is_file():
+        lines.append("home_channels.json  per-gateway home channel registry")
+    identities = home / "identities.json"
+    if identities.is_file():
+        lines.append("identities.json     cross-platform identity links")
+    mcp = home / "mcp"
+    if mcp.is_dir() and any(mcp.iterdir()):
+        lines.append("mcp/           MCP server configuration")
+    hooks = home / "hooks.json"
+    if hooks.is_file():
+        lines.append("hooks.json     gateway lifecycle hooks")
+    triggers = home / "triggers"
+    if triggers.is_dir() and any(triggers.iterdir()):
+        n = len(list(triggers.glob("*.yaml"))) + len(list(triggers.glob("*.yml")))
+        lines.append(f"triggers/      {n} proactive trigger(s)")
+    return lines
+
+
+def _safe_count(path, counter):
+    import json
+    try:
+        return counter(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return 0
+
+
+def _dir_size(path):
+    total = 0
+    try:
+        for p in path.rglob("*"):
+            if p.is_file():
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return total
+
+
+def _format_bytes(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
 def _fire(name):
     from .triggers import load_triggers, fire_once
     config.ensure_home()
@@ -445,6 +613,8 @@ def main():
         _fire(args[1]); return
     if sub == "pair":
         _run_pair(args[1:]); return
+    if sub == "uninstall":
+        _run_uninstall(args[1:]); return
     if sub in ("--help", "-h", "help"):
         print(__doc__); return
     _run_chat()
