@@ -317,8 +317,9 @@ body
     worker_phase = result.phases[1]
     # All worker sub-agents are recorded with their error status
     assert all(s.error == "forced" for s in worker_phase.sub_agents)
-    # Aggregated drops error sub-agents in v1.4 placeholder aggregator
-    assert worker_phase.aggregated == []
+    # Phase 5 wired the concat aggregator: error sub-agents are filtered
+    # out before aggregation, so the joined string is empty.
+    assert worker_phase.aggregated == ""
 
 
 def test_subagent_exception_caught_to_result(

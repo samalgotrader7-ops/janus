@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .. import config, cost, subagent
+from . import aggregators as aggregators_mod
 from . import budget as budget_mod
 from . import spec as spec_mod
 from . import state
@@ -335,14 +336,31 @@ def _run_phase(
             trace_step_count=len(r.trace) if r and r.trace else 0,
         ))
 
-    # Phase 3 placeholder aggregator: collect non-error outputs as a list.
-    # Phase 5 wires the real aggregator dispatch (concat/dedupe_by/llm_summarize/...).
-    aggregated = [s.output for s in summaries if not s.error and s.output]
+    # Phase 5: dispatch real aggregator. Errors filtered out; aggregator
+    # exception caught and recorded as the phase's aggregated output so
+    # the swarm can still finish (the aggregator is fallible by design —
+    # llm_summarize hits the network, deterministic ones may raise on
+    # malformed sub-agent JSON).
+    non_error = [s.output for s in summaries if not s.error and s.output]
+    try:
+        aggregated = aggregators_mod.aggregate(
+            phase.aggregator,
+            non_error,
+            phase.aggregator_args,
+            phase_input,
+            model=phase.model,
+            phase_name=phase.name,
+        )
+        agg_error: str | None = None
+    except Exception as e:
+        aggregated = {"error": f"aggregator_failed: {type(e).__name__}: {e}"}
+        agg_error = f"aggregator_failed: {type(e).__name__}: {e}"
 
     return PhaseRunSummary(
         name=phase.name,
         aggregated=aggregated,
         sub_agents=summaries,
+        error=agg_error,
     )
 
 
