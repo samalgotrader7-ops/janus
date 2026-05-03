@@ -273,6 +273,9 @@ def _handle_command(sender: str, line: str) -> str:
         if len(items) > 30:
             lines.append(f"... ({len(items) - 30} more)")
         return "\n".join(lines)
+    if cmd == "/swarm":
+        from .. import swarms as _swarms
+        return _swarms.slash.handle(arg)
     if cmd == "/clear":
         _SESSIONS[sender] = []
         try:
@@ -287,7 +290,7 @@ def _handle_command(sender: str, line: str) -> str:
         return cost.render_per_chat(GATEWAY_NAME, sender, identity)
     if cmd in ("/help", "/?"):
         return (
-            "commands: /sethome /memory [cat] /skills /cost /clear /help\n\n"
+            "commands: /sethome /memory [cat] /skills /swarm /cost /clear /help\n\n"
             "type any other text to chat."
         )
     return f"unknown command: {cmd}\ntry /help"

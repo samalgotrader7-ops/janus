@@ -267,6 +267,10 @@ def handle_command(line):
         return _cmd_search(arg)
     if cmd == "/skills":
         return _cmd_skills(arg)
+    if cmd == "/swarm":
+        from . import swarms as _swarms
+        print(_swarms.slash.handle(arg))
+        return True
     if cmd == "/promote":
         return _cmd_promote(arg)
     if cmd == "/skill":

@@ -20,9 +20,9 @@ Public API:
 Phases beyond v1.4 land their public API here as they're built.
 """
 
-from . import aggregators, budget, cancel, recursion, runner, spec, state
+from . import aggregators, budget, cancel, recursion, runner, slash, spec, state
 
 __all__ = [
     "aggregators", "budget", "cancel", "recursion",
-    "runner", "spec", "state",
+    "runner", "slash", "spec", "state",
 ]

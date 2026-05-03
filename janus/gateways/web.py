@@ -274,6 +274,18 @@ def _build_app():
                     f"ask the bot owner: janus pair approve {code}",
             })
 
+        # v1.4: intercept /swarm slash commands at the gateway. Same
+        # dispatch logic as cli_rich, telegram, whatsapp — text-only
+        # response, no executor invocation.
+        if req.startswith("/swarm"):
+            from .. import swarms as _swarms
+            arg = req[len("/swarm"):].strip()
+            return JSONResponse({
+                "session_id": sid,
+                "output": _swarms.slash.handle(arg),
+                "slash": True,
+            })
+
         # UserPromptSubmit hook can deny / rewrite.
         try:
             up = hooks.fire(hooks.USER_PROMPT_SUBMIT, {"request": req})

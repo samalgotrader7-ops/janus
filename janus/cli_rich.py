@@ -85,6 +85,7 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/eval",         "replay last N records at temp=0 to check stability",  "built-in"),
     SlashCommand("/mcp",          "manage MCP servers — list | connect | disconnect",    "built-in"),
     SlashCommand("/triggers",     "list configured triggers",                            "built-in"),
+    SlashCommand("/swarm",        "agent swarms — list | describe | run | status | cancel", "built-in"),
     SlashCommand("/help",         "show all available slash commands grouped by source", "built-in"),
     SlashCommand("/quit",         "exit the CLI",                                        "built-in"),
 ]
@@ -476,6 +477,10 @@ def _dispatch(console, line: str, state: dict) -> bool:
         return True
     if cmd == "/skills":
         return _cmd_skills_rich(console, arg)
+    if cmd == "/swarm":
+        from . import swarms as _swarms
+        console.print(_swarms.slash.handle(arg))
+        return True
     if cmd == "/promote":
         parts = arg.split()
         if len(parts) != 2:

@@ -7,6 +7,13 @@
   pair revoke <gateway> <id>    remove a previously-approved chat
   pair approved                 list all approved (gateway, chat_id) pairs
   uninstall [--yes] [--dry-run] inventory and remove ~/.janus/ state directory
+  swarm list                    list installed specs and recent runs
+  swarm describe <name>         show one spec's details
+  swarm run <name> [k=v ...]    launch a swarm; inputs as key=value args
+  swarm status <run-id>         show current state of a swarm run
+  swarm cancel <run-id>         write cancel.flag (cooperative cancellation)
+  swarm cost <run-id>           per-swarm cost breakdown
+  swarm trace <run-id>          replay timeline.jsonl for a run
   daemon                        run the proactive trigger daemon
   daemon --once                 single iteration of the daemon loop (cron/systemd)
   fire <trigger>                fire one named trigger immediately
@@ -572,6 +579,216 @@ def _run_logo(args):
         sys.stdout.write(f"{logo}{title}\n")
 
 
+def _run_swarm_cli(args: list[str]) -> None:
+    """Dispatch `janus swarm <subcmd>`."""
+    config.assert_configured()
+    config.ensure_home()
+    if not args or args[0] in ("--help", "-h", "help"):
+        print(_SWARM_HELP); return
+    sub = args[0]
+    rest = args[1:]
+    if sub == "list":
+        _swarm_list(); return
+    if sub == "describe":
+        if not rest:
+            print("usage: janus swarm describe <spec-name>"); sys.exit(2)
+        _swarm_describe(rest[0]); return
+    if sub == "run":
+        if not rest:
+            print("usage: janus swarm run <spec-name> [key=value ...]"); sys.exit(2)
+        _swarm_run(rest[0], rest[1:]); return
+    if sub == "status":
+        if not rest:
+            print("usage: janus swarm status <run-id>"); sys.exit(2)
+        _swarm_status(rest[0]); return
+    if sub == "cancel":
+        if not rest:
+            print("usage: janus swarm cancel <run-id>"); sys.exit(2)
+        _swarm_cancel(rest[0]); return
+    if sub == "cost":
+        if not rest:
+            print("usage: janus swarm cost <run-id>"); sys.exit(2)
+        _swarm_cost(rest[0]); return
+    if sub == "trace":
+        if not rest:
+            print("usage: janus swarm trace <run-id>"); sys.exit(2)
+        _swarm_trace(rest[0]); return
+    print(f"unknown swarm subcommand: {sub}\n\n{_SWARM_HELP}"); sys.exit(2)
+
+
+_SWARM_HELP = """\
+janus swarm — parallel sub-agent coordination driven by markdown specs.
+
+  list                          list installed specs + recent runs
+  describe <spec-name>          show a spec's frontmatter and phases
+  run <spec-name> [key=value]   launch a swarm; inputs as key=value pairs
+  status <run-id>               show current run state (last timeline event)
+  cancel <run-id>               write cancel.flag (cooperative cancellation)
+  cost <run-id>                 per-swarm cost breakdown by role + phase
+  trace <run-id>                replay timeline.jsonl
+
+Specs live under ~/.janus/swarms/specs/<name>.md (markdown + YAML frontmatter,
+type: swarm). Runs at ~/.janus/swarms/runs/<run-id>/ — fully plain-text and
+readable without jq."""
+
+
+def _swarm_list() -> None:
+    from . import swarms
+    specs = swarms.spec.list_specs()
+    runs = swarms.state.list_runs()
+    print("specs:")
+    if not specs:
+        print("  (none — drop a markdown file under ~/.janus/swarms/specs/)")
+    else:
+        for s in specs:
+            desc = (s.description or "").splitlines()[0][:60] if s.description else ""
+            print(f"  {s.name:<30} v{s.version}  {desc}")
+    print()
+    print("recent runs (newest first):")
+    if not runs:
+        print("  (none)")
+    else:
+        for rid in runs[:10]:
+            meta = swarms.state.read_metadata(rid) or {}
+            spec_name = meta.get("spec_name", "?")
+            print(f"  {rid}   spec={spec_name}")
+
+
+def _swarm_describe(name: str) -> None:
+    from . import swarms
+    s = swarms.spec.find_spec(name)
+    if s is None:
+        print(f"no spec named {name!r}"); sys.exit(2)
+    print(f"name:        {s.name}")
+    print(f"version:     {s.version}")
+    print(f"description: {s.description}")
+    print(f"output:      {s.output_format}")
+    print()
+    print("budget:")
+    print(f"  max_usd:                          ${s.budget.max_usd}")
+    print(f"  max_wallclock_s:                   {s.budget.max_wallclock_s}")
+    print(f"  max_subagents:                     {s.budget.max_subagents}")
+    print(f"  max_recursion_depth:               {s.budget.max_recursion_depth}")
+    print(f"  max_total_tool_calls:              {s.budget.max_total_tool_calls}")
+    print(f"  max_completion_tokens_per_role:    {s.budget.max_completion_tokens_per_role}")
+    print()
+    print("inputs:")
+    if not s.inputs:
+        print("  (none)")
+    for i in s.inputs:
+        bits = [i.type]
+        if i.required:
+            bits.append("required")
+        if i.default is not None:
+            bits.append(f"default={i.default!r}")
+        if i.min is not None:
+            bits.append(f"min={i.min}")
+        if i.max is not None:
+            bits.append(f"max={i.max}")
+        print(f"  {i.name:<20}  {' · '.join(bits)}")
+    print()
+    print(f"permissions: default_mode={s.permissions.default_mode}")
+    if s.permissions.per_role:
+        for role, mode in s.permissions.per_role.items():
+            print(f"  {role:<20}  → {mode}")
+    print()
+    print(f"phases ({len(s.phases)}):")
+    for i, p in enumerate(s.phases):
+        dep = f" depends_on={p.depends_on}" if p.depends_on else ""
+        model = f" model={p.model}" if p.model else " model=(default)"
+        print(f"  [{i}] {p.name:<20} role={p.role}  {p.pattern}  → {p.aggregator}{model}{dep}")
+
+
+def _parse_kv_args(args: list[str]) -> dict:
+    """Parse k=v pairs; values are JSON-decoded if possible (so '5' → int,
+    '"hi"' → string, '[1,2]' → list), else taken literal."""
+    import json as _json
+    out: dict = {}
+    for a in args:
+        if "=" not in a:
+            print(f"error: argument {a!r} not in key=value form"); sys.exit(2)
+        k, v = a.split("=", 1)
+        try:
+            out[k] = _json.loads(v)
+        except Exception:
+            out[k] = v
+    return out
+
+
+def _swarm_run(name: str, kv_args: list[str]) -> None:
+    from . import swarms
+    s = swarms.spec.find_spec(name)
+    if s is None:
+        print(f"no spec named {name!r}"); sys.exit(2)
+    inputs = _parse_kv_args(kv_args)
+    try:
+        result = swarms.runner.run_swarm(s, inputs=inputs)
+    except swarms.spec.SpecError as e:
+        print(f"spec error: {e}"); sys.exit(2)
+    print(f"run_id: {result.run_id}")
+    if result.error:
+        print(f"error: {result.error}")
+        sys.exit(1)
+    print(f"phases: {len(result.phases)}")
+    for p in result.phases:
+        n_err = sum(1 for s_ in p.sub_agents if s_.error)
+        print(f"  {p.name}  sub-agents={len(p.sub_agents)}  errors={n_err}")
+    print(f"final.json: ~/.janus/swarms/runs/{result.run_id}/final.json")
+
+
+def _swarm_status(run_id: str) -> None:
+    from . import swarms
+    meta = swarms.state.read_metadata(run_id)
+    if meta is None:
+        print(f"no such run: {run_id}"); sys.exit(2)
+    print(f"run_id: {run_id}")
+    print(f"  spec:     {meta.get('spec_name')}")
+    print(f"  started:  {meta.get('started')}")
+    cancelled = swarms.state.is_cancelled(run_id)
+    timeline = swarms.state.read_timeline(run_id)
+    final = swarms.state.read_final(run_id)
+    last_event = timeline[-1] if timeline else None
+    if final is not None:
+        if isinstance(final, dict) and final.get("error"):
+            print(f"  status:   FAILED ({final['error']})")
+        else:
+            print(f"  status:   COMPLETE")
+    elif cancelled:
+        print(f"  status:   CANCELLED (running, will exit at next step)")
+    else:
+        print(f"  status:   RUNNING")
+    if last_event:
+        print(f"  last:     {last_event.get('type')} @ {last_event.get('ts')}")
+
+
+def _swarm_cancel(run_id: str) -> None:
+    from . import swarms
+    if swarms.state.read_metadata(run_id) is None:
+        print(f"no such run: {run_id}"); sys.exit(2)
+    swarms.state.write_cancel_flag(run_id)
+    print(f"cancellation flag written for {run_id}")
+    print("(currently-running sub-agents will exit between steps)")
+
+
+def _swarm_cost(run_id: str) -> None:
+    from . import cost as cost_mod, swarms
+    if swarms.state.read_metadata(run_id) is None:
+        print(f"no such run: {run_id}"); sys.exit(2)
+    print(cost_mod.render_per_swarm(run_id))
+
+
+def _swarm_trace(run_id: str) -> None:
+    from . import swarms
+    timeline = swarms.state.read_timeline(run_id)
+    if not timeline:
+        print(f"no timeline for {run_id}"); sys.exit(2)
+    for e in timeline:
+        ts = e.get("ts", "")
+        ev = e.get("type", "")
+        rest = {k: v for k, v in e.items() if k not in ("ts", "type")}
+        print(f"{ts}  {ev:<20}  {rest}")
+
+
 def main():
     args = sys.argv[1:]
     # Phase 16: headless detection runs first — `-p`, `--prompt`, or stdin pipe.
@@ -615,6 +832,8 @@ def main():
         _run_pair(args[1:]); return
     if sub == "uninstall":
         _run_uninstall(args[1:]); return
+    if sub == "swarm":
+        _run_swarm_cli(args[1:]); return
     if sub in ("--help", "-h", "help"):
         print(__doc__); return
     _run_chat()

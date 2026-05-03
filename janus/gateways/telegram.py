@@ -64,6 +64,7 @@ _BOT_COMMANDS = [
     ("memory",  "show all memory categories, or /memory <cat> for one"),
     ("cost",    "per-chat cost ledger"),
     ("search",  "search prior interactions in the log index"),
+    ("swarm",   "agent swarms — list | describe | run | status | cancel"),
     ("clear",   "reset this chat's conversation"),
     ("logo",    "print the bifurcation logo"),
 ]
@@ -426,6 +427,20 @@ async def cmd_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     })
 
 
+async def cmd_swarm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """v1.4: /swarm — agent swarm operations.
+
+    Delegates to swarms.slash.handle so cli_rich, cli, and gateways all
+    share the same dispatch logic. The arg string is everything after
+    the command name."""
+    if not _is_authorized(update.effective_chat.id):
+        await _send_pairing_prompt(update); return
+    from .. import swarms as _swarms
+    arg = " ".join(ctx.args or [])
+    text = _swarms.slash.handle(arg)
+    await _send(update.get_bot(), update.effective_chat.id, text)
+
+
 async def cmd_skills(update: Update, _: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update.effective_chat.id):
         await _send_pairing_prompt(update); return
@@ -703,6 +718,7 @@ def serve() -> None:
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("sethome", cmd_sethome))
     app.add_handler(CommandHandler("skills", cmd_skills))
+    app.add_handler(CommandHandler("swarm", cmd_swarm))
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("clear", cmd_clear))
