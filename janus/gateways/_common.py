@@ -516,6 +516,14 @@ INDICATOR_KINDS = (
     "approval_needed",  # surfaced an approval keyboard / button
     "stream_chunk",     # token-stream chunk (payload: text)
     "done",             # turn finished (payload: cost_usd, total_tokens)
+    # v1.4 swarm events. Payloads vary; see swarms.runner emit sites.
+    "swarm_start",      # swarm dispatched (payload: spec, run_id, n_phases)
+    "swarm_done",       # swarm completed (payload: run_id, n_phases, error)
+    "phase_start",      # phase begun (payload: phase, phase_num, n_subagents)
+    "phase_done",       # phase finished (payload: phase, n_errors, usd)
+    "subagent_start",   # one sub-agent dispatched (payload: agent_id, role)
+    "subagent_done",    # one sub-agent done (payload: agent_id, error, tool_calls)
+    "swarm_progress",   # rolling status (payload: phase, done, total, usd)
 )
 
 
@@ -532,6 +540,13 @@ INDICATOR_GLYPHS = {
     "approval_needed":  "⚠",
     "stream_chunk":     "▉",
     "done":             "✓",
+    "swarm_start":      "🐝",
+    "swarm_done":       "🐝✓",
+    "phase_start":      "▸",
+    "phase_done":       "▸✓",
+    "subagent_start":   "·",
+    "subagent_done":    "·✓",
+    "swarm_progress":   "→",
 }
 
 
@@ -575,6 +590,74 @@ class IndicatorEmitter:
     def done(self, cost_usd: float = 0.0, total_tokens: int = 0) -> None:
         self.emit(Indicator(
             "done", {"cost_usd": cost_usd, "total_tokens": total_tokens},
+            _now_iso(),
+        ))
+
+    # v1.4 swarm convenience methods.
+
+    def swarm_start(self, spec: str, run_id: str, n_phases: int) -> None:
+        self.emit(Indicator(
+            "swarm_start",
+            {"spec": spec, "run_id": run_id, "n_phases": n_phases},
+            _now_iso(),
+        ))
+
+    def swarm_done(
+        self, run_id: str, n_phases: int, error: str | None = None,
+    ) -> None:
+        self.emit(Indicator(
+            "swarm_done",
+            {"run_id": run_id, "n_phases": n_phases, "error": error},
+            _now_iso(),
+        ))
+
+    def phase_start(self, phase: str, phase_num: int, n_subagents: int) -> None:
+        self.emit(Indicator(
+            "phase_start",
+            {"phase": phase, "phase_num": phase_num, "n_subagents": n_subagents},
+            _now_iso(),
+        ))
+
+    def phase_done(
+        self, phase: str, phase_num: int,
+        n_subagents: int, n_errors: int, usd: float = 0.0,
+    ) -> None:
+        self.emit(Indicator(
+            "phase_done",
+            {
+                "phase": phase, "phase_num": phase_num,
+                "n_subagents": n_subagents, "n_errors": n_errors,
+                "usd": usd,
+            },
+            _now_iso(),
+        ))
+
+    def subagent_start(self, agent_id: str, role: str, phase: str) -> None:
+        self.emit(Indicator(
+            "subagent_start",
+            {"agent_id": agent_id, "role": role, "phase": phase},
+            _now_iso(),
+        ))
+
+    def subagent_done(
+        self, agent_id: str, role: str, phase: str,
+        error: str | None = None, tool_calls: int = 0,
+    ) -> None:
+        self.emit(Indicator(
+            "subagent_done",
+            {
+                "agent_id": agent_id, "role": role, "phase": phase,
+                "error": error, "tool_calls": tool_calls,
+            },
+            _now_iso(),
+        ))
+
+    def swarm_progress(
+        self, phase: str, done: int, total: int, usd: float = 0.0,
+    ) -> None:
+        self.emit(Indicator(
+            "swarm_progress",
+            {"phase": phase, "done": done, "total": total, "usd": usd},
             _now_iso(),
         ))
 

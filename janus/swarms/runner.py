@@ -63,6 +63,18 @@ class SwarmRunResult:
     error: str | None = None
 
 
+class _NoopEmitter:
+    """Default emitter when caller passes none. Mirrors the IndicatorEmitter
+    interface but does nothing. Saves every emit() call site from `if x:`."""
+    def swarm_start(self, *a, **kw): pass
+    def swarm_done(self, *a, **kw): pass
+    def phase_start(self, *a, **kw): pass
+    def phase_done(self, *a, **kw): pass
+    def subagent_start(self, *a, **kw): pass
+    def subagent_done(self, *a, **kw): pass
+    def swarm_progress(self, *a, **kw): pass
+
+
 # ---------- Entry point ----------
 
 
@@ -72,6 +84,7 @@ def run_swarm(
     inputs: dict,
     parent_chat_id: str | None = None,
     parent_run_id: str | None = None,
+    emitter=None,
 ) -> SwarmRunResult:
     """Run a swarm spec end-to-end.
 
@@ -83,6 +96,10 @@ def run_swarm(
     for the lifetime of this call (decremented on exit). When v1.5 lands
     the model-callable swarm.run tool, it'll check depth against
     spec.budget.max_recursion_depth before allowing nested spawn.
+
+    `emitter` (v1.4 phase 11): optional IndicatorEmitter from a gateway
+    so live swarm/phase/sub-agent progress can be rendered to the user
+    (Telegram, web, TUI). Defaults to a no-op shim.
     """
     # Refuse nested spawns that would exceed the spec's recursion budget.
     if recursion_mod.exceeds_recursion_depth(spec.budget.max_recursion_depth):
@@ -102,6 +119,7 @@ def run_swarm(
         return _run_swarm_inner(
             spec, inputs=inputs,
             parent_chat_id=parent_chat_id, parent_run_id=parent_run_id,
+            emitter=emitter,
         )
 
 
@@ -111,7 +129,11 @@ def _run_swarm_inner(
     inputs: dict,
     parent_chat_id: str | None,
     parent_run_id: str | None,
+    emitter=None,
 ) -> SwarmRunResult:
+    # No-op emitter if none supplied so call sites stay clean.
+    if emitter is None:
+        emitter = _NoopEmitter()
     validated = spec_mod.validate_inputs(spec, inputs)
 
     # PreSwarmSpawn hook can deny the whole swarm. Fires BEFORE we mint a
@@ -162,6 +184,7 @@ def _run_swarm_inner(
         "spec": spec.name,
         "n_phases": len(spec.phases),
     })
+    emitter.swarm_start(spec.name, run_id, len(spec.phases))
 
     budget = budget_mod.SwarmBudget(spec.budget)
     token = cancel_mod.CancellationToken(run_id)
@@ -221,24 +244,32 @@ def _run_swarm_inner(
                 "type": "phase_start",
                 "phase": phase.name, "phase_num": i,
             })
+            # Emit phase_start before dispatching so the gateway can
+            # render "phase X starting…" before the work begins.
+            emitter.phase_start(phase.name, i, 0)
 
             result = _run_phase(
                 spec=spec, phase=phase, phase_num=i,
                 phase_input=phase_input, run_id=run_id, budget=budget,
-                token=token,
+                token=token, emitter=emitter,
             )
             phase_results.append(result)
             last_aggregated = result.aggregated
             state.write_phase_aggregated(
                 run_id, i, phase.name, result.aggregated,
             )
+            n_errors = sum(1 for s in result.sub_agents if s.error)
             state.append_timeline(run_id, {
                 "type": "phase_done",
                 "phase": phase.name, "phase_num": i,
                 "n_subagents": len(result.sub_agents),
-                "n_errors": sum(1 for s in result.sub_agents if s.error),
+                "n_errors": n_errors,
                 "budget_snapshot": budget.snapshot(run_id),
             })
+            emitter.phase_done(
+                phase.name, i, len(result.sub_agents), n_errors,
+                usd=budget.usd_spent(run_id),
+            )
     except Exception as e:
         state.append_timeline(run_id, {
             "type": "swarm_error", "error": f"{type(e).__name__}: {e}",
@@ -258,6 +289,7 @@ def _run_swarm_inner(
         "type": "swarm_done",
         "budget_snapshot": budget.snapshot(run_id),
     })
+    emitter.swarm_done(run_id, len(phase_results))
 
     # PostSwarmComplete hook fires AFTER final.json is written so the
     # hook command can read it. Observation only — no deny semantics.
@@ -316,6 +348,7 @@ def _run_phase(
     run_id: str,
     budget: budget_mod.SwarmBudget,
     token: cancel_mod.CancellationToken,
+    emitter=None,
 ) -> PhaseRunSummary:
     """Build sub-agent specs, dispatch concurrently, collect results,
     aggregate.
@@ -326,6 +359,8 @@ def _run_phase(
 
     Cancel-aware: passes the cancel_event into each sub-agent's executor
     so currently-running sub-agents exit between steps when cancelled."""
+    if emitter is None:
+        emitter = _NoopEmitter()
     tasks = _partition(phase, phase_input)
 
     # Pre-flight subagent-count check.
@@ -407,6 +442,7 @@ def _run_phase(
             "type": "subagent_start",
             "phase": phase.name, "agent_id": agent_id, "role": phase.role,
         })
+        emitter.subagent_start(agent_id, phase.role, phase.name)
         try:
             result = subagent._run_in_process(
                 sub_spec, cancel_event=token.event,
@@ -434,6 +470,10 @@ def _run_phase(
             "error": result.error,
             "tool_calls": tool_call_count,
         })
+        emitter.subagent_done(
+            agent_id, phase.role, phase.name,
+            error=result.error, tool_calls=tool_call_count,
+        )
         # PostSubagentComplete fires AFTER the transcript is on disk so
         # the hook command can read it. Observation only.
         hooks.fire(
