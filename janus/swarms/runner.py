@@ -23,7 +23,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
-from .. import config, subagent
+from .. import config, cost, subagent
+from . import budget as budget_mod
 from . import spec as spec_mod
 from . import state
 
@@ -104,11 +105,36 @@ def run_swarm(
         "n_phases": len(spec.phases),
     })
 
+    budget = budget_mod.SwarmBudget(spec.budget)
     phase_results: list[PhaseRunSummary] = []
     last_aggregated: Any = validated  # phase 0 input = swarm inputs
 
     try:
         for i, phase in enumerate(spec.phases):
+            # Budget check BEFORE starting the phase. Two checks:
+            # 1. Are current totals already over a cap?
+            # 2. Is there room for at least 1 more sub-agent? (No room
+            #    means this phase can't produce anything useful — clearer
+            #    to kill than to silently run an empty phase.)
+            for v in (budget.check(run_id), budget.can_dispatch_n_more(1)):
+                if not v.allowed:
+                    state.append_timeline(run_id, {
+                        "type": "budget_exceeded",
+                        "phase": phase.name, "phase_num": i,
+                        "reason": v.reason,
+                        "snapshot": budget.snapshot(run_id),
+                    })
+                    state.write_final(run_id, {
+                        "error": "budget_exceeded",
+                        "reason": v.reason,
+                        "snapshot": budget.snapshot(run_id),
+                        "completed_phases": [p.name for p in phase_results],
+                    })
+                    return SwarmRunResult(
+                        run_id=run_id, spec_name=spec.name, inputs=validated,
+                        phases=phase_results, final=None,
+                        error=f"budget_exceeded: {v.reason}",
+                    )
             phase_input = _phase_input_for(
                 phase, last_aggregated, phase_results,
             )
@@ -121,7 +147,7 @@ def run_swarm(
 
             result = _run_phase(
                 spec=spec, phase=phase, phase_num=i,
-                phase_input=phase_input, run_id=run_id,
+                phase_input=phase_input, run_id=run_id, budget=budget,
             )
             phase_results.append(result)
             last_aggregated = result.aggregated
@@ -133,6 +159,7 @@ def run_swarm(
                 "phase": phase.name, "phase_num": i,
                 "n_subagents": len(result.sub_agents),
                 "n_errors": sum(1 for s in result.sub_agents if s.error),
+                "budget_snapshot": budget.snapshot(run_id),
             })
     except Exception as e:
         state.append_timeline(run_id, {
@@ -147,7 +174,10 @@ def run_swarm(
 
     final = phase_results[-1].aggregated if phase_results else None
     state.write_final(run_id, final)
-    state.append_timeline(run_id, {"type": "swarm_done"})
+    state.append_timeline(run_id, {
+        "type": "swarm_done",
+        "budget_snapshot": budget.snapshot(run_id),
+    })
 
     return SwarmRunResult(
         run_id=run_id, spec_name=spec.name, inputs=validated,
@@ -188,10 +218,29 @@ def _run_phase(
     phase_num: int,
     phase_input: Any,
     run_id: str,
+    budget: budget_mod.SwarmBudget,
 ) -> PhaseRunSummary:
     """Build sub-agent specs, dispatch concurrently, collect results,
-    aggregate (placeholder until phase 5 wires real aggregators)."""
+    aggregate (placeholder until phase 5 wires real aggregators).
+
+    Budget-aware: refuses to dispatch if max_subagents would be exceeded;
+    re-checks after each return; writes a timeline event when killed
+    mid-phase. Returns a partial PhaseRunSummary on kill."""
     tasks = _partition(phase, phase_input)
+
+    # Pre-flight subagent-count check.
+    pre = budget.can_dispatch_n_more(len(tasks))
+    if not pre.allowed:
+        # Cap the dispatched count at what the budget still allows.
+        with budget.state._lock:
+            already = budget.state.n_subagents_dispatched
+        room = max(0, budget.budget.max_subagents - already)
+        tasks = tasks[:room]
+        state.append_timeline(run_id, {
+            "type": "phase_truncated",
+            "phase": phase.name, "reason": pre.reason,
+            "kept": len(tasks),
+        })
 
     specs: list[tuple[str, subagent.SubagentSpec]] = []
     for idx, task in enumerate(tasks):
@@ -221,6 +270,15 @@ def _run_phase(
     results: dict[str, subagent.SubagentResult] = {}
 
     def _run_one(agent_id: str, sub_spec: subagent.SubagentSpec) -> None:
+        # Mark this thread for cost attribution. Set BEFORE dispatch so
+        # llm.chat()'s cost.record() call sees the right context.
+        cost.set_active_subagent(
+            swarm_run_id=run_id,
+            agent_id=agent_id,
+            role=phase.role,
+            phase=phase.name,
+        )
+        budget.register_dispatch()
         state.append_timeline(run_id, {
             "type": "subagent_start",
             "phase": phase.name, "agent_id": agent_id, "role": phase.role,
@@ -233,6 +291,13 @@ def _run_phase(
                 output="", trace=[],
                 error=f"{type(e).__name__}: {e}",
             )
+        finally:
+            # Count tool calls (exclude the final-text record).
+            tool_call_count = sum(
+                1 for r in (result.trace or []) if r.get("type") == "tool_call"
+            )
+            budget.register_complete(tool_call_count)
+            cost.clear_active_subagent()
         results[agent_id] = result
         state.write_agent_transcript(
             run_id, phase_num, phase.name, agent_id, result.trace or [],
@@ -241,6 +306,7 @@ def _run_phase(
             "type": "subagent_done",
             "phase": phase.name, "agent_id": agent_id,
             "error": result.error,
+            "tool_calls": tool_call_count,
         })
 
     if len(specs) == 0:

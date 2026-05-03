@@ -20,6 +20,6 @@ Public API:
 Phases beyond v1.4 land their public API here as they're built.
 """
 
-from . import runner, spec, state
+from . import budget, runner, spec, state
 
-__all__ = ["runner", "spec", "state"]
+__all__ = ["budget", "runner", "spec", "state"]

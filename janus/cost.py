@@ -29,10 +29,19 @@ import datetime
 import json
 import os
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config
+
+
+# v1.4: thread-local active-sub-agent attribution. When a swarm runner
+# sets these on a worker thread before dispatching subagent._run_in_process,
+# every cost.record() call from that thread is ALSO attributed per-agent
+# in the swarm's run-local cost.jsonl. Outside swarm context (no fields
+# set), this path is a no-op.
+_THREAD_LOCAL = threading.local()
 
 
 # ---------- Price table (USD per million tokens) ----------
@@ -148,7 +157,11 @@ def estimate_usd(model: str, prompt_tokens: int, completion_tokens: int) -> floa
 
 def record(model: str, usage: dict | None) -> None:
     """Accumulate usage from one llm.chat() call. Safe to call with None
-    or partial usage dicts — common when local providers don't report it."""
+    or partial usage dicts — common when local providers don't report it.
+
+    v1.4: also writes a per-sub-agent row to the swarm's run-local
+    cost.jsonl when the calling thread has been registered via
+    set_active_subagent (used by swarms.runner)."""
     if not usage:
         return
     pt = int(usage.get("prompt_tokens", 0) or 0)
@@ -158,6 +171,54 @@ def record(model: str, usage: dict | None) -> None:
     _SESSION.add(pt, ct, usd)
     bm = _BY_MODEL.setdefault(model, TokenStats())
     bm.add(pt, ct, usd)
+
+    # v1.4: per-sub-agent attribution if this thread is in a swarm.
+    swarm_run_id = getattr(_THREAD_LOCAL, "swarm_run_id", None)
+    if swarm_run_id:
+        try:
+            record_per_subagent(
+                swarm_run_id=swarm_run_id,
+                agent_id=getattr(_THREAD_LOCAL, "agent_id", "") or "",
+                role=getattr(_THREAD_LOCAL, "role", "") or "",
+                phase=getattr(_THREAD_LOCAL, "phase", "") or "",
+                model=model,
+                prompt_tokens=pt,
+                completion_tokens=ct,
+                usd=usd,
+            )
+        except Exception:
+            # Per P8: cost recording never propagates failure.
+            pass
+
+
+# ---------- Thread-local sub-agent attribution (v1.4) ----------
+
+
+def set_active_subagent(
+    *,
+    swarm_run_id: str,
+    agent_id: str,
+    role: str,
+    phase: str = "",
+) -> None:
+    """Mark the current thread as belonging to a specific swarm sub-agent.
+    All `cost.record()` calls from this thread will additionally be
+    attributed in the swarm's run-local cost.jsonl. Idempotent."""
+    _THREAD_LOCAL.swarm_run_id = swarm_run_id
+    _THREAD_LOCAL.agent_id = agent_id
+    _THREAD_LOCAL.role = role
+    _THREAD_LOCAL.phase = phase
+
+
+def clear_active_subagent() -> None:
+    """Detach the current thread from any sub-agent. Safe to call when
+    not previously set."""
+    for attr in ("swarm_run_id", "agent_id", "role", "phase"):
+        if hasattr(_THREAD_LOCAL, attr):
+            try:
+                delattr(_THREAD_LOCAL, attr)
+            except AttributeError:
+                pass
 
 
 # ---------- Display helpers ----------
@@ -301,3 +362,128 @@ def render_per_chat(gateway: str, chat_id: str, identity: str = "") -> str:
             f"{st_id.calls} calls · ${st_id.usd:.4f}"
         )
     return f"  this chat ({label}): {st.calls} calls · ${st.usd:.4f}"
+
+
+# ---------- Per-swarm ledger (v1.4) ----------
+#
+# One JSONL per swarm run at ~/.janus/swarms/runs/<run-id>/cost.jsonl.
+# Written from the LLM call thread via the thread-local attribution path
+# (cost.record above) — accurate even with parallel sub-agents.
+
+
+def _swarm_cost_path(swarm_run_id: str) -> Path:
+    return config.SWARM_RUNS_DIR / swarm_run_id / "cost.jsonl"
+
+
+def record_per_subagent(
+    *,
+    swarm_run_id: str,
+    agent_id: str,
+    role: str = "",
+    phase: str = "",
+    model: str = "",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    usd: float = 0.0,
+) -> None:
+    """Append one row to the swarm's run-local cost.jsonl. Never raises (P8)."""
+    p = _swarm_cost_path(swarm_run_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "ts": _now_iso(),
+        "swarm_run_id": swarm_run_id,
+        "agent_id": agent_id,
+        "role": role,
+        "phase": phase,
+        "model": model or "",
+        "prompt_tokens": int(prompt_tokens),
+        "completion_tokens": int(completion_tokens),
+        "usd": round(float(usd), 6),
+    }
+    try:
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def per_swarm_summary(
+    swarm_run_id: str,
+    *,
+    agent_id: str = "",
+    role: str = "",
+    phase: str = "",
+) -> TokenStats:
+    """Sum the swarm's run-local cost.jsonl, optionally filtered by
+    agent_id/role/phase. Empty filters = sum the whole swarm."""
+    out = TokenStats()
+    p = _swarm_cost_path(swarm_run_id)
+    if not p.is_file():
+        return out
+    try:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if agent_id and row.get("agent_id") != agent_id:
+                    continue
+                if role and row.get("role") != role:
+                    continue
+                if phase and row.get("phase") != phase:
+                    continue
+                out.add(
+                    int(row.get("prompt_tokens") or 0),
+                    int(row.get("completion_tokens") or 0),
+                    float(row.get("usd") or 0.0),
+                )
+    except OSError:
+        pass
+    return out
+
+
+def render_per_swarm(swarm_run_id: str) -> str:
+    """Pretty-print a swarm's cost breakdown (overall + by role + by phase).
+    Used by `janus swarm cost <run-id>` (phase 10 wires the CLI)."""
+    overall = per_swarm_summary(swarm_run_id)
+    lines = [
+        f"swarm {swarm_run_id}",
+        f"  total: {overall.calls} calls · "
+        f"{overall.prompt_tokens:,} in · {overall.completion_tokens:,} out · "
+        f"${overall.usd:.4f}",
+    ]
+    p = _swarm_cost_path(swarm_run_id)
+    if not p.is_file():
+        return "\n".join(lines) + "\n  (no cost ledger yet)"
+    by_role: dict[str, TokenStats] = {}
+    by_phase: dict[str, TokenStats] = {}
+    try:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                pt = int(row.get("prompt_tokens") or 0)
+                ct = int(row.get("completion_tokens") or 0)
+                usd = float(row.get("usd") or 0.0)
+                r = row.get("role") or ""
+                ph = row.get("phase") or ""
+                by_role.setdefault(r, TokenStats()).add(pt, ct, usd)
+                by_phase.setdefault(ph, TokenStats()).add(pt, ct, usd)
+    except OSError:
+        pass
+    if by_role:
+        lines.append("  by role:")
+        for r, st in sorted(by_role.items(), key=lambda kv: -kv[1].usd):
+            lines.append(
+                f"    {r:<20}  {st.calls:>4} calls · ${st.usd:.4f}"
+            )
+    if by_phase:
+        lines.append("  by phase:")
+        for ph, st in sorted(by_phase.items()):
+            lines.append(
+                f"    {ph:<20}  {st.calls:>4} calls · ${st.usd:.4f}"
+            )
+    return "\n".join(lines)
