@@ -57,11 +57,20 @@ POST_TOOL_USE = "PostToolUse"
 STOP = "Stop"
 STOP_FAILURE = "StopFailure"
 
+# v1.4: swarm lifecycle hooks. Pre-events can deny (abort the spawn);
+# Post-events fire for observation only.
+PRE_SWARM_SPAWN = "PreSwarmSpawn"
+POST_SWARM_COMPLETE = "PostSwarmComplete"
+PRE_SUBAGENT_SPAWN = "PreSubagentSpawn"
+POST_SUBAGENT_COMPLETE = "PostSubagentComplete"
+
 ALL_EVENTS = (
     SESSION_START, SESSION_END,
     USER_PROMPT_SUBMIT, INTERPRET,
     PRE_TOOL_USE, POST_TOOL_USE,
     STOP, STOP_FAILURE,
+    PRE_SWARM_SPAWN, POST_SWARM_COMPLETE,
+    PRE_SUBAGENT_SPAWN, POST_SUBAGENT_COMPLETE,
 )
 
 

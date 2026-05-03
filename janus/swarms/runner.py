@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
-from .. import config, cost, subagent
+from .. import config, cost, hooks, subagent
 from . import aggregators as aggregators_mod
 from . import budget as budget_mod
 from . import cancel as cancel_mod
@@ -113,6 +113,28 @@ def _run_swarm_inner(
     parent_run_id: str | None,
 ) -> SwarmRunResult:
     validated = spec_mod.validate_inputs(spec, inputs)
+
+    # PreSwarmSpawn hook can deny the whole swarm. Fires BEFORE we mint a
+    # run id so a denied swarm leaves no on-disk artifacts.
+    pre_decision = hooks.fire(
+        hooks.PRE_SWARM_SPAWN,
+        {
+            "spec": spec.name, "spec_version": spec.version,
+            "inputs": validated, "parent_chat_id": parent_chat_id,
+            "parent_run_id": parent_run_id,
+        },
+        match_field="spec",
+    )
+    if not pre_decision.allow:
+        return SwarmRunResult(
+            run_id="",
+            spec_name=spec.name,
+            inputs=validated,
+            phases=[],
+            final=None,
+            error=f"hook_denied: {pre_decision.reason or 'PreSwarmSpawn refused'}",
+        )
+
     run_id = state.new_run_id()
     state.init_run_dir(run_id)
 
@@ -237,6 +259,22 @@ def _run_swarm_inner(
         "budget_snapshot": budget.snapshot(run_id),
     })
 
+    # PostSwarmComplete hook fires AFTER final.json is written so the
+    # hook command can read it. Observation only — no deny semantics.
+    hooks.fire(
+        hooks.POST_SWARM_COMPLETE,
+        {
+            "spec": spec.name, "run_id": run_id,
+            "n_phases": len(phase_results),
+            "n_subagents_total": sum(len(p.sub_agents) for p in phase_results),
+            "n_errors_total": sum(
+                sum(1 for s in p.sub_agents if s.error) for p in phase_results
+            ),
+            "budget_snapshot": budget.snapshot(run_id),
+        },
+        match_field="spec",
+    )
+
     return SwarmRunResult(
         run_id=run_id, spec_name=spec.name, inputs=validated,
         phases=phase_results, final=final,
@@ -332,6 +370,30 @@ def _run_phase(
     results: dict[str, subagent.SubagentResult] = {}
 
     def _run_one(agent_id: str, sub_spec: subagent.SubagentSpec) -> None:
+        # PreSubagentSpawn hook can deny this dispatch (allows fine-grained
+        # gating, e.g., "no spawns to model X" or "no spawns for role Y").
+        pre = hooks.fire(
+            hooks.PRE_SUBAGENT_SPAWN,
+            {
+                "spec": spec.name, "run_id": run_id,
+                "agent_id": agent_id, "role": phase.role,
+                "phase": phase.name, "model": phase.model,
+            },
+            match_field="role",
+        )
+        if not pre.allow:
+            results[agent_id] = subagent.SubagentResult(
+                leaf_id=agent_id, parent_id=run_id,
+                output="", trace=[],
+                error=f"hook_denied: {pre.reason or 'PreSubagentSpawn refused'}",
+            )
+            state.append_timeline(run_id, {
+                "type": "subagent_denied",
+                "phase": phase.name, "agent_id": agent_id,
+                "reason": pre.reason,
+            })
+            return
+
         # Mark this thread for cost attribution. Set BEFORE dispatch so
         # llm.chat()'s cost.record() call sees the right context.
         cost.set_active_subagent(
@@ -372,6 +434,19 @@ def _run_phase(
             "error": result.error,
             "tool_calls": tool_call_count,
         })
+        # PostSubagentComplete fires AFTER the transcript is on disk so
+        # the hook command can read it. Observation only.
+        hooks.fire(
+            hooks.POST_SUBAGENT_COMPLETE,
+            {
+                "spec": spec.name, "run_id": run_id,
+                "agent_id": agent_id, "role": phase.role,
+                "phase": phase.name, "error": result.error,
+                "output_chars": len(result.output or ""),
+                "tool_calls": tool_call_count,
+            },
+            match_field="role",
+        )
 
     if len(specs) == 0:
         # Empty phase — nothing to dispatch. Return empty aggregated.
