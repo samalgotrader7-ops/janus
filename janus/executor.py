@@ -42,6 +42,7 @@ def execute(
     temperature: float = 0.7,
     stream: bool = False,
     model: str | None = None,
+    cancel_event=None,
 ) -> tuple[str, list[dict]]:
     """Run the executor loop. Returns (final_text, trace).
 
@@ -52,6 +53,9 @@ def execute(
     `temperature`: pinned at 0 by the eval harness for deterministic replays.
     `model` (v1.4): if set, overrides config.MODEL for this run only.
         Used by swarm sub-agents to mix cheap/expensive models per role.
+    `cancel_event` (v1.4): a threading.Event-like; if set between steps,
+        the loop returns "[cancelled]" and exits cleanly. Cooperative
+        cancellation only — we don't interrupt mid-step.
     """
     head = ""
     if memory_preamble:
@@ -84,6 +88,14 @@ def execute(
     model_kw = {"model": model} if model is not None else {}
 
     for step in range(config.MAX_STEPS):
+        # v1.4: cooperative cancellation. Polled at the top of each step
+        # so the in-flight LLM call (if any) completes; the next step
+        # never starts.
+        if cancel_event is not None and cancel_event.is_set():
+            trace.append({"step": step, "type": "cancelled"})
+            if on_step:
+                on_step(trace[-1])
+            return "[cancelled]", trace
         if stream:
             # Stream the assistant turn token-by-token; the last yield is
             # the assembled message dict (content + tool_calls).
@@ -291,6 +303,7 @@ def chat(
     temperature: float = 0.7,
     stream: bool = True,
     model: str | None = None,
+    cancel_event=None,
 ) -> tuple[str, list[dict]]:
     """v1.0 Claude-Code-shaped chat turn.
 
@@ -333,6 +346,12 @@ def chat(
     model_kw = {"model": model} if model is not None else {}
 
     for step in range(config.MAX_STEPS):
+        # v1.4: cooperative cancellation between steps.
+        if cancel_event is not None and cancel_event.is_set():
+            trace.append({"step": step, "type": "cancelled"})
+            if on_step:
+                on_step(trace[-1])
+            return "[cancelled]", trace
         if stream:
             msg: dict = {}
             try:

@@ -26,7 +26,7 @@ def fake_subagent(monkeypatch):
     """
     state_box: dict = {"calls": [], "responder": None, "raise_for": set()}
 
-    def _stub(spec_obj: subagent.SubagentSpec) -> subagent.SubagentResult:
+    def _stub(spec_obj: subagent.SubagentSpec, **kw) -> subagent.SubagentResult:
         state_box["calls"].append(spec_obj)
         if spec_obj.leaf_id in state_box["raise_for"]:
             raise RuntimeError(f"forced failure for {spec_obj.leaf_id}")

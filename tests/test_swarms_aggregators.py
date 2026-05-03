@@ -304,7 +304,7 @@ def test_llm_aggregator_handles_chat_exception(monkeypatch):
 def fake_subagent(monkeypatch):
     state_box: dict = {"responder": None}
 
-    def _stub(spec_obj):
+    def _stub(spec_obj, **kw):
         if state_box["responder"]:
             return state_box["responder"](spec_obj)
         return subagent.SubagentResult(

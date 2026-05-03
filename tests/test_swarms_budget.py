@@ -229,7 +229,7 @@ def test_render_per_swarm_includes_role_and_phase(tmp_path, monkeypatch):
 def fake_subagent(monkeypatch):
     state_box: dict = {"calls": [], "responder": None}
 
-    def _stub(spec_obj):
+    def _stub(spec_obj, **kw):
         state_box["calls"].append(spec_obj)
         if state_box["responder"]:
             return state_box["responder"](spec_obj)
@@ -300,7 +300,7 @@ body
 """)
     # Stub: each sub-agent records cost well above $0.001.
     # claude-opus-4-7 is $15/M in + $75/M out → 100k input + 100k output ≈ $9.
-    def _stub_with_cost(spec_obj):
+    def _stub_with_cost(spec_obj, **kw):
         cost.record(
             "anthropic/claude-opus-4-7",
             {"prompt_tokens": 100000, "completion_tokens": 100000},
@@ -383,7 +383,7 @@ def test_runner_attributes_cost_to_per_swarm_ledger(
     cost.record() path land in the swarm-local cost.jsonl."""
     monkeypatch.setattr(config, "SWARM_RUNS_DIR", tmp_path)
 
-    def _stub(spec_obj):
+    def _stub(spec_obj, **kw):
         cost.record(
             "anthropic/claude-haiku-4-5",
             {"prompt_tokens": 100, "completion_tokens": 50},

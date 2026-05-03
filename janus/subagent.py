@@ -131,21 +131,32 @@ def capability_only_approver(caps: CapabilitySet):
 # ---------- In-process runner (also used by subprocess entry point) ----------
 
 
-def _run_in_process(spec: SubagentSpec) -> SubagentResult:
+def _run_in_process(
+    spec: SubagentSpec,
+    *,
+    cancel_event=None,
+) -> SubagentResult:
     """Run the subagent's executor in the current process.
 
     This is the path the subprocess entry point invokes after reading
     stdin, and the path tests use to avoid subprocess+LLM overhead.
+    `cancel_event` (v1.4): a threading.Event-like; if set, the executor
+    returns "[cancelled]" between steps. Only honored on the in-process
+    path — the subprocess path doesn't get it (subprocess sub-agents are
+    for plan trees, not swarms).
     """
     caps = CapabilitySet.from_dict(spec.capability_set or {})
     tools = default_registry(capabilities=caps, tool_names=spec.tool_names)
     approver = capability_only_approver(caps)
 
-    # v1.4: only forward model= when set so legacy callers (and test
-    # stubs of executor.execute that don't accept the kwarg) keep working.
+    # v1.4: only forward model= / cancel_event= when set so legacy
+    # callers (and test stubs of executor.execute that don't accept the
+    # kwargs) keep working.
     exec_kwargs: dict = {}
     if spec.model:
         exec_kwargs["model"] = spec.model
+    if cancel_event is not None:
+        exec_kwargs["cancel_event"] = cancel_event
     try:
         output, trace = executor.execute(
             original_request=spec.request,

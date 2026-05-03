@@ -26,6 +26,7 @@ from typing import Any
 from .. import config, cost, subagent
 from . import aggregators as aggregators_mod
 from . import budget as budget_mod
+from . import cancel as cancel_mod
 from . import spec as spec_mod
 from . import state
 
@@ -107,11 +108,30 @@ def run_swarm(
     })
 
     budget = budget_mod.SwarmBudget(spec.budget)
+    token = cancel_mod.CancellationToken(run_id)
+    token.start_watcher()
     phase_results: list[PhaseRunSummary] = []
     last_aggregated: Any = validated  # phase 0 input = swarm inputs
 
     try:
         for i, phase in enumerate(spec.phases):
+            # Cooperative cancellation check first — cheaper than budget.
+            if token.is_cancelled():
+                state.append_timeline(run_id, {
+                    "type": "swarm_cancelled",
+                    "phase": phase.name, "phase_num": i,
+                    "completed_phases": [p.name for p in phase_results],
+                })
+                state.write_final(run_id, {
+                    "error": "cancelled",
+                    "completed_phases": [p.name for p in phase_results],
+                    "snapshot": budget.snapshot(run_id),
+                })
+                return SwarmRunResult(
+                    run_id=run_id, spec_name=spec.name, inputs=validated,
+                    phases=phase_results, final=None,
+                    error="cancelled",
+                )
             # Budget check BEFORE starting the phase. Two checks:
             # 1. Are current totals already over a cap?
             # 2. Is there room for at least 1 more sub-agent? (No room
@@ -149,6 +169,7 @@ def run_swarm(
             result = _run_phase(
                 spec=spec, phase=phase, phase_num=i,
                 phase_input=phase_input, run_id=run_id, budget=budget,
+                token=token,
             )
             phase_results.append(result)
             last_aggregated = result.aggregated
@@ -172,6 +193,8 @@ def run_swarm(
             phases=phase_results, final=None,
             error=f"{type(e).__name__}: {e}",
         )
+    finally:
+        token.stop_watcher()
 
     final = phase_results[-1].aggregated if phase_results else None
     state.write_final(run_id, final)
@@ -220,13 +243,17 @@ def _run_phase(
     phase_input: Any,
     run_id: str,
     budget: budget_mod.SwarmBudget,
+    token: cancel_mod.CancellationToken,
 ) -> PhaseRunSummary:
     """Build sub-agent specs, dispatch concurrently, collect results,
-    aggregate (placeholder until phase 5 wires real aggregators).
+    aggregate.
 
     Budget-aware: refuses to dispatch if max_subagents would be exceeded;
     re-checks after each return; writes a timeline event when killed
-    mid-phase. Returns a partial PhaseRunSummary on kill."""
+    mid-phase. Returns a partial PhaseRunSummary on kill.
+
+    Cancel-aware: passes the cancel_event into each sub-agent's executor
+    so currently-running sub-agents exit between steps when cancelled."""
     tasks = _partition(phase, phase_input)
 
     # Pre-flight subagent-count check.
@@ -285,7 +312,9 @@ def _run_phase(
             "phase": phase.name, "agent_id": agent_id, "role": phase.role,
         })
         try:
-            result = subagent._run_in_process(sub_spec)
+            result = subagent._run_in_process(
+                sub_spec, cancel_event=token.event,
+            )
         except Exception as e:
             result = subagent.SubagentResult(
                 leaf_id=agent_id, parent_id=run_id,

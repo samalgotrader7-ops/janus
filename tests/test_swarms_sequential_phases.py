@@ -26,7 +26,7 @@ def echo_subagent(monkeypatch):
     actually saw as input."""
     state_box: dict = {"calls": []}
 
-    def _stub(spec_obj):
+    def _stub(spec_obj, **kw):
         state_box["calls"].append(spec_obj)
         return subagent.SubagentResult(
             leaf_id=spec_obj.leaf_id, parent_id=spec_obj.parent_id,
@@ -330,7 +330,7 @@ def test_dedupe_then_topk_pipeline(tmp_path, monkeypatch, echo_subagent):
 
     # Stub: each sub-agent emits a JSON list of {id, score} objects,
     # encoded as a single output string.
-    def _stub(spec_obj):
+    def _stub(spec_obj, **kw):
         if "stage1" in spec_obj.label:
             payload = [
                 {"id": "x", "score": 5},
