@@ -148,7 +148,7 @@ def test_apply_user_md_creates_sections(janus_home):
         {"section": "Active projects", "text": "janus"},
     ])
     assert n == 2
-    txt = config.USER_MODEL_FILE.read_text(encoding="utf-8")
+    txt = (config.MEMORY_DIR / "user.md").read_text(encoding="utf-8")
     assert "Sam" in txt and "Active projects" in txt
 
 

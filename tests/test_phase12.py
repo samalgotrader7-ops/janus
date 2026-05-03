@@ -19,7 +19,8 @@ from janus.tools.code_exec import ast_check, CodeExecPython
 
 
 def test_snapshot_picks_up_current_user_md(janus_home):
-    config.USER_MODEL_FILE.write_text(
+    (config.MEMORY_DIR / "user.md").parent.mkdir(parents=True, exist_ok=True)
+    (config.MEMORY_DIR / "user.md").write_text(
         "# user.md\n\n## Identity\nSam — solo dev.\n",
         encoding="utf-8",
     )
@@ -35,14 +36,16 @@ def test_snapshot_empty_when_no_user_md(janus_home):
 
 
 def test_snapshot_does_not_change_until_explicitly_refreshed(janus_home):
-    config.USER_MODEL_FILE.write_text(
+    (config.MEMORY_DIR / "user.md").parent.mkdir(parents=True, exist_ok=True)
+    (config.MEMORY_DIR / "user.md").write_text(
         "# user.md\n\n## A\nfirst\n", encoding="utf-8",
     )
     snap = cache.snapshot()
     first = snap.preamble
 
     # Mutate user.md.
-    config.USER_MODEL_FILE.write_text(
+    (config.MEMORY_DIR / "user.md").parent.mkdir(parents=True, exist_ok=True)
+    (config.MEMORY_DIR / "user.md").write_text(
         "# user.md\n\n## A\nSECOND\n", encoding="utf-8",
     )
     # Snapshot is stale — that's the point. Caller controls when to refresh.
@@ -56,7 +59,8 @@ def test_snapshot_does_not_change_until_explicitly_refreshed(janus_home):
 def test_two_snapshots_within_one_turn_are_byte_identical(janus_home):
     """The cache hit guarantee: two snapshots taken back-to-back without
     any user.md mutation produce strings that compare equal."""
-    config.USER_MODEL_FILE.write_text(
+    (config.MEMORY_DIR / "user.md").parent.mkdir(parents=True, exist_ok=True)
+    (config.MEMORY_DIR / "user.md").write_text(
         "# user.md\n\n## A\nstable content\n", encoding="utf-8",
     )
     a = cache.snapshot().preamble

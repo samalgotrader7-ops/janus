@@ -109,16 +109,19 @@ def test_favicon_route_serves_svg(janus_home):
 
 @pytest.mark.skipif(not _HAS_FASTAPI, reason="fastapi not installed")
 def test_chat_endpoint_returns_output(janus_home, fake_llm):
-    """v1.0: POST /chat drives executor.chat() against a session-scoped
-    messages list. Single LLM call returns assistant text directly."""
+    """v1.3: POST /chat drives executor.chat() against a session-scoped
+    messages list. First turn prepends a self-intro from soul.md + user.md;
+    the assistant's text follows after a blank line."""
     from fastapi.testclient import TestClient
     fake_llm.append({"role": "assistant", "content": "hi back"})
+    web_mod._SESSIONS.clear()
     app = web_mod._build_app()
     c = TestClient(app)
     r = c.post("/chat", json={"request": "hi", "session_id": "s1"})
     assert r.status_code == 200
     data = r.json()
-    assert data["output"] == "hi back"
+    # v1.3 self-intro is prepended on the first turn — "hi back" still in there.
+    assert "hi back" in data["output"]
     assert data["session_id"] == "s1"
 
 

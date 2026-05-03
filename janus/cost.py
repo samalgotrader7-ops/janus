@@ -25,8 +25,12 @@ table" hint. We don't crash on missing data.
 """
 
 from __future__ import annotations
+import datetime
 import json
+import os
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from . import config
 
@@ -191,3 +195,109 @@ def render_summary() -> str:
             "JANUS_MODEL_PRICES_JSON to add)"
         )
     return "\n".join(lines)
+
+
+# ---------- Per-chat ledger (v1.3 L3 #2) ----------
+#
+# In-process counters reset on restart. The per-chat ledger is JSONL on
+# disk so one chat's spend is queryable across restarts and feeds
+# cost-cartographer (the v1.2 skill that builds per-task cost models).
+
+
+def _ledger_path() -> Path:
+    return config.HOME / "cost.jsonl"
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def record_per_chat(
+    *,
+    gateway: str,
+    chat_id: str,
+    identity: str = "",
+    model: str = "",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    usd: float = 0.0,
+) -> None:
+    """Append one row to ~/.janus/cost.jsonl for this turn.
+
+    Cheap and safe: open in append mode, JSON-encode one line, never
+    raises (P8). Gateways call this AFTER executor.chat() returns —
+    typically with cost.turn_stats() snapshotted from the just-run turn.
+    """
+    config.ensure_home()
+    row = {
+        "ts": _now_iso(),
+        "gateway": gateway,
+        "chat_id": str(chat_id),
+        "identity": identity or "",
+        "model": model or "",
+        "prompt_tokens": int(prompt_tokens),
+        "completion_tokens": int(completion_tokens),
+        "usd": round(float(usd), 6),
+    }
+    try:
+        with open(_ledger_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def per_chat_summary(
+    *,
+    gateway: str = "",
+    chat_id: str = "",
+    identity: str = "",
+    since_iso: str = "",
+) -> TokenStats:
+    """Sum the cost.jsonl ledger filtered by any combination of fields.
+
+    Empty filters = sum everything. `since_iso` is an ISO-8601 cutoff
+    (entries with `ts < since_iso` are excluded). Returns a fresh
+    TokenStats — does NOT mutate the global counters.
+    """
+    out = TokenStats()
+    p = _ledger_path()
+    if not p.is_file():
+        return out
+    try:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if since_iso and str(row.get("ts", "")) < since_iso:
+                    continue
+                if gateway and row.get("gateway") != gateway:
+                    continue
+                if chat_id and str(row.get("chat_id")) != str(chat_id):
+                    continue
+                if identity and row.get("identity") != identity:
+                    continue
+                out.add(
+                    int(row.get("prompt_tokens") or 0),
+                    int(row.get("completion_tokens") or 0),
+                    float(row.get("usd") or 0.0),
+                )
+    except OSError:
+        pass
+    return out
+
+
+def render_per_chat(gateway: str, chat_id: str, identity: str = "") -> str:
+    """Pretty-print summary for one chat (used by gateway /cost)."""
+    st = per_chat_summary(gateway=gateway, chat_id=chat_id)
+    label = f"{gateway} chat={chat_id}"
+    if identity:
+        st_id = per_chat_summary(identity=identity)
+        return (
+            f"  this chat ({label}): "
+            f"{st.calls} calls · ${st.usd:.4f}\n"
+            f"  identity '{identity}' total: "
+            f"{st_id.calls} calls · ${st_id.usd:.4f}"
+        )
+    return f"  this chat ({label}): {st.calls} calls · ${st.usd:.4f}"

@@ -46,7 +46,8 @@ MODEL: str = os.getenv("JANUS_MODEL", "openai/gpt-4o-mini")
 HOME: Path = Path(os.getenv("JANUS_HOME", str(Path.home() / ".janus")))
 LOG_FILE: Path = HOME / "log.jsonl"
 SESSIONS_DB: Path = HOME / "sessions.db"
-USER_MODEL_FILE: Path = HOME / "user.md"
+USER_MODEL_FILE: Path = HOME / "user.md"  # legacy, migrated to MEMORY_DIR/user.md
+MEMORY_DIR: Path = HOME / "memory"
 SKILLS_DIR: Path = HOME / "skills"
 EVALS_DIR: Path = HOME / "evals"
 TRIGGERS_DIR: Path = HOME / "triggers"
@@ -72,6 +73,19 @@ APPROVAL_MODE: str = os.getenv("JANUS_APPROVAL", "manual")
 MEMORY_PROPOSE_MODEL: str = os.getenv("JANUS_MEMORY_MODEL", "")
 MEMORY_PREPEND_BYTES: int = int(os.getenv("JANUS_MEMORY_BYTES", "4096"))
 MEMORY_PROPOSE_ENABLED: bool = os.getenv("JANUS_MEMORY_PROPOSE", "1") not in ("0", "false", "no")
+
+# v1.3 — multi-category memory. Each category is a separate .md under
+# MEMORY_DIR; the loader concatenates them in this order into the system
+# prompt (earlier categories weigh more — soul first frames the agent's
+# identity before anything else). Users can drop additional .md files
+# in MEMORY_DIR; they're loaded after these in alpha order.
+MEMORY_CATEGORIES: list[str] = [
+    "soul",            # agent identity (name, role, tone, capabilities self-description)
+    "user",            # who the user is (existing user.md content lives here after migration)
+    "project",         # current workspace / project context (decays fast)
+    "preferences",     # style, format, output preferences
+    "relationships",   # other people in user's life — privacy-flagged
+]
 
 # --- Phase 2: eval ---
 EVAL_DEFAULT_LAST: int = int(os.getenv("JANUS_EVAL_LAST", "20"))
@@ -164,6 +178,7 @@ def ensure_home() -> None:
     MCP_DIR.mkdir(parents=True, exist_ok=True)
     CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
     COMMANDS_DIR.mkdir(parents=True, exist_ok=True)
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def memory_model() -> str:

@@ -65,7 +65,7 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/why",          "re-interpret your last message and show 2-3 candidate readings", "built-in"),
     SlashCommand("/workspace",    "show or change the active workspace directory",       "built-in"),
     SlashCommand("/analyze",      "scan the workspace for tools, skills, project hints", "built-in"),
-    SlashCommand("/memory",       "show the user.md memory file",                        "built-in"),
+    SlashCommand("/memory",       "show all memory categories, or /memory <cat> for one (soul, user, project, …)", "built-in"),
     SlashCommand("/search",       "search prior interactions in the log index",          "built-in"),
     SlashCommand("/skills",       "list/filter skills, or install-bundled to copy the starter catalog", "built-in"),
     SlashCommand("/promote",      "promote a quarantined skill to a trusted state",      "built-in"),
@@ -428,11 +428,35 @@ def _dispatch(console, line: str, state: dict) -> bool:
         analyze()
         return True
     if cmd == "/memory":
-        txt = memory.read()
-        if not txt:
-            console.print("[dim](no user.md yet)[/]")
-        else:
-            console.print(Markdown(txt))
+        target = arg.strip()
+        if target:
+            txt = memory.read(target)
+            if not txt:
+                console.print(f"[dim](no {target}.md yet)[/]")
+            else:
+                console.print(Markdown(txt))
+            return True
+        cats = memory.list_categories()
+        configured = list(config.MEMORY_CATEGORIES)
+        if not cats:
+            console.print("[dim](no memory yet)[/]")
+            console.print(
+                f"[dim]categories ready to populate: "
+                f"{', '.join(configured)}[/dim]"
+            )
+            return True
+        for cat in cats:
+            body = memory.read(cat).strip()
+            console.print(
+                f"[bold]{cat}.md[/] [dim]({len(body)} bytes)[/]"
+            )
+            console.print(Markdown(body))
+            console.print()
+        empty = [c for c in configured if c not in cats]
+        if empty:
+            console.print(
+                f"[dim]empty: {', '.join(c + '.md' for c in empty)}[/dim]"
+            )
         return True
     if cmd == "/search":
         if not arg.strip():

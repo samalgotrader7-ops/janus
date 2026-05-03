@@ -1,19 +1,28 @@
 """
-gateways/web.py — v1.0 chat-shaped local web UI on FastAPI.
+gateways/web.py — v1.3 chat-shaped local web UI on FastAPI.
 
 WHY:
 A web surface for the same `executor.chat()` loop the CLI uses. Same
-permission model, same skills, same hooks. No business logic in the
-gateway.
+permission model, same skills, same hooks. No business logic here.
+
+v1.3 ADDITIONS:
+- Optional pairing (off by default since localhost is implicit-trust).
+  Set JANUS_WEB_PAIRING=1 when binding non-localhost behind a proxy.
+- POST /home and POST /memory endpoints for parity with Telegram.
+- Self-introduction loaded from soul.md + user.md on first message
+  per browser session.
+- Persistent sessions via gw.GatewaySession — survives restart.
+
+DEFERRED to v1.4 (with explicit notes in the v1.3 release):
+- SSE streaming (currently full-response only). Indicator events fire
+  but render after the turn completes.
+- Inline approval UI. ASK still falls through to DENY in the web
+  approver. v1.3 L3 introduces "approval routed to home channel" —
+  use Telegram for approvals when chatting via web.
 
 SAFETY POSTURE:
 - Binds 127.0.0.1 by default. Refuses non-localhost unless the user
-  explicitly passes `--host` AND sets `JANUS_WEB_HOST_OK=1` (the env
-  var is the deliberate friction).
-- The web approver is mode-aware via permissions.decide(). ASK becomes
-  DENY because the page has no inline approval UI. Use acceptEdits or
-  bypassPermissions via JANUS_APPROVAL, or attach a skill with
-  capability tokens, to authorize writes/exec.
+  explicitly passes `--host` AND sets `JANUS_WEB_HOST_OK=1`.
 - All text is escaped before rendering.
 
 DEPENDENCIES:
@@ -23,13 +32,22 @@ DEPENDENCIES:
 
 from __future__ import annotations
 import html
+import os
 import time
 import uuid
 from typing import Any
 
 from .. import config, executor, logger, memory, skills, hooks, permissions
-from .. import branding
+from .. import branding, cost
 from ..tools import default_registry, make_capability_aware, CapabilitySet
+from . import _common as gw
+
+GATEWAY_NAME = "web"
+
+
+def _pairing_required() -> bool:
+    """When binding non-localhost, require pairing unless explicitly off."""
+    return os.environ.get("JANUS_WEB_PAIRING", "").lower() in ("1", "true", "yes")
 
 
 _FASTAPI_HINT = (
@@ -47,14 +65,37 @@ def _try_import_fastapi():
         return None
 
 
-# Per-session conversation state. Keyed by browser-generated session ID.
-# In-process only — restart loses sessions. v1.x can persist.
+# v1.3: in-process cache backed by persistent gw.GatewaySession on disk.
+# Kept as a dict facade for backward-compat with existing tests.
 _SESSIONS: dict[str, list[dict]] = {}
 
 
+def _load_or_create_session(sid: str) -> list[dict]:
+    """Return the messages list for a session, loading from disk if needed."""
+    if sid in _SESSIONS:
+        return _SESSIONS[sid]
+    persisted = gw.load_session(GATEWAY_NAME, sid)
+    _SESSIONS[sid] = persisted.messages
+    return _SESSIONS[sid]
+
+
+def _persist_session(sid: str, messages: list[dict], mode: str) -> None:
+    """Write the in-memory messages list back to disk."""
+    sess = gw.load_session(GATEWAY_NAME, sid)
+    sess.messages = messages
+    sess.mode = mode
+    gw.save_session(sess)
+
+
 def _make_web_approver(mode: str):
-    """Mode-aware approver for the web gateway. ASK falls through to DENY
-    because there's no inline approval UI yet."""
+    """Mode-aware approver for the web gateway.
+
+    v1.3: ASK still falls through to DENY because the page has no inline
+    approval UI. The Layer 3 'approval routed to home channel' feature
+    will let you approve from Telegram when chatting via web. Until then,
+    use acceptEdits / bypassPermissions, or attach a skill with capability
+    tokens.
+    """
     def approver(action_label: str, details: str, **kw) -> bool:
         risk = kw.get("risk") or permissions.risk_from_verb(
             (kw.get("capability") or (None, "", None))[1]
@@ -62,7 +103,7 @@ def _make_web_approver(mode: str):
         decision = permissions.decide(risk, mode)
         if decision == permissions.ALLOW:
             return True
-        return False  # ASK and DENY both fall to deny.
+        return False  # ASK and DENY both fall to deny (L3 will bridge).
     return approver
 
 
@@ -223,6 +264,16 @@ def _build_app():
         if not req:
             return JSONResponse({"error": "empty request"})
 
+        # v1.3 pairing — only enforced when the operator opts in.
+        if _pairing_required() and not gw.is_authorized(GATEWAY_NAME, sid):
+            code = gw.request_pairing(GATEWAY_NAME, sid, user_label=sid[:8])
+            return JSONResponse({
+                "error": "pairing required",
+                "pairing_code": code,
+                "instructions":
+                    f"ask the bot owner: janus pair approve {code}",
+            })
+
         # UserPromptSubmit hook can deny / rewrite.
         try:
             up = hooks.fire(hooks.USER_PROMPT_SUBMIT, {"request": req})
@@ -233,7 +284,13 @@ def _build_app():
         except Exception:
             pass
 
-        messages = _SESSIONS.setdefault(sid, [])
+        messages = _load_or_create_session(sid)
+
+        # v1.3 self-introduction — first turn for a brand-new session
+        # gets a soul-aware greeting prepended to the response.
+        intro = ""
+        if not messages:
+            intro = gw.greeting() + "\n\n"
 
         mode = permissions.normalize(config.APPROVAL_MODE)
         base_approver = _make_web_approver(mode)
@@ -247,7 +304,7 @@ def _build_app():
             "model": config.MODEL,
             "workspace": str(config.WORKSPACE),
             "request": req,
-            "gateway": "web",
+            "gateway": GATEWAY_NAME,
             "session_id": sid,
             "mode": mode,
         }
@@ -275,11 +332,75 @@ def _build_app():
             return JSONResponse({"error": str(e)})
 
         logger.write(record)
+        # v1.3: persist messages + mode so they survive process restart.
+        try:
+            _persist_session(sid, messages, mode)
+        except Exception:
+            pass
+        # v1.3 L3 #2 — per-chat cost ledger.
+        try:
+            ts = cost.turn_stats()
+            cost.record_per_chat(
+                gateway=GATEWAY_NAME, chat_id=sid,
+                identity=gw.identity_for(GATEWAY_NAME, sid) or "",
+                model=config.MODEL,
+                prompt_tokens=ts.prompt_tokens,
+                completion_tokens=ts.completion_tokens, usd=ts.usd,
+            )
+        except Exception:
+            pass
         try:
             hooks.fire(hooks.STOP, {"request": req, "output": output})
         except Exception:
             pass
-        return JSONResponse({"output": output, "session_id": sid})
+        final_output = (intro + output) if output else (intro or "(no output)")
+        return JSONResponse({"output": final_output, "session_id": sid})
+
+    @app.post("/home")
+    async def set_home(body: dict = Body(default={})):
+        """v1.3: designate this browser session as the web home channel.
+
+        Cron output and cross-platform messages route here when this
+        session is online.
+        """
+        sid = (body.get("session_id") or "").strip()
+        if not sid:
+            return JSONResponse({"error": "session_id required"})
+        gw.set_home(GATEWAY_NAME, sid)
+        logger.write({
+            "ts": logger.now_iso(), "type": "sethome",
+            "gateway": GATEWAY_NAME, "session_id": sid,
+        })
+        return JSONResponse({"ok": True, "home": sid})
+
+    @app.get("/cost")
+    async def get_cost(session_id: str = ""):
+        """v1.3 L3 #2 — per-chat cost summary."""
+        if not session_id:
+            return JSONResponse({
+                "summary": "session_id required (per-chat ledger)",
+            })
+        identity = gw.identity_for(GATEWAY_NAME, session_id) or ""
+        return JSONResponse({
+            "session_id": session_id,
+            "identity": identity,
+            "summary": cost.render_per_chat(GATEWAY_NAME, session_id, identity),
+        })
+
+    @app.get("/memory")
+    async def get_memory(category: str = ""):
+        """v1.3: list memory categories or fetch one."""
+        if category:
+            return JSONResponse({
+                "category": category,
+                "body": memory.read(category),
+            })
+        cats = memory.list_categories()
+        return JSONResponse({
+            "categories": cats,
+            "configured": list(config.MEMORY_CATEGORIES),
+            "all": {c: memory.read(c) for c in cats},
+        })
 
     return app
 

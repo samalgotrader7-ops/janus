@@ -2,6 +2,10 @@
 
   chat                          default -- interactive REPL (rich if available)
   telegram                      run the Telegram gateway (needs JANUS_TELEGRAM_TOKEN)
+  pair list                     list pending pairing-code requests across gateways
+  pair approve <CODE>           approve a pairing code (owner authorization)
+  pair revoke <gateway> <id>    remove a previously-approved chat
+  pair approved                 list all approved (gateway, chat_id) pairs
   daemon                        run the proactive trigger daemon
   daemon --once                 single iteration of the daemon loop (cron/systemd)
   fire <trigger>                fire one named trigger immediately
@@ -227,6 +231,58 @@ def _run_daemon(once=False):
     run_daemon(once=once)
 
 
+def _run_pair(args):
+    """Owner CLI for the gateway pairing system (v1.3).
+
+    Subcommands:
+      list                     show pending code requests
+      approved                 show approved (gateway, chat_id) pairs
+      approve <CODE>           authorize the chat that requested CODE
+      revoke <gateway> <chat>  remove a previously-approved chat
+    """
+    from .gateways import _common as gw
+    config.ensure_home()
+    sub = args[0] if args else "list"
+    if sub == "list":
+        pending = gw.list_pending()
+        if not pending:
+            print("(no pending pairing requests)"); return
+        for p in pending:
+            label = f" — {p.user_label}" if p.user_label else ""
+            print(f"{p.code}  {p.gateway:>10}  chat={p.chat_id}{label}  "
+                  f"requested={p.created_at}")
+        return
+    if sub == "approved":
+        approved = gw.list_approved()
+        if not approved:
+            print("(no approved chats)"); return
+        for gateway, ids in sorted(approved.items()):
+            print(f"{gateway}:")
+            for cid in ids:
+                print(f"  {cid}")
+        return
+    if sub == "approve":
+        if len(args) < 2:
+            print("usage: janus pair approve <CODE>"); sys.exit(2)
+        pc = gw.approve_code(args[1])
+        if pc is None:
+            print(f"error: code {args[1]} unknown or expired"); sys.exit(2)
+        label = f" ({pc.user_label})" if pc.user_label else ""
+        print(f"approved: {pc.gateway} chat={pc.chat_id}{label}")
+        return
+    if sub == "revoke":
+        if len(args) < 3:
+            print("usage: janus pair revoke <gateway> <chat_id>"); sys.exit(2)
+        if gw.revoke(args[1], args[2]):
+            print(f"revoked: {args[1]} chat={args[2]}")
+        else:
+            print(f"not found: {args[1]} chat={args[2]}"); sys.exit(1)
+        return
+    print(f"unknown pair subcommand: {sub}")
+    print("usage: janus pair {list|approved|approve <code>|revoke <gw> <chat>}")
+    sys.exit(2)
+
+
 def _fire(name):
     from .triggers import load_triggers, fire_once
     config.ensure_home()
@@ -387,6 +443,8 @@ def main():
         if len(args) < 2:
             print("usage: python -m janus fire <trigger-name>"); sys.exit(2)
         _fire(args[1]); return
+    if sub == "pair":
+        _run_pair(args[1:]); return
     if sub in ("--help", "-h", "help"):
         print(__doc__); return
     _run_chat()

@@ -127,13 +127,19 @@ def _check_skills_dir() -> CheckResult:
 
 
 def _check_user_md() -> CheckResult:
-    if not config.USER_MODEL_FILE.exists():
-        return CheckResult(
-            "user.md", "warn", "not yet present",
-            fix="try /init to draft one from your workspace",
-        )
-    sz = config.USER_MODEL_FILE.stat().st_size
-    return CheckResult("user.md", "pass", f"{sz} bytes")
+    # v1.3: memory now lives at MEMORY_DIR/<category>.md. user.md may have
+    # been migrated; report from the new path with the legacy as fallback.
+    new_path = config.MEMORY_DIR / "user.md"
+    if new_path.exists():
+        return CheckResult("memory/user.md", "pass",
+                           f"{new_path.stat().st_size} bytes")
+    if config.USER_MODEL_FILE.exists():
+        return CheckResult("user.md (legacy)", "warn",
+                           "found at old path; will migrate on next run")
+    return CheckResult(
+        "memory/user.md", "warn", "not yet present",
+        fix="try /init to draft one from your workspace",
+    )
 
 
 def _check_optional_dep(import_name: str, pkg_name: str) -> CheckResult:

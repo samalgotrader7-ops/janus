@@ -40,13 +40,47 @@ from typing import Any
 
 import requests
 
-from .. import config, executor, logger, memory, skills, permissions
+from .. import config, executor, logger, memory, skills, permissions, cost
 from ..tools import default_registry, make_capability_aware, CapabilitySet
+from . import _common as gw
 
+GATEWAY_NAME = "whatsapp"
 
-# Per-sender conversation state. Keyed by phone number. In-process; restart
-# loses sessions. v1.x can persist alongside ~/.janus/conversations/.
+# Per-sender conversation state cache (backed by gw.GatewaySession on disk).
 _SESSIONS: dict[str, list[dict]] = {}
+
+
+def _load_messages(sender: str) -> list[dict]:
+    if sender in _SESSIONS:
+        return _SESSIONS[sender]
+    persisted = gw.load_session(GATEWAY_NAME, sender)
+    _SESSIONS[sender] = persisted.messages
+    return _SESSIONS[sender]
+
+
+def _persist_messages(sender: str, messages: list[dict], mode: str) -> None:
+    sess = gw.load_session(GATEWAY_NAME, sender)
+    sess.messages = messages
+    sess.mode = mode
+    gw.save_session(sess)
+
+
+def _is_authorized(sender: str) -> bool:
+    return gw.is_authorized(
+        GATEWAY_NAME, sender,
+        env_allowlist=config.WHATSAPP_ALLOWED_NUMBERS or "",
+    )
+
+
+def _greeted(sender: str) -> bool:
+    s = gw.load_session(GATEWAY_NAME, sender)
+    return bool(s.extras.get("greeted"))
+
+
+def _mark_greeted(sender: str) -> None:
+    s = gw.load_session(GATEWAY_NAME, sender)
+    s.extras["greeted"] = True
+    gw.save_session(s)
 
 
 _GRAPH_URL = "https://graph.facebook.com/v20.0"
@@ -126,17 +160,38 @@ def _make_whatsapp_approver(mode: str):
 
 
 def _handle_inbound(msg: dict) -> str | None:
-    """v1.0 chat-shaped handler: run executor.chat() for one inbound message
-    against this sender's messages list. Returns the reply text (or None)."""
+    """v1.3 chat-shaped handler with pairing, slash commands, self-intro."""
     sender = msg.get("from", "")
     text = msg.get("text", "")
-    allow = _allowed_numbers()
-    if allow and sender not in allow:
-        return None  # silently drop
     if not text:
         return None
 
-    messages = _SESSIONS.setdefault(sender, [])
+    # v1.3 pairing — unrecognized numbers receive a code instead of a chat.
+    if not _is_authorized(sender):
+        code = gw.request_pairing(GATEWAY_NAME, sender, user_label=sender)
+        return (
+            f"Hi! I don't recognize this number yet.\n\n"
+            f"Pairing code: {code}\n\n"
+            f"Ask the bot owner to run:\n"
+            f"janus pair approve {code}\n\n"
+            f"Once approved, send any message and I'll respond."
+        )
+
+    # v1.3 slash commands — minimal surface (WhatsApp doesn't have native UI).
+    s = text.strip()
+    if s.startswith("/"):
+        return _handle_command(sender, s)
+
+    # v1.3 self-intro on first authorized text.
+    intro = ""
+    if not _greeted(sender):
+        intro = gw.greeting() + "\n\n"
+        _mark_greeted(sender)
+        # Pure greeting? The intro IS the reply.
+        if s.lower().strip(" .!,?") in ("hi", "hello", "hey", "yo", "sup"):
+            return intro.strip()
+
+    messages = _load_messages(sender)
     mode = permissions.normalize(config.APPROVAL_MODE)
     base_approver = _make_whatsapp_approver(mode)
     caps = CapabilitySet()
@@ -149,7 +204,7 @@ def _handle_inbound(msg: dict) -> str | None:
         "model": config.MODEL,
         "workspace": str(config.WORKSPACE),
         "request": text,
-        "gateway": "whatsapp",
+        "gateway": GATEWAY_NAME,
         "sender": sender,
         "mode": mode,
     }
@@ -168,11 +223,74 @@ def _handle_inbound(msg: dict) -> str | None:
         )
         record["output"] = output
         record["trace"] = trace
+        try:
+            _persist_messages(sender, messages, mode)
+        except Exception:
+            pass
+        # v1.3 L3 #2 — per-chat cost ledger.
+        try:
+            ts = cost.turn_stats()
+            cost.record_per_chat(
+                gateway=GATEWAY_NAME, chat_id=sender,
+                identity=gw.identity_for(GATEWAY_NAME, sender) or "",
+                model=config.MODEL,
+                prompt_tokens=ts.prompt_tokens,
+                completion_tokens=ts.completion_tokens, usd=ts.usd,
+            )
+        except Exception:
+            pass
     except Exception as e:
         record["error"] = f"execute: {e}"
         output = f"executor error: {e}"
     logger.write(record)
-    return output
+    return (intro + output) if intro else output
+
+
+def _handle_command(sender: str, line: str) -> str:
+    """Minimal WhatsApp command surface (v1.3)."""
+    parts = line.split(maxsplit=1)
+    cmd = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    if cmd == "/sethome":
+        gw.set_home(GATEWAY_NAME, sender)
+        return f"✅ Home channel set to {sender}.\nCron and cross-platform messages will be delivered here."
+    if cmd == "/memory":
+        if arg:
+            body = memory.read(arg)
+            return body.strip() or f"(no {arg}.md yet)"
+        cats = memory.list_categories()
+        if not cats:
+            return ("(no memory yet — categories ready: "
+                    f"{', '.join(config.MEMORY_CATEGORIES)})")
+        return "\n\n".join(
+            f"━ {c}.md ━\n{memory.read(c).strip()}" for c in cats
+        )
+    if cmd == "/skills":
+        items = skills.list_skills()
+        if not items:
+            return "no skills installed."
+        lines = [f"• {s.name} ({s.state}) — {s.description}" for s in items[:30]]
+        if len(items) > 30:
+            lines.append(f"... ({len(items) - 30} more)")
+        return "\n".join(lines)
+    if cmd == "/clear":
+        _SESSIONS[sender] = []
+        try:
+            sess = gw.load_session(GATEWAY_NAME, sender)
+            sess.messages = []
+            gw.save_session(sess)
+        except Exception:
+            pass
+        return "conversation cleared."
+    if cmd == "/cost":
+        identity = gw.identity_for(GATEWAY_NAME, sender) or ""
+        return cost.render_per_chat(GATEWAY_NAME, sender, identity)
+    if cmd in ("/help", "/?"):
+        return (
+            "commands: /sethome /memory [cat] /skills /cost /clear /help\n\n"
+            "type any other text to chat."
+        )
+    return f"unknown command: {cmd}\ntry /help"
 
 
 # ---------- HTTP server ----------

@@ -262,7 +262,7 @@ def handle_command(line):
     if cmd == "/analyze":
         analyze(); return True
     if cmd == "/memory":
-        return _cmd_memory()
+        return _cmd_memory(arg)
     if cmd == "/search":
         return _cmd_search(arg)
     if cmd == "/skills":
@@ -404,12 +404,38 @@ def _cmd_workspace(arg):
     return True
 
 
-def _cmd_memory():
-    txt = memory.read()
-    if not txt:
-        print(f"  {C.DIM}(no user.md yet){C.R}")
-    else:
-        print(); print(txt)
+def _cmd_memory(arg=""):
+    """`/memory` — show all categories. `/memory <cat>` — show one category.
+
+    v1.3: memory is multi-category at ~/.janus/memory/<cat>.md.
+    """
+    arg = (arg or "").strip()
+    if arg:
+        txt = memory.read(arg)
+        if not txt:
+            print(f"  {C.DIM}(no {arg}.md yet){C.R}")
+        else:
+            print(); print(txt)
+        return True
+    cats = memory.list_categories()
+    configured = list(config.MEMORY_CATEGORIES)
+    if not cats:
+        print(f"  {C.DIM}(no memory yet){C.R}")
+        print(f"  {C.DIM}categories ready to populate: "
+              f"{', '.join(configured)}{C.R}")
+        return True
+    print()
+    for cat in cats:
+        body = memory.read(cat).strip()
+        sz = len(body)
+        print(f"  {C.BOLD}{cat}.md{C.R} {C.DIM}({sz} bytes){C.R}")
+        for ln in body.splitlines():
+            print(f"    {ln}")
+        print()
+    # Also list configured-but-empty so user knows what's available.
+    empty = [c for c in configured if c not in cats]
+    if empty:
+        print(f"  {C.DIM}empty: {', '.join(c + '.md' for c in empty)}{C.R}")
     return True
 
 
