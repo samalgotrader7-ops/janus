@@ -27,6 +27,7 @@ from .. import config, cost, subagent
 from . import aggregators as aggregators_mod
 from . import budget as budget_mod
 from . import cancel as cancel_mod
+from . import recursion as recursion_mod
 from . import spec as spec_mod
 from . import state
 
@@ -77,7 +78,40 @@ def run_swarm(
     Validates inputs (raises SpecError on bad input — $0 spent),
     creates the run directory, dispatches each phase, chains aggregated
     outputs, writes final.json.
+
+    v1.4: depth-tracked. The current thread's swarm depth is incremented
+    for the lifetime of this call (decremented on exit). When v1.5 lands
+    the model-callable swarm.run tool, it'll check depth against
+    spec.budget.max_recursion_depth before allowing nested spawn.
     """
+    # Refuse nested spawns that would exceed the spec's recursion budget.
+    if recursion_mod.exceeds_recursion_depth(spec.budget.max_recursion_depth):
+        return SwarmRunResult(
+            run_id="",
+            spec_name=spec.name,
+            inputs={},
+            phases=[],
+            final=None,
+            error=(
+                f"recursion_depth_exceeded: current depth "
+                f"{recursion_mod.swarm_depth()} >= max "
+                f"{spec.budget.max_recursion_depth}"
+            ),
+        )
+    with recursion_mod.depth_scope():
+        return _run_swarm_inner(
+            spec, inputs=inputs,
+            parent_chat_id=parent_chat_id, parent_run_id=parent_run_id,
+        )
+
+
+def _run_swarm_inner(
+    spec: spec_mod.Spec,
+    *,
+    inputs: dict,
+    parent_chat_id: str | None,
+    parent_run_id: str | None,
+) -> SwarmRunResult:
     validated = spec_mod.validate_inputs(spec, inputs)
     run_id = state.new_run_id()
     state.init_run_dir(run_id)
