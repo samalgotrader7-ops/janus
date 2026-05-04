@@ -541,7 +541,19 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 }])
             except Exception:
                 pass
-        await update.message.reply_text(gw.greeting(user_label))
+        greeting = gw.greeting(user_label)
+        # v1.5.2: hint about /mode auto when default mode is active.
+        # Default mode asks for approval per write/exec call, which on
+        # Telegram means tapping the 4-button keyboard for every action.
+        # Auto mode allows-with-risk-analysis: long tasks run without
+        # interruption while rm -rf / and SSRF still block.
+        if sess.mode_state.current == permissions.DEFAULT:
+            greeting += (
+                "\n\n💡 Tip: try `/mode auto` for fewer approval prompts. "
+                "Tools auto-run, but dangerous ops (rm -rf /, fs writes "
+                "to /etc/, SSRF) still block automatically."
+            )
+        await update.message.reply_text(greeting, parse_mode="Markdown")
         sess.mark_greeted()
         # If they said "hi"/"hello", the greeting is the whole reply.
         if req.lower().strip(" .!,?") in ("hi", "hello", "hey", "yo", "sup"):
