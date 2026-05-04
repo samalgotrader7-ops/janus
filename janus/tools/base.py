@@ -95,11 +95,27 @@ class Registry:
             return approver(action_label, details, **kw)
 
         try:
-            return tool.run(args, tool_approver)
+            result = tool.run(args, tool_approver)
         except Exception as e:
             # Errors are observations, not crashes. The model sees them
             # and can correct course.
             return f"error: {type(e).__name__}: {e}"
+
+        # v1.10.0 — tool guardrails: prepend a one-line warning when the
+        # call shape was borderline (overwriting big files, force-push,
+        # terraform destroy, etc.). Lazy import so test_tool_risk.py and
+        # any "tools have no other deps" check still pass.
+        # Skip on errors / refusals / read-class tools (no value).
+        if isinstance(result, str) and not result.startswith(("error:", "refused")):
+            if risk in ("write", "exec"):
+                try:
+                    from .. import tool_guardrails
+                    warn = tool_guardrails.check(name, args)
+                    if warn:
+                        result = f"{warn}\n{result}"
+                except Exception:
+                    pass
+        return result
 
     def names(self) -> list[str]:
         return list(self._tools.keys())

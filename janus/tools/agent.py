@@ -461,8 +461,12 @@ class AgentCreate(Tool):
                     "Where to send the agent's output each time it fires. "
                     "'log' = append to ~/.janus/log.jsonl only. "
                     "'telegram:<chat_id>' = send to a Telegram chat "
-                    "(e.g., 'telegram:123456789'). Look up chat_id via "
-                    "session_recent if the user is on Telegram."
+                    "(e.g., 'telegram:123456789'). OPTIONAL: when omitted "
+                    "AND the user is talking to you via a Telegram chat, "
+                    "this defaults to 'telegram:<that_chat_id>' "
+                    "automatically — you don't need to look up the "
+                    "chat_id yourself. From CLI / headless context the "
+                    "default is 'log'."
                 ),
             },
             "tool_names": {
@@ -513,7 +517,7 @@ class AgentCreate(Tool):
                 ),
             },
         },
-        "required": ["name", "purpose", "schedule", "deliver_to"],
+        "required": ["name", "purpose", "schedule"],
     }
     risk = "write"
 
@@ -534,7 +538,16 @@ class AgentCreate(Tool):
         except ValueError as e:
             return f"error: {e}"
 
-        deliver_to = (args.get("deliver_to") or "log").strip()
+        # v1.10.0 — origin-aware default. When agent_create runs inside a
+        # Telegram chat, default deliver_to to "telegram:<this_chat_id>"
+        # so the user doesn't have to type their own chat_id. CLI /
+        # headless callers fall back to "log" (same as before).
+        from .. import session_context as _ctx
+        raw_deliver = args.get("deliver_to")
+        if raw_deliver is None or not str(raw_deliver).strip():
+            deliver_to = _ctx.deliver_to_default()
+        else:
+            deliver_to = str(raw_deliver).strip()
         d_err = _validate_deliver_to(deliver_to)
         if d_err:
             return f"error: {d_err}"

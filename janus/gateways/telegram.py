@@ -850,22 +850,36 @@ async def _run_chat_turn(
         _typing_pulse(ctx.bot, chat_id),
     )
 
+    # v1.10.0 — set origin in the executor thread so agent_create can
+    # default deliver_to to telegram:<this_chat_id> without the model
+    # having to look it up. Origin is threading.local so concurrent
+    # chats stay isolated; we clear on exit (context manager).
+    from .. import session_context as _ctx
+
+    def _chat_with_origin():
+        with _ctx.origin_context(
+            platform="telegram",
+            chat_id=str(chat_id),
+            chat_name=update.effective_chat.title if update.effective_chat else None,
+            user=_user_label(update),
+        ):
+            return executor.chat(
+                messages=sess.messages,
+                user_input=req,
+                tools=tools,
+                approver=approver,
+                on_step=on_step,
+                memory_preamble=preamble,
+                mode=sess.mode_state.current,
+                workspace=str(config.WORKSPACE),
+                tool_count=len(tools.names()),
+                skill_count=len(skills.list_skills()),
+                stream=False,
+            )
+
     t0 = time.time()
     try:
-        output, trace = await asyncio.to_thread(
-            executor.chat,
-            messages=sess.messages,
-            user_input=req,
-            tools=tools,
-            approver=approver,
-            on_step=on_step,
-            memory_preamble=preamble,
-            mode=sess.mode_state.current,
-            workspace=str(config.WORKSPACE),
-            tool_count=len(tools.names()),
-            skill_count=len(skills.list_skills()),
-            stream=False,
-        )
+        output, trace = await asyncio.to_thread(_chat_with_origin)
         record["execute_ms"] = int((time.time() - t0) * 1000)
         record["output"] = output
         record["trace"] = trace

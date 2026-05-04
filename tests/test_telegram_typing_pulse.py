@@ -28,13 +28,18 @@ def test_typing_pulse_function_exists():
 
 def test_run_chat_turn_starts_typing_pulse():
     """Source-level pin: _run_chat_turn must launch the pulse task
-    BEFORE invoking executor.chat."""
+    BEFORE invoking executor.chat. v1.10 wraps the chat call in a
+    closure (_chat_with_origin) for session-context attribution, so
+    the marker now points at the asyncio.to_thread invocation that
+    runs that closure."""
     src = inspect.getsource(telegram._run_chat_turn)
     assert "_typing_pulse" in src
-    # Find the actual to_thread(executor.chat, ...) call — not the
-    # docstring mention.
-    call_marker = "asyncio.to_thread(\n            executor.chat,"
-    chat_idx = src.find(call_marker)
+    # The chat invocation: asyncio.to_thread(_chat_with_origin) since
+    # v1.10. Falls back to the legacy direct-executor pattern if a
+    # future refactor inlines it again.
+    chat_idx = src.find("asyncio.to_thread(_chat_with_origin)")
+    if chat_idx < 0:
+        chat_idx = src.find("asyncio.to_thread(\n            executor.chat,")
     assert chat_idx >= 0, "could not find the executor.chat invocation"
     pulse_idx = src.rfind("_typing_pulse", 0, chat_idx)
     assert pulse_idx >= 0, (
