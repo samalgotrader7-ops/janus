@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from typing import Callable
 
-from . import config, llm, hooks
+from . import config, llm, hooks, injection
 from .tools import Registry
 
 
@@ -43,6 +43,7 @@ def execute(
     stream: bool = False,
     model: str | None = None,
     cancel_event=None,
+    mode: str = "default",
 ) -> tuple[str, list[dict]]:
     """Run the executor loop. Returns (final_text, trace).
 
@@ -56,6 +57,10 @@ def execute(
     `cancel_event` (v1.4): a threading.Event-like; if set between steps,
         the loop returns "[cancelled]" and exits cleanly. Cooperative
         cancellation only — we don't interrupt mid-step.
+    `mode` (v1.5): when 'auto', tool results are scanned for prompt
+        injection patterns before being appended to the message history.
+        Detected injections get wrapped with a structural warning header
+        so the model knows not to obey embedded instructions.
     """
     head = ""
     if memory_preamble:
@@ -191,10 +196,21 @@ def execute(
                 # Update with result preview for UI.
                 on_step({**step_record, "type": "tool_result"})
 
+            # v1.5: in auto mode, scan tool result for prompt-injection
+            # patterns. If detected, prepend a structural warning so the
+            # model treats embedded instructions as untrusted data.
+            content_for_model = result
+            if mode == "auto":
+                content_for_model, scan = injection.apply(
+                    result, injection.HandleMode.WARN,
+                )
+                if scan.detected:
+                    step_record["injection_detected"] = scan.reasons()
+
             messages.append({
                 "role": "tool",
                 "tool_call_id": call["id"],
-                "content": result,
+                "content": content_for_model,
             })
 
     # Hit step limit without producing a final answer.
@@ -444,10 +460,21 @@ def chat(
             if on_step:
                 on_step({**step_record, "type": "tool_result"})
 
+            # v1.5: in auto mode, scan tool result for prompt-injection
+            # patterns. If detected, prepend a structural warning so the
+            # model treats embedded instructions as untrusted data.
+            content_for_model = result
+            if mode == "auto":
+                content_for_model, scan = injection.apply(
+                    result, injection.HandleMode.WARN,
+                )
+                if scan.detected:
+                    step_record["injection_detected"] = scan.reasons()
+
             messages.append({
                 "role": "tool",
                 "tool_call_id": call["id"],
-                "content": result,
+                "content": content_for_model,
             })
 
     return (
