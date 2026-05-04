@@ -846,9 +846,61 @@ def _swarm_bg_child(run_id: str, spec_name: str, inputs_json: str) -> None:
         _swarms.state.write_final(run_id, {
             "error": f"crashed: {type(e).__name__}: {e}",
         })
+        # Best-effort completion ping even on crash.
+        _ping_home_channel(run_id, spec_name, error=f"crashed: {e}")
         sys.exit(1)
     sys.stderr.write(f"swarm complete: {result.run_id}\n")
+    _ping_home_channel(
+        run_id, spec_name,
+        error=result.error,
+        n_phases=len(result.phases),
+    )
     sys.exit(0 if not result.error else 1)
+
+
+def _ping_home_channel(
+    run_id: str, spec_name: str, *,
+    error: str | None = None, n_phases: int | None = None,
+) -> None:
+    """Send a Telegram completion notification to the configured home
+    channel. v1.5 phase 8.
+
+    Best-effort: never raises. Silently no-ops if there's no Telegram
+    bot token, no home channel configured, or the HTTP call fails.
+    Composes with v1.3's home-channel system (gateways._common).
+    """
+    try:
+        token = config.TELEGRAM_BOT_TOKEN
+        if not token:
+            return
+        from .gateways import _common as gw
+        home_chat = gw.get_home("telegram")
+        if not home_chat:
+            return
+        if error:
+            text = (
+                f"🐝 swarm `{spec_name}` FAILED\n"
+                f"run_id: `{run_id}`\n"
+                f"error: {error}"
+            )
+        else:
+            text = (
+                f"🐝✓ swarm `{spec_name}` complete\n"
+                f"run_id: `{run_id}`\n"
+                f"phases: {n_phases if n_phases is not None else '?'}"
+            )
+        import requests
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={
+                "chat_id": home_chat, "text": text,
+                "parse_mode": "Markdown",
+            },
+            timeout=10,
+        )
+    except Exception:
+        # P8: notification failure never propagates.
+        pass
 
 
 def _swarm_status(run_id: str) -> None:
