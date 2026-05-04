@@ -180,7 +180,7 @@ def _is_headless_invocation(args: list[str]) -> bool:
             "chat", "--chat", "telegram", "web", "whatsapp", "daemon",
             "fire", "--analyze", "-a", "--reindex", "--eval",
             "--logo", "--conversations", "--help", "-h", "help",
-            "insights", "stats", "onboard", "swarm", "pair", "uninstall",
+            "insights", "stats", "onboard", "service", "swarm", "pair", "uninstall",
         }
         if not args or all(a not in non_pipe_subs for a in args):
             return True
@@ -1011,6 +1011,28 @@ def main():
         from . import onboarding
         ok = onboarding.run_wizard()
         sys.exit(0 if ok else 1)
+    if sub == "service":
+        from . import services
+        sub_args = args[1:] if len(args) > 1 else ["status"]
+        action = sub_args[0] if sub_args else "status"
+        if action == "install":
+            sys.exit(services.cmd_install(force="--force" in sub_args[1:]))
+        elif action == "enable":
+            sys.exit(services.cmd_enable())
+        elif action in ("disable", "stop"):
+            sys.exit(services.cmd_disable())
+        elif action == "status":
+            sys.exit(services.cmd_status())
+        elif action == "uninstall":
+            sys.exit(services.cmd_uninstall())
+        elif action == "show" and len(sub_args) > 1:
+            sys.exit(services.cmd_show(sub_args[1]))
+        else:
+            print(
+                "usage: janus service {install [--force] | enable | "
+                "disable | status | uninstall | show <name>}"
+            )
+            sys.exit(2)
     if sub in ("--help", "-h", "help"):
         print(__doc__); return
     _run_chat()
