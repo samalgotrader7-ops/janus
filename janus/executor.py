@@ -488,6 +488,32 @@ def chat(
     trace: list[dict] = []
     hooks_index = hooks.load_hooks()
 
+    # v1.13.0 — open a trajectory writer if JANUS_TRAJECTORY=1.
+    # Failure-silent: a trajectory bug must NEVER crash the chat loop.
+    # The writer is a context-manager-like wrapper; we close it in the
+    # finally block at the bottom of the function.
+    _trajectory_writer = None
+    try:
+        from . import trajectory as _traj
+        # Pull conv_id from the messages list if the caller stashed one,
+        # else use a date-based default. Most callers don't pass it
+        # through chat() — that's fine, we use "default" and the user
+        # can grep their conv files separately.
+        _trajectory_writer = _traj.open_trajectory(conv_id="default")
+        if _trajectory_writer is not None:
+            _trajectory_writer.open()
+            import threading as _t
+            _t.local()  # ensure module imported even on cold path
+            _traj._LOCAL.writer = _trajectory_writer
+            _traj.record({"type": "system", "content": system})
+            _traj.record({"type": "user", "content": user_input})
+            _traj.record({
+                "type": "metadata", "model": model or config.MODEL,
+                "mode": mode, "workspace": ws,
+            })
+    except Exception:
+        _trajectory_writer = None
+
     # Only pass `model=` when explicitly set so existing fake_llm stubs
     # (and any other test doubles that don't accept the kwarg yet) keep
     # working. Real llm.chat / chat_stream always accept it.
@@ -536,6 +562,15 @@ def chat(
             trace.append({"step": step, "type": "final", "text": text})
             if on_step:
                 on_step(trace[-1])
+            # v1.13.0 — record the final text + close trajectory writer.
+            if _trajectory_writer is not None:
+                try:
+                    from . import trajectory as _traj
+                    _traj.record({"type": "assistant_final", "content": text})
+                    _traj._LOCAL.writer = None
+                    _trajectory_writer.close()
+                except Exception:
+                    pass
             return text, trace
 
         for call in tool_calls:
@@ -606,6 +641,32 @@ def chat(
                 "content": content_for_model,
             })
 
+            # v1.13.0 — record into trajectory if writer is open.
+            if _trajectory_writer is not None:
+                try:
+                    from . import trajectory as _traj
+                    _traj.record({
+                        "type": "tool_call", "name": name, "args": args,
+                    })
+                    _traj.record({
+                        "type": "tool_result", "name": name,
+                        "result": content_for_model,
+                    })
+                except Exception:
+                    pass
+
+    # Step-limit fallback: also close the trajectory writer here.
+    if _trajectory_writer is not None:
+        try:
+            from . import trajectory as _traj
+            _traj.record({
+                "type": "step_limit_reached",
+                "max_steps": config.MAX_STEPS,
+            })
+            _traj._LOCAL.writer = None
+            _trajectory_writer.close()
+        except Exception:
+            pass
     return (
         f"[stopped: reached {config.MAX_STEPS} step limit without final answer]",
         trace,

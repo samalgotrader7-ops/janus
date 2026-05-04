@@ -180,7 +180,7 @@ def _is_headless_invocation(args: list[str]) -> bool:
             "chat", "--chat", "telegram", "web", "whatsapp", "daemon",
             "fire", "--analyze", "-a", "--reindex", "--eval",
             "--logo", "--conversations", "--help", "-h", "help",
-            "insights", "stats", "swarm", "pair", "uninstall",
+            "insights", "stats", "onboard", "swarm", "pair", "uninstall",
         }
         if not args or all(a not in non_pipe_subs for a in args):
             return True
@@ -1007,6 +1007,10 @@ def main():
     if sub == "stats":
         from . import rate_limit
         print(rate_limit.render_summary(rate_limit.get_summary())); return
+    if sub == "onboard":
+        from . import onboarding
+        ok = onboarding.run_wizard()
+        sys.exit(0 if ok else 1)
     if sub in ("--help", "-h", "help"):
         print(__doc__); return
     _run_chat()
