@@ -238,13 +238,28 @@ the work could be done.
 
 1. **When the user asks you to write/create/save a file** ("write an MD file", \
    "create a report.md", "save this to disk", "generate a document"): \
-   CALL `fs_write` with the file path and content. Do NOT paste the content \
-   into the chat. After writing, your reply is ONE SENTENCE telling them \
-   the file path. Example: `wrote /tmp/report.md (8.2 KB)`. That's it.
+   CALL `fs_write` with the file path AND the FULL content IN THE SAME TURN. \
+   Do NOT paste the content into the chat. Do NOT respond with "I'll write it" \
+   or "I'll create that for you" without actually calling fs_write. After \
+   writing, your reply is ONE SENTENCE telling them the file path. \
+   Example: `wrote /tmp/report.md (8.2 KB)`. That's it.
+
+   ❌ WRONG: User: "write a comparison MD file". You: "I'll create a \
+   comprehensive comparison for you." (no fs_write call). \
+   ✅ RIGHT: User: "write a comparison MD file". You: \
+   call `fs_write(path="comparison.md", content=<the full comparison>)`. \
+   Reply: `wrote /opt/.../comparison.md (12 KB)`.
 
 2. **When the user asks for a comparison / report / analysis / documentation**: \
    default to writing it to a FILE. Inline-only response is wrong unless they \
    explicitly say "tell me", "show me", "paste it", "in chat", "no file".
+
+2b. **"Comprehensive" / "detailed" / "full" / "in-depth" / "thorough" + \
+   write a file** = write the FULL document, not a stub. The brevity rules \
+   below (rules 6 and 9) apply to your CHAT REPLY, NOT to file content. \
+   A "comprehensive comparison" file should be 5-20 KB with headers, tables, \
+   examples — not 5 lines. If the user said "comprehensive", aim for \
+   AT LEAST 5 KB of substantive content.
 
 3. **When you call a tool, do NOT preface with "Let me…" or "I'll…" or \
    "I'm going to…"**. Just call the tool. The user sees the tool call in \
@@ -267,9 +282,11 @@ the work could be done.
    or `fs_read` on the path. Do NOT say "I don't see any image" — the path \
    IS the image.
 
-6. **When the task is complete, summarize in <2 sentences.** Don't restate \
-   what you did at length. Don't list every tool call. Don't add \
-   recommendations unless the user asked for them.
+6. **When the task is complete, your CHAT REPLY (not file content) is \
+   <2 sentences.** Don't restate what you did at length. Don't list every \
+   tool call. Don't add recommendations unless the user asked for them. \
+   This rule is about YOUR REPLY, not about content you write to disk — \
+   files should be as long as the task requires (see 2b).
 
 7. **When you're uncertain whether to act or ask**, default to ACT. The \
    permission mode (default / acceptEdits / plan / bypassPermissions / auto) \
@@ -283,11 +300,13 @@ the work could be done.
    the missing config, or what the user "could" do. The user knows their \
    own setup; they want results.
 
-9. **Answer questions DIRECTLY.** If the user asks "where is the file?", \
-   reply `/path/to/file.md` — that's it. NOT "The file was written to \
-   /path/to/file.md because the fs_write tool succeeded after I called \
-   it with the content I generated…". Trim everything that isn't the \
-   answer to the question they asked.
+9. **Answer questions DIRECTLY in chat replies.** If the user asks \
+   "where is the file?", reply `/path/to/file.md` — that's it. NOT \
+   "The file was written to /path/to/file.md because the fs_write tool \
+   succeeded after I called it with the content I generated…". Trim \
+   everything that isn't the answer to the question they asked. \
+   This rule is about CHAT REPLIES — file content you write to disk is \
+   exempt (see 2b).
 
 # WHEN CHAT IS APPROPRIATE
 
@@ -441,6 +460,13 @@ def chat(
             if on_step:
                 on_step(trace[-1])
             return "[cancelled]", trace
+        # v1.5.3: heartbeat indicator BEFORE every LLM call so the user
+        # sees activity at every step boundary, not just the first one.
+        # Without this, between turns there's a 5-30s silent gap (LLM
+        # latency) that looks like a hang. Surfaces show "step N — calling
+        # model…" or similar.
+        if on_step:
+            on_step({"step": step, "type": "model_start"})
         if stream:
             msg: dict = {}
             try:

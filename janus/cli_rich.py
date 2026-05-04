@@ -1281,7 +1281,19 @@ def _render_step_factory(console, state=None):
     state.setdefault("_stream_buffer", "")
 
     def render_step(step: dict) -> None:
-        if step["type"] == "tool_call":
+        if step["type"] == "model_start":
+            # v1.5.3: heartbeat at every LLM call boundary so the user
+            # sees activity at every step, not just step 0. Step 0 is
+            # the initial "⚡ thinking…" emitted by the chat handler;
+            # steps 1+ are subsequent model turns within the same
+            # user-facing turn (post-tool-call cycles).
+            step_num = step.get("step", 0)
+            if step_num > 0:
+                _flush_stream(console, state)
+                console.print(
+                    f"[magenta dim]⚡ step {step_num + 1} — calling model…[/]"
+                )
+        elif step["type"] == "tool_call":
             verbose = state.get("verbose", False)
             limit = 200 if verbose else 60
             args_brief = ", ".join(
