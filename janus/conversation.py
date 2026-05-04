@@ -57,6 +57,10 @@ class Conversation:
     workspace: str
     turns: list[dict] = field(default_factory=list)
     summary: str = ""  # populated by /compact
+    # v1.9.0: short auto-generated label (3-6 words). Populated by
+    # title_generator after the first turn completes. Surfaced by
+    # `/conversations`, `--resume` picker, `/insights` recent_titles.
+    title: str = ""
 
     # ---- mutators ----
 
@@ -134,6 +138,7 @@ def load(id: str) -> Conversation | None:
         workspace=str(d.get("workspace", "")),
         turns=list(d.get("turns") or []),
         summary=str(d.get("summary", "")),
+        title=str(d.get("title", "")),
     )
 
 
@@ -153,6 +158,7 @@ def list_all() -> list[dict]:
             "last_updated": d.get("last_updated", ""),
             "model": d.get("model", ""),
             "turns": len(d.get("turns") or []),
+            "title": d.get("title", ""),
         })
     out.sort(key=lambda x: x.get("last_updated", ""), reverse=True)
     return out

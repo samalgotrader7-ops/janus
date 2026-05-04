@@ -180,6 +180,7 @@ def _is_headless_invocation(args: list[str]) -> bool:
             "chat", "--chat", "telegram", "web", "whatsapp", "daemon",
             "fire", "--analyze", "-a", "--reindex", "--eval",
             "--logo", "--conversations", "--help", "-h", "help",
+            "insights", "swarm", "pair", "uninstall",
         }
         if not args or all(a not in non_pipe_subs for a in args):
             return True
@@ -1001,9 +1002,31 @@ def main():
         _run_uninstall(args[1:]); return
     if sub == "swarm":
         _run_swarm_cli(args[1:]); return
+    if sub == "insights":
+        _run_insights(args[1:]); return
     if sub in ("--help", "-h", "help"):
         print(__doc__); return
     _run_chat()
+
+
+def _run_insights(args: list[str]) -> None:
+    """`janus insights [--days N]` — print the insights report.
+
+    No API call required; deterministic stats from local files. Plays
+    well in cron / pipelines (`janus insights | mail -s "weekly"`).
+    """
+    from . import insights as _ins
+    days = 7
+    if "--days" in args:
+        try:
+            i = args.index("--days")
+            days = int(args[i + 1])
+        except (IndexError, ValueError):
+            print("usage: janus insights [--days N]")
+            sys.exit(2)
+    days = max(1, min(days, 365))
+    stats = _ins.compute_insights(days=days)
+    print(_ins.render_insights(stats))
 
 
 if __name__ == "__main__":

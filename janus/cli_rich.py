@@ -73,6 +73,10 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/cost",         "show token + cost summary for this session",          "built-in"),
     SlashCommand("/clear",        "clear conversation turns and cost counters",          "built-in"),
     SlashCommand("/compact",      "summarize and prune older turns in this conversation","built-in"),
+    SlashCommand("/compress",     "alias for /compact",                                  "built-in"),
+    SlashCommand("/retry",        "re-run the last user turn (drops last assistant reply)", "built-in"),
+    SlashCommand("/undo",         "drop the last user+assistant pair from this conversation", "built-in"),
+    SlashCommand("/insights",     "activity summary: /insights [days] (default 7)",      "built-in"),
     SlashCommand("/resume",       "resume a saved conversation by id",                   "built-in"),
     SlashCommand("/continue",     "continue the most recent conversation",               "built-in"),
     SlashCommand("/verbose",      "toggle verbose tool-arg display",                     "built-in"),
@@ -676,7 +680,7 @@ def _dispatch(console, line: str, state: dict) -> bool:
         cost.reset_session()
         console.print("  [green]cleared conversation turns + cost counters[/]")
         return True
-    if cmd == "/compact":
+    if cmd in ("/compact", "/compress"):
         conv = state.get("conv")
         if conv is None or not conv.turns:
             console.print("[dim]nothing to compact (empty conversation)[/]")
@@ -693,6 +697,81 @@ def _dispatch(console, line: str, state: dict) -> bool:
             f"  [green]compacted {n_before - len(conv.turns)} turn(s)[/] -> "
             f"{len(conv.turns)} kept, {len(conv.summary)} char summary"
         )
+        return True
+    if cmd == "/undo":
+        # Drop the last user+assistant pair from BOTH the executor messages
+        # list AND the persisted conversation. Useful when the model gave a
+        # bad answer and you want to roll back rather than pile on context.
+        msgs: list[dict] = state.get("messages") or []
+        conv = state.get("conv")
+        # Find indexes of last user message and the assistant block(s) that
+        # followed it (which may include tool / tool_result messages in between).
+        last_user = next(
+            (i for i in range(len(msgs) - 1, -1, -1)
+             if msgs[i].get("role") == "user"),
+            None,
+        )
+        if last_user is None:
+            console.print("[dim]nothing to undo (no prior turn)[/]")
+            return True
+        before = len(msgs)
+        del msgs[last_user:]
+        if conv is not None and conv.turns:
+            conv.turns.pop()
+            try:
+                conversation.save(conv)
+            except Exception:
+                pass
+        console.print(
+            f"  [green]undid last turn[/] — dropped {before - len(msgs)} "
+            f"messages"
+        )
+        return True
+    if cmd == "/retry":
+        # Re-run the LAST user turn through the chat loop. Drops the last
+        # assistant reply (and any tool messages between it and the user
+        # message) so the model gets the same input and can produce a
+        # different answer. Useful when you don't want to pile on a
+        # "no, try again" turn — just retry cleanly.
+        msgs: list[dict] = state.get("messages") or []
+        conv = state.get("conv")
+        last_user_idx = next(
+            (i for i in range(len(msgs) - 1, -1, -1)
+             if msgs[i].get("role") == "user"),
+            None,
+        )
+        if last_user_idx is None:
+            console.print("[dim]nothing to retry (no prior turn)[/]")
+            return True
+        last_user = msgs[last_user_idx]
+        # Drop assistant + tool messages AFTER the last user message.
+        del msgs[last_user_idx + 1:]
+        # Also drop the user message itself — the executor will re-append it.
+        del msgs[last_user_idx]
+        # Drop the trailing turn from conv.turns so the retry creates a
+        # fresh entry rather than two for the same input.
+        if conv is not None and conv.turns:
+            conv.turns.pop()
+        # Stash the request so the main loop knows to immediately retry it.
+        state["__retry_input__"] = last_user.get("content") or ""
+        console.print(
+            f"  [green]retrying[/] last turn: "
+            f"{state['__retry_input__'][:80]}"
+        )
+        return True
+    if cmd == "/insights":
+        from . import insights as _ins
+        try:
+            days = int(arg.strip()) if arg.strip() else 7
+        except ValueError:
+            console.print("[red]usage:[/] /insights [days]")
+            return True
+        days = max(1, min(days, 365))
+        try:
+            stats = _ins.compute_insights(days=days)
+            console.print(Markdown(_ins.render_insights(stats)))
+        except Exception as e:
+            console.print(f"[red]insights failed:[/] {type(e).__name__}: {e}")
         return True
     if cmd == "/resume":
         target = arg.strip()
@@ -1193,19 +1272,25 @@ def main() -> None:
             conv_turns=len(state["conv"].turns) if state.get("conv") else 0,
         ))
         console.print(f"[dim]{st}[/]")
-        try:
-            line = session.prompt(prompt_text)
-            collected = []
-            while line.endswith("\\") and not line.endswith("\\\\"):
-                collected.append(line[:-1])
-                cont = session.prompt(cont_text)
-                if not cont:
-                    line = ""; break
-                line = cont
-            collected.append(line)
-            req = "\n".join(collected).strip()
-        except (EOFError, KeyboardInterrupt):
-            break
+        # v1.9.0: /retry can stash the prior input here. Skip the prompt
+        # and immediately re-process it as if the user typed it again.
+        retry_input = state.pop("__retry_input__", None)
+        if retry_input:
+            req = str(retry_input).strip()
+        else:
+            try:
+                line = session.prompt(prompt_text)
+                collected = []
+                while line.endswith("\\") and not line.endswith("\\\\"):
+                    collected.append(line[:-1])
+                    cont = session.prompt(cont_text)
+                    if not cont:
+                        line = ""; break
+                    line = cont
+                collected.append(line)
+                req = "\n".join(collected).strip()
+            except (EOFError, KeyboardInterrupt):
+                break
         if not req:
             continue
         if req.lower() in ("q", "quit", "exit"):
@@ -1331,6 +1416,14 @@ def main() -> None:
                 skill=(attached_skill.name if attached_skill else None),
                 ts=record.get("ts"),
             )
+            # v1.9.0: auto-name the conversation after the first turn so
+            # /resume and /insights show meaningful labels instead of
+            # opaque timestamp+hex IDs.
+            try:
+                from . import title_generator as _tg
+                _tg.maybe_generate(conv)
+            except Exception:
+                pass
             conversation.save(conv)
         except Exception:
             pass
