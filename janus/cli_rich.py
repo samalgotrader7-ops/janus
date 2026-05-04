@@ -61,7 +61,7 @@ class SlashCommand:
 
 
 BUILTIN_COMMANDS: list[SlashCommand] = [
-    SlashCommand("/mode",         "switch permission mode: default | acceptEdits | plan | bypassPermissions", "built-in"),
+    SlashCommand("/mode",         "switch permission mode: default | acceptEdits | plan | auto | bypassPermissions", "built-in"),
     SlashCommand("/why",          "re-interpret your last message and show 2-3 candidate readings", "built-in"),
     SlashCommand("/workspace",    "show or change the active workspace directory",       "built-in"),
     SlashCommand("/analyze",      "scan the workspace for tools, skills, project hints", "built-in"),
@@ -717,7 +717,8 @@ def _cmd_mode(console, arg: str, state: dict) -> bool:
             (permissions.DEFAULT, "read auto · write/exec ask"),
             (permissions.ACCEPT_EDITS, "read+write auto · exec ask"),
             (permissions.PLAN, "read auto · write/exec DENY"),
-            (permissions.BYPASS, "everything auto · no prompts"),
+            (permissions.AUTO, "everything auto BUT risky calls blocked (rm -rf /, SSRF, ...)"),
+            (permissions.BYPASS, "everything auto · no prompts (no safety net)"),
         ]
         t = Table(show_header=True, header_style="bold")
         t.add_column("mode"); t.add_column("behavior")
@@ -745,12 +746,23 @@ def _cmd_mode(console, arg: str, state: dict) -> bool:
             )
             return True
     mode_state.set(target)
-    color = "red" if target == permissions.BYPASS else "green"
+    if target == permissions.BYPASS:
+        color = "red"
+    elif target == permissions.AUTO:
+        color = "magenta"
+    else:
+        color = "green"
     console.print(f"  [{color}]mode → {mode_state.current}[/]")
     if target == permissions.BYPASS:
         console.print(
             "  [red]warning:[/] every tool will run without asking. "
             "[dim]/mode default to disable.[/]"
+        )
+    elif target == permissions.AUTO:
+        console.print(
+            "  [dim]auto mode: tools auto-approve but rm -rf /, "
+            "fs writes to /etc/, SSRF fetches, etc. are blocked. "
+            "Add patterns at ~/.janus/auto_risk_patterns.yaml.[/dim]"
         )
     logger.write({
         "ts": logger.now_iso(),

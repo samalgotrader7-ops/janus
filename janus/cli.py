@@ -328,7 +328,8 @@ def _cmd_mode(arg: str) -> bool:
             (permissions.DEFAULT, "read auto · write/exec ask"),
             (permissions.ACCEPT_EDITS, "read+write auto · exec ask"),
             (permissions.PLAN, "read auto · write/exec DENY"),
-            (permissions.BYPASS, "everything auto · no prompts"),
+            (permissions.AUTO, "everything auto BUT risky calls blocked (rm -rf /, SSRF, ...)"),
+            (permissions.BYPASS, "everything auto · no prompts (no safety net)"),
         ]
         print()
         for name, desc in rows:
@@ -348,11 +349,19 @@ def _cmd_mode(arg: str) -> bool:
         return True
     mode_state.set(normalized)
     color = C.RED if normalized == permissions.BYPASS else C.GREEN
+    if normalized == permissions.AUTO:
+        color = C.MAGENTA  # auto = "trust + safety net" tier
     print(f"  {color}mode -> {mode_state.current}{C.R}")
     if normalized == permissions.BYPASS:
         print(
             f"  {C.RED}warning:{C.R} every tool will run without asking. "
             f"{C.DIM}/mode default to disable.{C.R}"
+        )
+    elif normalized == permissions.AUTO:
+        print(
+            f"  {C.DIM}auto mode: tools auto-approve but rm -rf /, "
+            f"fs writes to /etc/, SSRF fetches, etc. are blocked. "
+            f"Add patterns at ~/.janus/auto_risk_patterns.yaml.{C.R}"
         )
     logger.write({
         "ts": logger.now_iso(),
