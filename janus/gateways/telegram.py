@@ -35,7 +35,7 @@ from typing import Any
 
 from .. import config, executor, logger, memory, index, skills, permissions
 from .. import branding, cost
-from ..tools import default_registry, make_capability_aware, CapabilitySet
+from ..tools import default_registry, make_protected, CapabilitySet
 from . import _common as gw
 
 
@@ -552,7 +552,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     base_approver = _make_approver(chat_id, ctx.application, sess)
     caps = CapabilitySet()
     tools = default_registry(capabilities=caps)
-    approver = make_capability_aware(base_approver, caps)
+    approver = make_protected(base_approver, caps, sess.mode_state.current)
 
     # Set up live indicators.
     loop = asyncio.get_event_loop()

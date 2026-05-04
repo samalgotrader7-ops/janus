@@ -1,6 +1,8 @@
 """tools/__init__.py — bundled tool list."""
 
-from .base import Tool, Registry, make_capability_aware
+from .base import (
+    Tool, Registry, make_capability_aware, make_auto_aware, make_protected,
+)
 from .capabilities import Capability, CapabilitySet
 from .fs import FsRead, FsWrite, FsList
 from .shell import Shell

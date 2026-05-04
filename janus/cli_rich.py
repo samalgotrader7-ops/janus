@@ -25,7 +25,7 @@ from . import skills_market, cache, branding, conversation, cost, statusline, sk
 from . import commands as commands_mod, doctor, init_codebase, output_styles
 from . import permissions
 from .mcp import client as mcp_client
-from .tools import default_registry, make_capability_aware, CapabilitySet
+from .tools import default_registry, make_protected, CapabilitySet
 
 
 # Imported lazily so import failure surfaces only when this CLI is selected.
@@ -1170,7 +1170,7 @@ def main() -> None:
 
         caps = attached_skill.capabilities if attached_skill else CapabilitySet()
         tools = default_registry(capabilities=caps)
-        approver = make_capability_aware(base_approver, caps)
+        approver = make_protected(base_approver, caps, mode_state.current)
 
         try:
             t0 = time.time()

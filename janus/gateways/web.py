@@ -39,7 +39,7 @@ from typing import Any
 
 from .. import config, executor, logger, memory, skills, hooks, permissions
 from .. import branding, cost
-from ..tools import default_registry, make_capability_aware, CapabilitySet
+from ..tools import default_registry, make_protected, CapabilitySet
 from . import _common as gw
 
 GATEWAY_NAME = "web"
@@ -308,7 +308,7 @@ def _build_app():
         base_approver = _make_web_approver(mode)
         caps = CapabilitySet()
         tools = default_registry(capabilities=caps)
-        approver = make_capability_aware(base_approver, caps)
+        approver = make_protected(base_approver, caps, mode)
         preamble = memory.prepend_for_prompt()
 
         record: dict[str, Any] = {

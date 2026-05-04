@@ -37,11 +37,18 @@ DEFAULT: str = "default"
 ACCEPT_EDITS: str = "acceptEdits"
 BYPASS: str = "bypassPermissions"
 PLAN: str = "plan"
+# v1.5: auto mode = bypassPermissions + heuristic risk analyzer.
+# Auto-approves like bypass but blocks dangerous tool calls based on
+# arg patterns (rm -rf /, fs writes to /etc/, fetches to localhost SSRF,
+# etc.). Ideal for long-running unattended swarms where the user can't
+# approve each call but a runaway destructive operation would be costly.
+AUTO: str = "auto"
 
-ALL_MODES: tuple[str, ...] = (DEFAULT, ACCEPT_EDITS, BYPASS, PLAN)
+ALL_MODES: tuple[str, ...] = (DEFAULT, ACCEPT_EDITS, BYPASS, PLAN, AUTO)
 
-# The order /mode (no arg) and Shift+Tab cycle through.
-CYCLE_ORDER: tuple[str, ...] = (DEFAULT, ACCEPT_EDITS, PLAN, BYPASS)
+# The order /mode (no arg) and Shift+Tab cycle through. Auto sits next
+# to bypass — both are "I trust the agent" modes; auto is the safer one.
+CYCLE_ORDER: tuple[str, ...] = (DEFAULT, ACCEPT_EDITS, PLAN, AUTO, BYPASS)
 
 
 # ---------- Risk classes ----------
@@ -81,6 +88,15 @@ _MATRIX: dict[str, dict[str, str]] = {
         RISK_WRITE: DENY,
         RISK_EXEC:  DENY,
     },
+    # v1.5 auto: matrix says "allow" baseline; the make_auto_aware
+    # wrapper applies risk analysis on top and can flip allow → deny
+    # per individual call based on tool args (e.g., rm -rf / blocked
+    # even though the matrix says exec=allow).
+    AUTO: {
+        RISK_READ:  ALLOW,
+        RISK_WRITE: ALLOW,
+        RISK_EXEC:  ALLOW,
+    },
 }
 
 
@@ -108,10 +124,14 @@ def cycle_next(current: str) -> str:
 #
 # Pre-v1.0 config used JANUS_APPROVAL = "manual" | "auto" | "dry-run".
 # Map them so users with old .env files don't crash.
+#
+# v1.5: the legacy `auto → bypassPermissions` mapping is REMOVED because
+# `auto` is now a real (and strictly safer) mode in its own right —
+# bypass blindly allows everything; auto allows-with-risk-analysis.
+# Old configs that said "auto" get the new safer behavior automatically.
 
 _LEGACY_MAP: dict[str, str] = {
     "manual":  DEFAULT,
-    "auto":    BYPASS,
     "dry-run": PLAN,
 }
 

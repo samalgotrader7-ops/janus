@@ -16,7 +16,7 @@ from . import skills_market, hooks, cache, branding, conversation, cost, skill_c
 from . import statusline, commands as commands_mod, doctor, init_codebase
 from . import output_styles, permissions
 from .mcp import client as mcp_client
-from .tools import default_registry, make_capability_aware, CapabilitySet
+from .tools import default_registry, make_protected, CapabilitySet
 
 
 class C:
@@ -1139,7 +1139,7 @@ def main():
 
         skill_caps = attached_skill.capabilities if attached_skill else CapabilitySet()
         tools = default_registry(capabilities=skill_caps)
-        approver = make_capability_aware(base_approver, skill_caps)
+        approver = make_protected(base_approver, skill_caps, mode_state.current)
 
         try:
             t0 = time.time()

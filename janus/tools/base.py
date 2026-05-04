@@ -134,6 +134,33 @@ def make_capability_aware(approver: Approver, caps: CapabilitySet) -> Approver:
     return wrapped
 
 
+def make_protected(
+    base_approver: Approver,
+    caps: CapabilitySet,
+    mode: str = "default",
+) -> Approver:
+    """Standard approver layering for v1.5: capability-aware + (when
+    mode='auto') auto-mode risk analyzer. One-stop helper so call sites
+    don't have to reproduce the layering boilerplate.
+
+    Layer order matters:
+      auto → capability → mode-aware base
+    Auto fires FIRST so a capability-granted dangerous call still blocks
+    (skill widening doesn't override safety).
+
+    Use:
+      approver = make_protected(_make_mode_approver(mode), caps, mode)
+    Replaces the v1.0-1.4 idiom of `make_capability_aware(base, caps)`
+    when the caller wants auto-mode behavior to apply automatically when
+    mode='auto'. For non-auto modes the helper is equivalent to plain
+    make_capability_aware.
+    """
+    wrapped = make_capability_aware(base_approver, caps)
+    if mode == "auto":
+        wrapped = make_auto_aware(wrapped)
+    return wrapped
+
+
 def make_auto_aware(approver: Approver) -> Approver:
     """Wrap a base approver so dangerous tool calls are auto-blocked
     based on heuristic risk analysis (v1.5 auto mode).

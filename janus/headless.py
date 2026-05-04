@@ -45,7 +45,7 @@ from . import (
     skills as skills_mod,
     cache, conversation, cost,
 )
-from .tools import default_registry, make_capability_aware, CapabilitySet
+from .tools import default_registry, make_protected, CapabilitySet
 
 
 EXIT_OK = 0
@@ -109,7 +109,7 @@ def run(
     skill = skills_mod.load(skill_name) if skill_name else None
     caps = skill.capabilities if skill else CapabilitySet()
     base_approver = _make_headless_approver(mode)
-    approver = make_capability_aware(base_approver, caps)
+    approver = make_protected(base_approver, caps, mode)
     tools = default_registry(capabilities=caps)
 
     # Conversation may have been pre-loaded by --continue / --resume.

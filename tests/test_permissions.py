@@ -54,7 +54,10 @@ def test_normalize_passthrough_for_known_modes():
 
 def test_normalize_legacy_names():
     assert P.normalize("manual") == P.DEFAULT
-    assert P.normalize("auto") == P.BYPASS
+    # v1.5: "auto" is now a real mode (smart-approve). The legacy
+    # `auto → bypassPermissions` mapping was removed because the new
+    # auto mode is strictly safer (it analyzes args before allowing).
+    assert P.normalize("auto") == P.AUTO
     assert P.normalize("dry-run") == P.PLAN
 
 
@@ -116,8 +119,9 @@ def test_mode_state_default():
 
 def test_mode_state_set_normalizes():
     s = P.ModeState()
-    assert s.set("auto") == P.BYPASS
-    assert s.current == P.BYPASS
+    # v1.5: "auto" normalizes to the real AUTO mode now (was legacy → BYPASS).
+    assert s.set("auto") == P.AUTO
+    assert s.current == P.AUTO
 
 
 def test_mode_state_cycle():

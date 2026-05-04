@@ -87,8 +87,10 @@ def test_mode_switch_via_session_state(janus_home):
 
 def test_mode_legacy_name_normalizes(janus_home):
     s = tg.Session(chat_id=1)
+    # v1.5: "auto" is a real mode now (smart-approve). The legacy
+    # auto → bypass mapping was dropped — new behavior is strictly safer.
     s.mode_state.set("auto")
-    assert s.mode_state.current == permissions.BYPASS
+    assert s.mode_state.current == permissions.AUTO
 
 
 # ---------- chat() integration ----------

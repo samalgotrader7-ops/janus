@@ -41,7 +41,7 @@ from typing import Any
 import requests
 
 from .. import config, executor, logger, memory, skills, permissions, cost
-from ..tools import default_registry, make_capability_aware, CapabilitySet
+from ..tools import default_registry, make_protected, CapabilitySet
 from . import _common as gw
 
 GATEWAY_NAME = "whatsapp"
@@ -196,7 +196,7 @@ def _handle_inbound(msg: dict) -> str | None:
     base_approver = _make_whatsapp_approver(mode)
     caps = CapabilitySet()
     tools = default_registry(capabilities=caps)
-    approver = make_capability_aware(base_approver, caps)
+    approver = make_protected(base_approver, caps, mode)
     preamble = memory.prepend_for_prompt()
 
     record: dict[str, Any] = {
