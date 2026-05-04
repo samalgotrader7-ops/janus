@@ -169,6 +169,13 @@ OUTPUT_STYLE: str = os.getenv("JANUS_OUTPUT_STYLE", "markdown")
 # cache to apply (OpenRouter honors the marker; OpenAI ignores it).
 PROMPT_CACHE_MARKERS: bool = os.getenv("JANUS_PROMPT_CACHE", "0") in ("1", "true", "yes")
 
+# v1.16.2: strip the `tools` payload from chat requests. Useful when
+# the endpoint is a self-hosted vLLM that wasn't started with
+# `--enable-auto-tool-choice` and 404s on tools-bearing requests, OR
+# a model that doesn't support function calling. With NO_TOOLS=1 the
+# agent can still chat but cannot call tools — degraded mode.
+NO_TOOLS: bool = os.getenv("JANUS_NO_TOOLS", "0") in ("1", "true", "yes")
+
 # --- v1.4: agent swarms ---
 # Hard ceilings the spec validator enforces — a spec cannot request more
 # than these regardless of what its `budget:` block says. Defense in depth.

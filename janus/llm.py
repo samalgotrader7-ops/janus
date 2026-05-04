@@ -219,7 +219,10 @@ def chat(
         "messages": apply_cache_markers(messages),
         "temperature": temperature,
     }
-    if tools:
+    # v1.16.2: respect JANUS_NO_TOOLS for endpoints that 404 on the tools
+    # payload (self-hosted vLLM without --enable-auto-tool-choice, or
+    # models without function-calling support). Strips tools entirely.
+    if tools and not config.NO_TOOLS:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
     if json_mode:
@@ -252,8 +255,12 @@ def chat(
     # user. Common cause: an OpenRouter-style 'openai/Foo/Bar' model id
     # configured against a direct vLLM endpoint that knows the model as
     # 'Foo/Bar'. We detect that shape and suggest the fix.
+    # v1.16.2: also pass tools-presence so _explain_404 can suggest
+    # JANUS_NO_TOOLS=1 when the request had tools (vLLM without
+    # --enable-auto-tool-choice 404s on tools-bearing requests).
     if r.status_code == 404:
-        raise _explain_404(chosen_model, config.API_BASE, r)
+        had_tools = bool(payload.get("tools"))
+        raise _explain_404(chosen_model, config.API_BASE, r, had_tools=had_tools)
 
     r.raise_for_status()
     body = r.json()
@@ -301,7 +308,10 @@ def _provider_from_base(api_base: str) -> str:
 # ---------- Helpful errors + endpoint introspection (v1.16.1) ----------
 
 
-def _explain_404(model: str, api_base: str, response: requests.Response) -> RuntimeError:
+def _explain_404(
+    model: str, api_base: str, response: requests.Response,
+    *, had_tools: bool = False,
+) -> RuntimeError:
     """Build an actionable error message for a 404 from /chat/completions.
 
     Includes:
@@ -309,6 +319,9 @@ def _explain_404(model: str, api_base: str, response: requests.Response) -> Runt
       - the most likely cause (provider-prefix mismatch on vLLM-shaped endpoint)
       - a concrete suggestion (the unprefixed model name)
       - how to verify (curl /v1/models)
+      - v1.16.2: when the request had tools, suggest JANUS_NO_TOOLS=1
+        (self-hosted vLLM without --enable-auto-tool-choice 404s on
+        tools-bearing requests)
     """
     base = api_base.rstrip("/")
     provider = _provider_from_base(api_base)
@@ -325,6 +338,20 @@ def _explain_404(model: str, api_base: str, response: requests.Response) -> Runt
             f"namespace. {provider} endpoints usually serve the model as "
             f"just {unprefixed!r} (no prefix). Try setting "
             f"JANUS_MODEL={unprefixed}"
+        )
+
+    if had_tools:
+        # The most common reason a self-hosted vLLM 404s on a request that
+        # would otherwise succeed: tools payload sent to a vLLM that
+        # wasn't started with --enable-auto-tool-choice. The non-tools
+        # variant of the SAME request shape returns 200.
+        hints.append(
+            "the request included a `tools` payload — self-hosted vLLM "
+            "endpoints 404 on tools unless started with "
+            "`--enable-auto-tool-choice --tool-call-parser <parser>`. "
+            "Either: (a) restart vLLM with those flags (recommended for "
+            "agent use), or (b) set JANUS_NO_TOOLS=1 in ~/.janus/.env "
+            "to send chat-only requests (degraded mode — no tool calls)"
         )
 
     hints.append(

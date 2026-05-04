@@ -64,7 +64,8 @@ def chat_stream(
         "temperature": temperature,
         "stream": True,
     }
-    if tools:
+    # v1.16.2: respect JANUS_NO_TOOLS — same reason as in llm.chat.
+    if tools and not config.NO_TOOLS:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
 
@@ -75,8 +76,13 @@ def chat_stream(
         # v1.16.1 — same actionable 404 as llm.chat. Streaming-mode 404s
         # are exactly the same failure shape (model id not found at the
         # endpoint), just hit through a different code path.
+        # v1.16.2 — also pass tools-presence so the message can suggest
+        # JANUS_NO_TOOLS=1 when relevant.
         if r.status_code == 404:
-            raise llm._explain_404(chosen_model, config.API_BASE, r)
+            raise llm._explain_404(
+                chosen_model, config.API_BASE, r,
+                had_tools=bool(payload.get("tools")),
+            )
         r.raise_for_status()
         accumulated = ""
         # Tool-call accumulation: provider streams partial deltas, we
