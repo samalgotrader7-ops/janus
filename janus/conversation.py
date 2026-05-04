@@ -61,6 +61,11 @@ class Conversation:
     # title_generator after the first turn completes. Surfaced by
     # `/conversations`, `--resume` picker, `/insights` recent_titles.
     title: str = ""
+    # v1.12.0 — manual compression feedback. List of turn indexes (into
+    # `turns`) that the user pinned via /pin. compact() skips these
+    # when summarizing — they survive the rolling window. Indexes shift
+    # automatically when compaction prunes older non-pinned turns.
+    pinned_turns: list[int] = field(default_factory=list)
 
     # ---- mutators ----
 
@@ -139,6 +144,7 @@ def load(id: str) -> Conversation | None:
         turns=list(d.get("turns") or []),
         summary=str(d.get("summary", "")),
         title=str(d.get("title", "")),
+        pinned_turns=list(d.get("pinned_turns") or []),
     )
 
 
@@ -225,13 +231,34 @@ headers. Plain prose only."""
 
 
 def compact(c: Conversation, *, keep_last: int = 3) -> Conversation:
-    """Replace older turns with a summary. Keeps the most recent
-    `keep_last` turns intact so the agent doesn't lose immediate context.
-    Idempotent on a session with ≤ keep_last turns."""
-    if len(c.turns) <= keep_last:
+    """Replace older turns with a summary.
+
+    v1.12.0: respects `c.pinned_turns`. A pinned turn is NEVER summarized
+    away, even if it falls outside the rolling `keep_last` window. This
+    is the manual-compression-feedback path: the user types `/pin <N>`
+    on turns they care about, and /compact preserves them across the
+    summarization boundary. Pinned indexes are auto-remapped after
+    compaction so they keep pointing at the right turn.
+
+    Idempotent on a session with ≤ keep_last turns + no pins to preserve.
+    """
+    n = len(c.turns)
+    if n <= keep_last:
         return c
 
-    older = c.turns[:-keep_last]
+    keep_indexes: set[int] = set(range(n - keep_last, n))
+    # Add pinned indexes (within bounds) to the keep set.
+    for p in c.pinned_turns:
+        if 0 <= p < n:
+            keep_indexes.add(p)
+
+    # Anything not in the keep set is OLDER and gets summarized.
+    older_idx = [i for i in range(n) if i not in keep_indexes]
+    if not older_idx:
+        # Only pinned + recent; nothing to compact.
+        return c
+
+    older = [c.turns[i] for i in older_idx]
     transcript = "\n\n".join(
         f"USER: {(t.get('request') or '').strip()[:500]}\n"
         f"AGENT: {(t.get('output') or '').strip()[:500]}"
@@ -252,8 +279,19 @@ def compact(c: Conversation, *, keep_last: int = 3) -> Conversation:
     except Exception as e:
         new_summary = c.summary + f"\n[compaction failed: {type(e).__name__}: {e}]"
 
-    if new_summary:
-        c.summary = new_summary
-        c.turns = c.turns[-keep_last:]
-        c.last_updated = _iso_now()
+    if not new_summary:
+        return c
+
+    # Build the new turns list (sorted by original index) + remap pins.
+    keep_sorted = sorted(keep_indexes)
+    new_turns = [c.turns[i] for i in keep_sorted]
+    # Pin indexes were into the OLD list. Translate each to its new
+    # position in the keep_sorted list (skip pins that no longer match).
+    index_map = {old: new for new, old in enumerate(keep_sorted)}
+    new_pins = [index_map[p] for p in c.pinned_turns if p in index_map]
+
+    c.summary = new_summary
+    c.turns = new_turns
+    c.pinned_turns = new_pins
+    c.last_updated = _iso_now()
     return c

@@ -78,6 +78,9 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/undo",         "drop the last user+assistant pair from this conversation", "built-in"),
     SlashCommand("/insights",     "activity summary: /insights [days] (default 7)",      "built-in"),
     SlashCommand("/stats",        "rate-limit + token usage in the rolling 60s window",  "built-in"),
+    SlashCommand("/pin",          "pin turn so /compact never drops it: /pin <N|last>",  "built-in"),
+    SlashCommand("/unpin",        "unpin turn N (or 'last')",                            "built-in"),
+    SlashCommand("/pins",         "list pinned turns in this conversation",              "built-in"),
     SlashCommand("/resume",       "resume a saved conversation by id",                   "built-in"),
     SlashCommand("/continue",     "continue the most recent conversation",               "built-in"),
     SlashCommand("/verbose",      "toggle verbose tool-arg display",                     "built-in"),
@@ -519,6 +522,14 @@ def _dispatch(console, line: str, state: dict) -> bool:
         console.print(t)
         return True
     if cmd == "/skills":
+        # v1.12.0: /skills validate runs the schema check across all
+        # skill files. Other /skills <args> shapes go to the existing
+        # skill catalog handler.
+        if arg.strip().lower() == "validate":
+            from . import skill_preprocessing as _sp
+            issues = _sp.validate_all()
+            console.print(Markdown(_sp.render(issues)))
+            return True
         return _cmd_skills_rich(console, arg)
     if cmd == "/swarm":
         from . import swarms as _swarms
@@ -780,6 +791,62 @@ def _dispatch(console, line: str, state: dict) -> bool:
             console.print(Markdown(_rl.render_summary(_rl.get_summary())))
         except Exception as e:
             console.print(f"[red]stats failed:[/] {type(e).__name__}: {e}")
+        return True
+    if cmd in ("/pin", "/unpin"):
+        conv = state.get("conv")
+        if conv is None or not conv.turns:
+            console.print("[dim]no conversation yet[/]")
+            return True
+        target = arg.strip().lower()
+        if target == "last" or target == "":
+            idx = len(conv.turns) - 1
+        else:
+            try:
+                idx = int(target)
+                # 1-based input → 0-based internally (matches `/undo` UX).
+                if idx > 0:
+                    idx -= 1
+            except ValueError:
+                console.print(f"[red]usage:[/] {cmd} <N|last>")
+                return True
+        if not 0 <= idx < len(conv.turns):
+            console.print(
+                f"[red]turn {idx + 1} out of range[/] "
+                f"(have {len(conv.turns)} turns)"
+            )
+            return True
+        if cmd == "/pin":
+            if idx not in conv.pinned_turns:
+                conv.pinned_turns.append(idx)
+                conv.pinned_turns.sort()
+            try:
+                conversation.save(conv)
+            except Exception:
+                pass
+            preview = (conv.turns[idx].get("request") or "")[:60]
+            console.print(
+                f"  [green]pinned[/] turn {idx + 1}: {preview}"
+            )
+        else:  # /unpin
+            if idx in conv.pinned_turns:
+                conv.pinned_turns.remove(idx)
+                try:
+                    conversation.save(conv)
+                except Exception:
+                    pass
+                console.print(f"  [green]unpinned[/] turn {idx + 1}")
+            else:
+                console.print(f"[dim]turn {idx + 1} wasn't pinned[/]")
+        return True
+    if cmd == "/pins":
+        conv = state.get("conv")
+        if conv is None or not conv.pinned_turns:
+            console.print("[dim](no pinned turns)[/]")
+            return True
+        for i in sorted(conv.pinned_turns):
+            if 0 <= i < len(conv.turns):
+                preview = (conv.turns[i].get("request") or "")[:80]
+                console.print(f"  [yellow]{i + 1}.[/] {preview}")
         return True
     if cmd == "/resume":
         target = arg.strip()
