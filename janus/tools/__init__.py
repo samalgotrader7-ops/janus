@@ -22,6 +22,7 @@ from .browser import (
     BrowserLinks, BrowserGetImage,
 )
 from .vision import ImageDescribe
+from .swarm_run import SwarmRun
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -53,6 +54,8 @@ _BUILTIN_TOOL_FACTORIES = {
     "browser_links": BrowserLinks,
     "browser_get_image": BrowserGetImage,
     "image_describe": ImageDescribe,
+    # v1.5 — model-callable swarm spawn (recursion guard already in place).
+    "swarm_run": SwarmRun,
 }
 
 
