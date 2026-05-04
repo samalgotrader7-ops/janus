@@ -431,6 +431,85 @@ def test_agent_tools_in_default_registry():
     assert "agent_set_enabled" in names
 
 
+# ---------- v1.6.1: unattended-mode preamble ----------
+
+
+def test_default_body_includes_unattended_preamble(tmp_path, monkeypatch):
+    """Bug J31 — agent fired and asked the user 'Please confirm…'.
+    Default body must explicitly tell the agent it runs unattended."""
+    _isolate_home(tmp_path, monkeypatch)
+    AgentCreate().run({
+        "name": "unattended", "purpose": "fetch news",
+        "schedule": "hourly", "deliver_to": "log",
+    }, _approve)
+    body = (config.SKILLS_DIR / "unattended.md").read_text()
+    assert "YOU RUN UNATTENDED" in body
+    assert "Never ask for confirmation" in body
+    assert "NO HUMAN IS WATCHING" in body
+
+
+def test_custom_system_prompt_still_gets_unattended_preamble(tmp_path, monkeypatch):
+    """User-supplied system_prompt MUST also be wrapped — without this,
+    custom prompts inherit chat-mode 'ask the user' reflex and break
+    when fired (the J31 root cause)."""
+    _isolate_home(tmp_path, monkeypatch)
+    AgentCreate().run({
+        "name": "custom", "purpose": "x", "schedule": "hourly",
+        "deliver_to": "log",
+        "system_prompt": "You are a wise sage. Speak in haiku.",
+    }, _approve)
+    body = (config.SKILLS_DIR / "custom.md").read_text()
+    assert "YOU RUN UNATTENDED" in body
+    assert "wise sage" in body  # custom prompt preserved
+    assert "Speak in haiku" in body
+
+
+# ---------- v1.6.1: cron output archive ----------
+
+
+def test_fire_archives_output_to_cron_output_dir(tmp_path, monkeypatch):
+    """Each fire should land in ~/.janus/cron/output/<agent>/<ts>.md
+    (Hermes-compatible layout for future migrations)."""
+    _isolate_home(tmp_path, monkeypatch)
+    from janus.triggers.runtime import _archive_fire_output
+    from janus.triggers.base import FireEvent
+
+    ev = FireEvent(
+        trigger="newsbot",
+        request="get the news",
+        skill="newsbot",
+        fired_at="2026-05-04T12:34:56+00:00",
+    )
+    _archive_fire_output(ev, "## Today's news\n\n- Item 1\n- Item 2\n")
+
+    archive_dir = config.HOME / "cron" / "output" / "newsbot"
+    assert archive_dir.is_dir()
+    files = list(archive_dir.glob("*.md"))
+    assert len(files) == 1
+    text = files[0].read_text()
+    assert "trigger: newsbot" in text
+    assert "fired_at: 2026-05-04T12:34:56+00:00" in text
+    assert "Today's news" in text
+
+
+def test_archive_failure_does_not_crash_fire(tmp_path, monkeypatch):
+    """If the archive write fails (e.g. disk full), fire continues."""
+    _isolate_home(tmp_path, monkeypatch)
+    from janus.triggers.runtime import _archive_fire_output
+    from janus.triggers.base import FireEvent
+
+    # Force an OSError by making the parent path a regular file.
+    blocker = config.HOME / "cron"
+    blocker.parent.mkdir(parents=True, exist_ok=True)
+    blocker.write_text("not a directory", encoding="utf-8")
+
+    ev = FireEvent(
+        trigger="x", request="x", skill="x", fired_at="2026-01-01T00:00:00",
+    )
+    # Should NOT raise.
+    _archive_fire_output(ev, "output")
+
+
 # ---------- Helpers ----------
 
 

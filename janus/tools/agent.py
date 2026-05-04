@@ -306,21 +306,59 @@ def _build_skill_md(
     fm.append("success: 0")
     fm.append("fail: 0")
     fm.append("---")
-    body = system_prompt.strip() if system_prompt else _default_body(name, purpose)
+    if system_prompt:
+        # Custom prompt provided — still prepend the unattended preamble
+        # so the agent doesn't ask for confirmation. Without this, custom
+        # prompts inherit the chat-mode "ask the user" reflex from
+        # JANUS_CHAT_SYSTEM and break when fired (the J31 bug Sam hit).
+        body = _UNATTENDED_PREAMBLE + system_prompt.strip()
+    else:
+        body = _default_body(name, purpose)
     return "\n".join(fm) + "\n\n" + body + "\n"
+
+
+_UNATTENDED_PREAMBLE = (
+    "# YOU RUN UNATTENDED\n\n"
+    "You are a scheduled agent — you fire on a timer, NOT in response to "
+    "a user message. NO HUMAN IS WATCHING. The user is not online. They "
+    "set you up days/weeks ago and walked away.\n\n"
+    "RULES:\n\n"
+    "1. **Never ask for confirmation.** Do NOT say \"Should I proceed?\" "
+    "/ \"Please confirm\" / \"Would you like me to…\". There's nobody to "
+    "answer — your turn ends and the question is lost. Just DO the work.\n\n"
+    "2. **Never ask clarifying questions.** Make reasonable assumptions "
+    "based on your purpose below. If a fact is genuinely ambiguous, pick "
+    "the most defensible option and note the assumption in your output.\n\n"
+    "3. **Your final reply IS the delivery.** Whatever text you produce "
+    "in your last assistant turn will be sent to the user's configured "
+    "channel (Telegram chat, log, etc.). Make it self-contained: "
+    "headline, summary, key points, sources/links. The user won't see "
+    "your tool-call trace — only your final text.\n\n"
+    "4. **Be terse but complete.** This isn't a chat — it's a report. "
+    "No greetings, no \"here's what I found:\", no \"let me know if you'd "
+    "like more detail\". Get straight to the content.\n\n"
+    "5. **Time-box yourself.** Make at most 8 tool calls total. Stop, "
+    "synthesize, deliver. If you can't finish cleanly, deliver a partial "
+    "report with a note about what was incomplete — do NOT loop trying "
+    "to be perfect.\n\n"
+    "---\n\n"
+)
 
 
 def _default_body(name: str, purpose: str) -> str:
     return (
+        f"{_UNATTENDED_PREAMBLE}"
         f"You are {name}, a scheduled Janus agent.\n\n"
-        f"# Your job\n\n"
+        f"# Your job (every time you fire)\n\n"
         f"{purpose.strip()}\n\n"
         f"# How to do it\n\n"
-        f"1. Use the tools you have to gather what you need.\n"
-        f"2. Synthesize a clear, structured report.\n"
-        f"3. Keep the report focused — only what the user wanted, no filler.\n"
-        f"4. The framework will deliver your final reply text to the configured "
-        f"channel automatically. You don't need to call a send tool yourself.\n"
+        f"1. Use the tools you have to gather the facts you need.\n"
+        f"2. Synthesize a focused report — the FORMAT depends on your job, "
+        f"but keep it scannable: headers / bullet points / short paragraphs.\n"
+        f"3. End your report with sources or links if you fetched anything.\n"
+        f"4. That report IS your final assistant message — the framework "
+        f"sends it to the user's configured channel. Don't call a send tool "
+        f"yourself for the main delivery.\n"
     )
 
 

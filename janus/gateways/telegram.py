@@ -29,6 +29,7 @@ USE:
 
 from __future__ import annotations
 import asyncio
+import concurrent.futures
 import time
 import uuid
 from typing import Any
@@ -176,12 +177,21 @@ async def _send(bot, chat_id: int, text: str) -> None:
 # ---------- Mode-aware approver (4-button keyboard) ----------
 
 
-def _make_approver(chat_id: int, app, sess: Session):
+def _make_approver(chat_id: int, app, sess: Session, loop: asyncio.AbstractEventLoop | None = None):
     """v1.3 approver with session+always grants and 4-button keyboard.
 
     ALLOW   → True silently (mode allows the risk class).
     DENY    → False (the model sees the refusal observation).
     ASK     → check session/always grants; else send 4-button keyboard.
+
+    `loop` is the gateway's asyncio event loop, captured at construction
+    time on the asyncio thread. Required because the approver itself
+    runs on the executor thread (via asyncio.to_thread), where
+    `asyncio.get_event_loop()` raises "no current event loop" in
+    Python 3.10+ — v1.6.1 bug Sam hit when the model tried fs_write
+    after a trigger fire and the approver crashed before reaching the
+    keyboard. Falls back to the running loop only as a defensive
+    last-resort (used by older callers that hadn't been updated yet).
     """
     def approver(action_label: str, details: str, **kw) -> bool:
         risk = kw.get("risk") or permissions.risk_from_verb(
@@ -201,9 +211,20 @@ def _make_approver(chat_id: int, app, sess: Session):
             return True
 
         # Send 4-button keyboard.
-        loop = asyncio.get_event_loop()
+        # Use the loop captured at construction time. Falls back to a
+        # best-effort lookup so older callers don't break, but the modern
+        # caller in _run_chat_turn always passes loop explicitly.
+        approver_loop = loop
+        if approver_loop is None:
+            try:
+                approver_loop = asyncio.get_event_loop()
+            except RuntimeError:
+                # No event loop in this thread (we're on the executor
+                # thread). Treat ASK as DENY rather than crashing — the
+                # model gets a refusal observation it can adapt to.
+                return False
         token = uuid.uuid4().hex[:8]
-        fut: asyncio.Future = loop.create_future()
+        fut: asyncio.Future = approver_loop.create_future()
         # Stash key alongside future so the callback knows what to grant.
         sess.approval_futures[token] = fut
         sess.approval_futures[token + ".key"] = cap_key  # type: ignore
@@ -226,10 +247,19 @@ def _make_approver(chat_id: int, app, sess: Session):
             chat_id=chat_id, text=body,
             parse_mode="Markdown", reply_markup=kb,
         )
-        asyncio.run_coroutine_threadsafe(coro, loop)
+        asyncio.run_coroutine_threadsafe(coro, approver_loop)
+        # The approver runs on the executor thread, so we can't call
+        # loop.run_until_complete (would crash — that's a main-loop
+        # operation). Schedule the future on the gateway loop and
+        # block this thread on the concurrent.futures.Future returned
+        # by run_coroutine_threadsafe.
+        wait_coro = asyncio.wait_for(fut, timeout=180)
+        wait_fut = asyncio.run_coroutine_threadsafe(wait_coro, approver_loop)
         try:
-            return loop.run_until_complete(asyncio.wait_for(fut, timeout=180))
-        except asyncio.TimeoutError:
+            return bool(wait_fut.result(timeout=185))
+        except (asyncio.TimeoutError, concurrent.futures.TimeoutError):
+            return False
+        except Exception:
             return False
     return approver
 
@@ -672,14 +702,19 @@ async def _run_chat_turn(
     Runs executor.chat with full memory + indicators + cost tracking."""
     preamble = memory.prepend_for_prompt()
 
-    base_approver = _make_approver(chat_id, ctx.application, sess)
+    # Capture the gateway's event loop ONCE on the asyncio thread, then
+    # pass it everywhere downstream — the executor will run on a worker
+    # thread (asyncio.to_thread) where get_event_loop() raises in
+    # Python 3.10+. v1.6.1 fix.
+    gateway_loop = asyncio.get_event_loop()
+    base_approver = _make_approver(chat_id, ctx.application, sess, loop=gateway_loop)
     caps = CapabilitySet()
     tools = default_registry(capabilities=caps)
     # v1.5.1: register the gateway send-file tool so the model can deliver
     # files as attachments (not paste content). Closure captures the bot
     # + chat_id + asyncio loop so the sync executor thread can schedule
     # the async send back on the bot's event loop.
-    loop_for_send = asyncio.get_event_loop()
+    loop_for_send = gateway_loop
 
     def _send_file_sync(path: str, caption: str = "") -> None:
         async def _send():
@@ -696,9 +731,8 @@ async def _run_chat_turn(
 
     approver = make_protected(base_approver, caps, sess.mode_state.current)
 
-    # Set up live indicators.
-    loop = asyncio.get_event_loop()
-    emitter = _make_telegram_emitter(chat_id, ctx.application, loop)
+    # Set up live indicators (reuse the gateway loop captured above).
+    emitter = _make_telegram_emitter(chat_id, ctx.application, gateway_loop)
     on_step = _make_on_step(emitter)
 
     record: dict[str, Any] = {

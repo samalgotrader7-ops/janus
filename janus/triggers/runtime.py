@@ -207,10 +207,46 @@ def fire_once(t: Trigger, *, detail: dict | None = None) -> str:
         fired_at=_now_iso(),
         detail=detail or {},
     )
+    # v1.6.1 — archive each fire to ~/.janus/cron/output/<agent>/<ts>.md
+    # so the user can browse history without grepping log.jsonl. Hermes
+    # uses the same layout (~/.hermes/cron/output/{job_id}/{ts}.md), and
+    # matching it now keeps the door open for an easy migration later.
+    _archive_fire_output(event, output)
     # v1.6 — honor per-trigger deliver_to. Falls back to global config
     # when the trigger doesn't set one (back-compat with pre-v1.6 yaml).
     _notify_per_trigger(t.deliver_to)(event, output)
     return output
+
+
+# ---------- Output archive (Hermes-style) ----------
+
+
+def _archive_fire_output(event: FireEvent, output: str) -> None:
+    """Write each fire's output to ~/.janus/cron/output/<agent>/<ts>.md.
+
+    Best-effort — archive failure does NOT abort the fire (the delivery
+    notification still happens). Filename uses the fired_at timestamp
+    with colons replaced by hyphens so it's safe on Windows too.
+    """
+    try:
+        out_dir = config.HOME / "cron" / "output" / event.trigger
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ts_safe = event.fired_at.replace(":", "-")
+        path = out_dir / f"{ts_safe}.md"
+        # Compose a minimal frontmatter for grep-ability + body.
+        body = (
+            f"---\n"
+            f"trigger: {event.trigger}\n"
+            f"skill: {event.skill or ''}\n"
+            f"fired_at: {event.fired_at}\n"
+            f"request: {event.request!r}\n"
+            f"---\n\n"
+            f"{output}\n"
+        )
+        path.write_text(body, encoding="utf-8")
+    except OSError:
+        # Don't crash the fire just because the disk is full / locked.
+        pass
 
 
 # ---------- Daemon loop ----------
