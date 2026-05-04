@@ -47,6 +47,30 @@ class FsEdit(base.Tool):
         if not p.exists() or not p.is_file():
             return f"error: not a file: {args['path']}"
 
+        # v1.15.0 — refuse if the file wasn't read in this session, OR
+        # if it was modified externally since the last read. Same pattern
+        # Claude Code uses to prevent blind edits based on stale
+        # assumptions. Override via JANUS_FS_EDIT_REQUIRE_READ=0.
+        import os as _os
+        if _os.getenv("JANUS_FS_EDIT_REQUIRE_READ", "1") not in ("0", "false"):
+            try:
+                from .. import read_tracker
+                if not read_tracker.was_read_recently(p):
+                    # Distinguish "never read" from "modified since".
+                    if str(p.resolve()) in read_tracker.all_read_paths():
+                        return (
+                            f"error: {args['path']} was modified since you "
+                            f"last read it. Re-read with fs_read first, "
+                            f"then edit."
+                        )
+                    return (
+                        f"error: must fs_read({args['path']!r}) before "
+                        f"fs_edit. Reading first prevents blind edits "
+                        f"based on stale assumptions about file shape."
+                    )
+            except Exception:
+                pass  # If the tracker fails, don't block the edit.
+
         text = p.read_text(encoding="utf-8")
         old = args["old_string"]
         new = args["new_string"]
@@ -79,4 +103,12 @@ class FsEdit(base.Tool):
 
         new_text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
         p.write_text(new_text, encoding="utf-8")
+        # Re-mark as read so subsequent fs_edits in the same turn don't
+        # spuriously fail the "modified since read" check (the
+        # modification was OUR edit).
+        try:
+            from .. import read_tracker
+            read_tracker.mark_read(p)
+        except Exception:
+            pass
         return f"edited {args['path']} ({count} replacement{'s' if count != 1 else ''})"

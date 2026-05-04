@@ -60,9 +60,17 @@ class FsRead(base.Tool):
             return f"error: not a file: {args['path']}"
         data = p.read_bytes()[:MAX_READ_BYTES]
         try:
-            return data.decode("utf-8")
+            text = data.decode("utf-8")
         except UnicodeDecodeError:
             return f"error: file is not utf-8 text: {args['path']}"
+        # v1.15.0 — record this read so fs_edit can verify the file
+        # didn't change before editing (Claude Code Edit safety pattern).
+        try:
+            from .. import read_tracker
+            read_tracker.mark_read(p)
+        except Exception:
+            pass
+        return text
 
 
 class FsWrite(base.Tool):

@@ -1454,6 +1454,25 @@ def main() -> None:
             logger.write(record)
             continue
 
+        # v1.15.0 — detect ExitPlanMode approval. The trace records
+        # tool calls as type='tool_call' with a 'result_preview' field
+        # holding the tool's stringified return value. PLAN_APPROVED is
+        # the sentinel the model received; we flip mode to default.
+        from .tools.plan_mode import PLAN_APPROVED
+        for entry in trace:
+            if (
+                isinstance(entry, dict)
+                and entry.get("tool") == "exit_plan_mode"
+                and PLAN_APPROVED in str(entry.get("result_preview") or "")
+            ):
+                if mode_state.current == permissions.PLAN:
+                    mode_state.current = permissions.DEFAULT
+                    console.print(
+                        "[green]✓ plan approved[/] — mode switched to "
+                        "[bold]default[/]"
+                    )
+                break
+
         # Render any final text the model produced. Stream already wrote
         # most of it; this is the markdown re-render for fenced code blocks
         # etc. only when a long markdown-shaped reply came back without

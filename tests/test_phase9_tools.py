@@ -60,8 +60,11 @@ def test_default_registry_includes_all_phase9_tools(janus_home):
 
 
 def test_fs_edit_happy_path(janus_home):
+    # v1.15.0: fs_edit now requires a prior fs_read in the same session.
+    from janus.tools.fs import FsRead
     p = config.WORKSPACE / "x.txt"
     p.write_text("hello world", encoding="utf-8")
+    FsRead().run({"path": "x.txt"}, _approve)
     out = FsEdit().run(
         {"path": "x.txt", "old_string": "world", "new_string": "janus"},
         _approve,
@@ -79,8 +82,10 @@ def test_fs_edit_refuses_workspace_escape(janus_home):
 
 
 def test_fs_edit_refuses_when_old_string_ambiguous(janus_home):
+    from janus.tools.fs import FsRead
     p = config.WORKSPACE / "x.txt"
     p.write_text("foo foo foo", encoding="utf-8")
+    FsRead().run({"path": "x.txt"}, _approve)
     out = FsEdit().run(
         {"path": "x.txt", "old_string": "foo", "new_string": "bar"},
         _approve,
@@ -90,8 +95,10 @@ def test_fs_edit_refuses_when_old_string_ambiguous(janus_home):
 
 
 def test_fs_edit_replace_all_succeeds_on_ambiguous(janus_home):
+    from janus.tools.fs import FsRead
     p = config.WORKSPACE / "x.txt"
     p.write_text("foo foo foo", encoding="utf-8")
+    FsRead().run({"path": "x.txt"}, _approve)
     out = FsEdit().run(
         {"path": "x.txt", "old_string": "foo", "new_string": "bar",
          "replace_all": True},
@@ -102,8 +109,10 @@ def test_fs_edit_replace_all_succeeds_on_ambiguous(janus_home):
 
 
 def test_fs_edit_refuses_on_user_denial(janus_home):
+    from janus.tools.fs import FsRead
     p = config.WORKSPACE / "x.txt"
     p.write_text("hello", encoding="utf-8")
+    FsRead().run({"path": "x.txt"}, _approve)
     out = FsEdit().run(
         {"path": "x.txt", "old_string": "hello", "new_string": "bye"},
         _deny,

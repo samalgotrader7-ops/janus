@@ -30,6 +30,8 @@ from .agent import (
 from .clarify import Clarify
 from .delegate import Delegate
 from .ssh_exec import SshExec
+from .shell_bg import ShellRunBg, ShellOutput, ShellKill, ShellList
+from .plan_mode import ExitPlanMode
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -93,6 +95,17 @@ _BUILTIN_TOOL_FACTORIES = {
     # (key auth only, no password prompts). Reuses ~/.ssh/config aliases,
     # ProxyJump, agent forwarding. Capability tokens: ssh.exec.
     "ssh_exec": SshExec,
+    # v1.15.0 — coding-agent gap fillers (Claude Code parity).
+    # Background shell: launch + monitor + kill long-running processes
+    # without blocking the chat loop. State machine via shell_id.
+    "shell_run_bg": ShellRunBg,
+    "shell_output": ShellOutput,
+    "shell_kill": ShellKill,
+    "shell_list": ShellList,
+    # ExitPlanMode: model-callable "I have a plan, can I proceed?"
+    # Only meaningful in mode=plan. Approver shows plan to user;
+    # framework switches mode on approval.
+    "exit_plan_mode": ExitPlanMode,
 }
 
 

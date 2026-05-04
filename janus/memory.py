@@ -211,10 +211,22 @@ def prepend_for_prompt() -> str:
         # should still work — we just lose the state block.
         state_block = ""
 
-    if not parts and not state_block:
+    # v1.15.0 — project instructions (CLAUDE.md / JANUS.md / AGENTS.md
+    # auto-loaded from CWD upward). Highest priority, prepended FIRST
+    # so project conventions override generic agent advice.
+    project_block = ""
+    try:
+        from . import project_context
+        project_block = project_context.load_block().strip()
+    except Exception:
+        project_block = ""
+
+    if not parts and not state_block and not project_block:
         return ""
 
     out_parts: list[str] = []
+    if project_block:
+        out_parts.append(project_block)
     if parts:
         header = "# Memory (persistent state across conversations)"
         out_parts.append(
