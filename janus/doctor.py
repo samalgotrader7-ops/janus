@@ -28,6 +28,8 @@ class CheckResult:
 def run_all() -> list[CheckResult]:
     return [
         _check_api_key(),
+        _check_api_base(),
+        _check_model_reachable(),
         _check_workspace(),
         _check_home(),
         _check_log(),
@@ -80,6 +82,64 @@ def _check_api_key() -> CheckResult:
     return CheckResult(
         "API key", "fail", "JANUS_API_KEY not set",
         fix="set JANUS_API_KEY in env or .env",
+    )
+
+
+def _check_api_base() -> CheckResult:
+    if not config.API_BASE:
+        return CheckResult(
+            "API base", "fail", "JANUS_API_BASE not set",
+            fix="set JANUS_API_BASE (e.g., https://openrouter.ai/api/v1)",
+        )
+    return CheckResult("API base", "pass", config.API_BASE)
+
+
+def _check_model_reachable() -> CheckResult:
+    """v1.16.1 — probe the endpoint's /models list and verify our
+    configured model id is among them. If the list is empty (auth
+    issue, 404 on /models, etc.) we report 'warn' rather than 'fail'
+    so users with private endpoints that don't expose /models can
+    still operate.
+    """
+    if not config.API_KEY or not config.API_BASE:
+        return CheckResult(
+            "model reachable", "warn",
+            "skipped (API_KEY or API_BASE missing)",
+        )
+    if not config.MODEL:
+        return CheckResult(
+            "model reachable", "fail", "JANUS_MODEL not set",
+            fix="set JANUS_MODEL to one of the ids returned by "
+                f"`curl {config.API_BASE.rstrip('/')}/models`",
+        )
+    from . import llm as _llm
+    models = _llm.list_models(timeout=8)
+    if not models:
+        return CheckResult(
+            "model reachable", "warn",
+            f"could not list models at {config.API_BASE.rstrip('/')}/models "
+            "(endpoint may not expose /models, or auth required)",
+        )
+    if config.MODEL in models:
+        return CheckResult(
+            "model reachable", "pass",
+            f"{config.MODEL} is one of {len(models)} model(s) on the endpoint",
+        )
+    # Suggest the closest match — try removing a leading 'X/' prefix.
+    suggest = ""
+    if "/" in config.MODEL:
+        unprefixed = "/".join(config.MODEL.split("/")[1:])
+        if unprefixed in models:
+            suggest = f"set JANUS_MODEL={unprefixed} (drops the prefix)"
+    if not suggest:
+        # Show first few available so the user can pick.
+        sample = ", ".join(models[:3])
+        more = "" if len(models) <= 3 else f" (+{len(models) - 3} more)"
+        suggest = f"available: {sample}{more}"
+    return CheckResult(
+        "model reachable", "fail",
+        f"{config.MODEL!r} not on the endpoint",
+        fix=suggest,
     )
 
 

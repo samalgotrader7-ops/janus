@@ -72,6 +72,11 @@ def chat_stream(
         url, headers=headers, json_payload=payload,
         timeout=config.LLM_TIMEOUT, stream=True,
     ) as r:
+        # v1.16.1 — same actionable 404 as llm.chat. Streaming-mode 404s
+        # are exactly the same failure shape (model id not found at the
+        # endpoint), just hit through a different code path.
+        if r.status_code == 404:
+            raise llm._explain_404(chosen_model, config.API_BASE, r)
         r.raise_for_status()
         accumulated = ""
         # Tool-call accumulation: provider streams partial deltas, we

@@ -245,6 +245,16 @@ def chat(
     except Exception:
         pass
 
+    # v1.16.1 — turn opaque 404s into actionable errors.
+    # vLLM / Ollama / llama.cpp / vendored OpenAI-compat servers return 404
+    # when the requested model id isn't loaded. The bare requests.HTTPError
+    # message ("404 Client Error: Not Found for url: ...") is useless to the
+    # user. Common cause: an OpenRouter-style 'openai/Foo/Bar' model id
+    # configured against a direct vLLM endpoint that knows the model as
+    # 'Foo/Bar'. We detect that shape and suggest the fix.
+    if r.status_code == 404:
+        raise _explain_404(chosen_model, config.API_BASE, r)
+
     r.raise_for_status()
     body = r.json()
     # Phase 13: feed token usage to the cost tracker. Non-fatal — providers
@@ -286,6 +296,112 @@ def _provider_from_base(api_base: str) -> str:
     if "ollama" in host or "localhost" in host or "127.0.0.1" in host:
         return "local"
     return host or "unknown"
+
+
+# ---------- Helpful errors + endpoint introspection (v1.16.1) ----------
+
+
+def _explain_404(model: str, api_base: str, response: requests.Response) -> RuntimeError:
+    """Build an actionable error message for a 404 from /chat/completions.
+
+    Includes:
+      - what was tried (URL + model)
+      - the most likely cause (provider-prefix mismatch on vLLM-shaped endpoint)
+      - a concrete suggestion (the unprefixed model name)
+      - how to verify (curl /v1/models)
+    """
+    base = api_base.rstrip("/")
+    provider = _provider_from_base(api_base)
+    hints: list[str] = []
+
+    parts = model.split("/")
+    if len(parts) >= 2 and provider not in ("openrouter",):
+        # 'openai/Foo' / 'meta/Bar' style prefix on a direct endpoint.
+        # The first component looks like a namespace the endpoint doesn't
+        # use. Suggest stripping it.
+        unprefixed = "/".join(parts[1:])
+        hints.append(
+            f"the prefix {parts[0]!r}/ looks like an OpenRouter-style "
+            f"namespace. {provider} endpoints usually serve the model as "
+            f"just {unprefixed!r} (no prefix). Try setting "
+            f"JANUS_MODEL={unprefixed}"
+        )
+
+    hints.append(
+        f"list what this endpoint actually serves: "
+        f"`curl {base}/models`"
+    )
+
+    # Try to pull the server's error body too — vLLM sometimes lists the
+    # available models in the 404 response. Best-effort.
+    server_msg = ""
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            err = body.get("error") or body.get("detail") or body
+            if isinstance(err, dict):
+                server_msg = err.get("message") or err.get("msg") or ""
+            elif isinstance(err, str):
+                server_msg = err
+    except Exception:
+        pass
+    if not server_msg:
+        # Fall back to a snippet of raw text (capped).
+        try:
+            server_msg = (response.text or "")[:300].strip()
+        except Exception:
+            server_msg = ""
+
+    msg_parts = [
+        f"404 from {base}/chat/completions for model {model!r} — the "
+        f"endpoint doesn't recognize this model id.",
+    ]
+    if server_msg:
+        msg_parts.append(f"  server said: {server_msg}")
+    msg_parts.append("  try:")
+    for h in hints:
+        msg_parts.append(f"    - {h}")
+    return RuntimeError("\n".join(msg_parts))
+
+
+def list_models(api_base: str | None = None,
+                api_key: str | None = None,
+                timeout: int = 10) -> list[str]:
+    """Probe `<base>/models` and return the model ids the endpoint serves.
+
+    Returns [] on any failure (network, auth, malformed body). Used by
+    `janus doctor` to surface "what's actually loaded over there."
+    """
+    base = (api_base or config.API_BASE).rstrip("/")
+    key = api_key if api_key is not None else config.API_KEY
+    try:
+        r = requests.get(
+            f"{base}/models",
+            headers={"Authorization": f"Bearer {key}"} if key else {},
+            timeout=timeout,
+        )
+        if r.status_code != 200:
+            return []
+        data = r.json()
+    except Exception:
+        return []
+    # OpenAI shape: {"data": [{"id": "...", ...}, ...]}
+    items = data.get("data") if isinstance(data, dict) else None
+    if items is None and isinstance(data, dict):
+        items = data.get("models")
+    if items is None and isinstance(data, list):
+        items = data
+    if not isinstance(items, list):
+        return []
+    out: list[str] = []
+    for m in items:
+        if isinstance(m, dict):
+            mid = m.get("id") or m.get("name") or m.get("model")
+            if mid:
+                out.append(str(mid))
+        elif isinstance(m, str):
+            out.append(m)
+    return out
 
 
 def chat_stream(messages, tools=None, temperature=0.7, model: str | None = None):
