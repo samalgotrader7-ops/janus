@@ -91,6 +91,11 @@ def check(tool_name: str, args: dict) -> str:
             warnings.extend(_check_fs_edit(args))
         elif tool_name == "shell":
             warnings.extend(_check_shell(args))
+        elif tool_name == "ssh_exec":
+            # v1.11.0 — same regret patterns as local shell. force-push,
+            # terraform destroy, npm publish on a REMOTE host is even
+            # more important to flag (model can't see the result first).
+            warnings.extend(_check_ssh_exec(args))
         elif tool_name == "agent_delete":
             warnings.extend(_check_agent_delete(args))
         if warnings:
@@ -154,6 +159,24 @@ def _check_shell(args: dict) -> list[str]:
     for pattern, label in _SHELL_REGRET_PATTERNS:
         if re.search(pattern, cmd):
             out.append(f"shell uses {label}")
+    return out
+
+
+def _check_ssh_exec(args: dict) -> list[str]:
+    """Same regret-pattern catalog applied to the remote command.
+
+    Prefixed with 'remote' so the model knows the warning is about the
+    blast radius of the OTHER machine, not local. Includes the host so
+    the user sees which server.
+    """
+    out: list[str] = []
+    cmd = args.get("command") or ""
+    host = args.get("host") or ""
+    if not isinstance(cmd, str):
+        return out
+    for pattern, label in _SHELL_REGRET_PATTERNS:
+        if re.search(pattern, cmd):
+            out.append(f"remote ({host}) uses {label}")
     return out
 
 

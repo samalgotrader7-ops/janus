@@ -180,7 +180,7 @@ def _is_headless_invocation(args: list[str]) -> bool:
             "chat", "--chat", "telegram", "web", "whatsapp", "daemon",
             "fire", "--analyze", "-a", "--reindex", "--eval",
             "--logo", "--conversations", "--help", "-h", "help",
-            "insights", "swarm", "pair", "uninstall",
+            "insights", "stats", "swarm", "pair", "uninstall",
         }
         if not args or all(a not in non_pipe_subs for a in args):
             return True
@@ -1004,6 +1004,9 @@ def main():
         _run_swarm_cli(args[1:]); return
     if sub == "insights":
         _run_insights(args[1:]); return
+    if sub == "stats":
+        from . import rate_limit
+        print(rate_limit.render_summary(rate_limit.get_summary())); return
     if sub in ("--help", "-h", "help"):
         print(__doc__); return
     _run_chat()

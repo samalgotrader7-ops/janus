@@ -77,6 +77,7 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/retry",        "re-run the last user turn (drops last assistant reply)", "built-in"),
     SlashCommand("/undo",         "drop the last user+assistant pair from this conversation", "built-in"),
     SlashCommand("/insights",     "activity summary: /insights [days] (default 7)",      "built-in"),
+    SlashCommand("/stats",        "rate-limit + token usage in the rolling 60s window",  "built-in"),
     SlashCommand("/resume",       "resume a saved conversation by id",                   "built-in"),
     SlashCommand("/continue",     "continue the most recent conversation",               "built-in"),
     SlashCommand("/verbose",      "toggle verbose tool-arg display",                     "built-in"),
@@ -772,6 +773,13 @@ def _dispatch(console, line: str, state: dict) -> bool:
             console.print(Markdown(_ins.render_insights(stats)))
         except Exception as e:
             console.print(f"[red]insights failed:[/] {type(e).__name__}: {e}")
+        return True
+    if cmd == "/stats":
+        from . import rate_limit as _rl
+        try:
+            console.print(Markdown(_rl.render_summary(_rl.get_summary())))
+        except Exception as e:
+            console.print(f"[red]stats failed:[/] {type(e).__name__}: {e}")
         return True
     if cmd == "/resume":
         target = arg.strip()

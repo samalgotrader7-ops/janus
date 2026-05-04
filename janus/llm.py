@@ -163,6 +163,23 @@ def chat(
     r = _post_with_retry(
         url, headers=headers, json_payload=payload, timeout=config.LLM_TIMEOUT,
     )
+    # v1.11.0 — feed the rate-limit tracker BEFORE raise_for_status so
+    # 429s are recorded even when the call ultimately fails. raise will
+    # then bubble the HTTPError up to the caller (preserving v1.4 retry
+    # semantics).
+    try:
+        from . import rate_limit
+        provider = _provider_from_base(config.API_BASE)
+        # Tokens 0 if no body yet (429 / 5xx); we'll update on success below.
+        rate_limit.record_request(
+            provider=provider, model=chosen_model,
+            tokens=0,
+            ok=(200 <= r.status_code < 300),
+            status_429=(r.status_code == 429),
+        )
+    except Exception:
+        pass
+
     r.raise_for_status()
     body = r.json()
     # Phase 13: feed token usage to the cost tracker. Non-fatal — providers
@@ -172,7 +189,38 @@ def chat(
         cost.record(chosen_model, body.get("usage"))
     except Exception:
         pass
+    # v1.11.0 — also report token count to the rate tracker on success.
+    try:
+        from . import rate_limit
+        usage = body.get("usage") or {}
+        total = int(usage.get("total_tokens") or 0)
+        if total:
+            rate_limit.record_request(
+                provider=_provider_from_base(config.API_BASE),
+                model=chosen_model, tokens=total, ok=True,
+            )
+    except Exception:
+        pass
     return body["choices"][0]["message"]
+
+
+def _provider_from_base(api_base: str) -> str:
+    """Best-effort provider name from API_BASE host. Used for grouping
+    rate-limit / cost data without forcing the user to declare it."""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(api_base).netloc.lower()
+    except Exception:
+        return "unknown"
+    if "openrouter" in host:
+        return "openrouter"
+    if "anthropic" in host:
+        return "anthropic"
+    if "openai" in host:
+        return "openai"
+    if "ollama" in host or "localhost" in host or "127.0.0.1" in host:
+        return "local"
+    return host or "unknown"
 
 
 def chat_stream(messages, tools=None, temperature=0.7, model: str | None = None):

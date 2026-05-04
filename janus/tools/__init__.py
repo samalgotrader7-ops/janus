@@ -29,6 +29,7 @@ from .agent import (
 )
 from .clarify import Clarify
 from .delegate import Delegate
+from .ssh_exec import SshExec
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -88,6 +89,10 @@ _BUILTIN_TOOL_FACTORIES = {
     # Restricted tool surface (read-only by default), bounded steps,
     # recursion blocked at depth 1. Lighter than swarm_run.
     "delegate": Delegate,
+    # v1.11.0 — remote command execution via system ssh. BatchMode=yes
+    # (key auth only, no password prompts). Reuses ~/.ssh/config aliases,
+    # ProxyJump, agent forwarding. Capability tokens: ssh.exec.
+    "ssh_exec": SshExec,
 }
 
 

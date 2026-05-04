@@ -252,6 +252,23 @@ def analyze_call(
                     )
         return RiskVerdict.safe()
 
+    # ssh_exec (v1.11.0): same shell block patterns apply to the
+    # remote command. rm -rf / on a production server is the same
+    # disaster as locally — perhaps worse, since the model can't see
+    # the result before the next call. We do NOT auto-block on the
+    # `host` field — that's a routing choice, not a risk classification.
+    if tool_name == "ssh_exec":
+        cmd = str(args.get("command") or "")
+        if cmd:
+            for rx, label in p.shell_blocks:
+                if rx.search(cmd):
+                    return RiskVerdict.block(
+                        f"ssh_exec remote command matched block pattern: "
+                        f"{label}",
+                        pattern=rx.pattern,
+                    )
+        return RiskVerdict.safe()
+
     # FS write: classify by path.
     if _is_fs_write_tool(tool_name):
         path = _extract_fs_path(args)

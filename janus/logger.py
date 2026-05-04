@@ -27,7 +27,19 @@ def now_iso() -> str:
 
 
 def write(record: dict[str, Any]) -> None:
+    """Append a JSON record. v1.11.0: scrubs PII / secrets via
+    janus.redact before writing. JANUS_REDACT=off bypasses (back-compat
+    with pre-v1.11 logs that callers may want to import 1:1)."""
     config.ensure_home()
+    # Lazy import: redact pulls in re + os which are fine but the
+    # logger is imported VERY early, and we want it unblockable.
+    try:
+        from . import redact
+        record = redact.redact_obj(record)
+    except Exception:
+        # Failure-silent — better to log unredacted than crash on the
+        # write path. We wouldn't want a redactor bug to nuke audit.
+        pass
     with config.LOG_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
