@@ -182,11 +182,14 @@ def prepend_for_prompt() -> str:
     is independently truncated to MEMORY_PREPEND_BYTES so a single overgrown
     file can't crowd out the others.
 
-    Returns '' if NO category has content.
+    v1.7.0: also appends a live state-introspection block (memory_state)
+    listing installed agents/swarms/skills + recent fires. The model used
+    to grep for these every turn; now it gets the answer up front. Empty
+    when nothing's installed yet — keeps the prompt tight on fresh installs.
+
+    Returns '' if NEITHER memory NOR live state has anything to say.
     """
     cats = list_categories()
-    if not cats:
-        return ""
     n = config.MEMORY_PREPEND_BYTES
     parts: list[str] = []
     for cat in cats:
@@ -196,10 +199,30 @@ def prepend_for_prompt() -> str:
         if len(body) > n:
             body = body[:n] + "\n[truncated for prompt]"
         parts.append(f"## from ~/.janus/memory/{cat}.md\n\n{body}")
-    if not parts:
+
+    # Live introspection — agents, swarms, skill counts, recent fires.
+    # Lazy import to avoid a cycle at module load (memory_state reads config).
+    state_block = ""
+    try:
+        from . import memory_state
+        state_block = memory_state.state_block().strip()
+    except Exception:
+        # If introspection fails for any reason, the memory prompt
+        # should still work — we just lose the state block.
+        state_block = ""
+
+    if not parts and not state_block:
         return ""
-    header = "# Memory (persistent state across conversations)"
-    return header + "\n\n" + "\n\n---\n\n".join(parts) + "\n\n---\n"
+
+    out_parts: list[str] = []
+    if parts:
+        header = "# Memory (persistent state across conversations)"
+        out_parts.append(
+            header + "\n\n" + "\n\n---\n\n".join(parts)
+        )
+    if state_block:
+        out_parts.append(state_block)
+    return "\n\n---\n\n".join(out_parts) + "\n\n---\n"
 
 
 # ---------- Apply ----------

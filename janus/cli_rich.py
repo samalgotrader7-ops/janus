@@ -65,7 +65,7 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/why",          "re-interpret your last message and show 2-3 candidate readings", "built-in"),
     SlashCommand("/workspace",    "show or change the active workspace directory",       "built-in"),
     SlashCommand("/analyze",      "scan the workspace for tools, skills, project hints", "built-in"),
-    SlashCommand("/memory",       "show all memory categories, or /memory <cat> for one (soul, user, project, …)", "built-in"),
+    SlashCommand("/memory",       "show memory: /memory <cat>, /memory search <q>, /memory audit", "built-in"),
     SlashCommand("/search",       "search prior interactions in the log index",          "built-in"),
     SlashCommand("/skills",       "list/filter skills, or install-bundled to copy the starter catalog", "built-in"),
     SlashCommand("/promote",      "promote a quarantined skill to a trusted state",      "built-in"),
@@ -430,6 +430,44 @@ def _dispatch(console, line: str, state: dict) -> bool:
         return True
     if cmd == "/memory":
         target = arg.strip()
+        # /memory search <query>  → substring search across categories + audit
+        if target.lower().startswith("search "):
+            query = target[7:].strip()
+            if not query:
+                console.print("[red]usage:[/] /memory search <query>")
+                return True
+            from . import memory_state
+            hits = memory_state.search_memory(query, top_k=15)
+            if not hits:
+                console.print(f"[dim]no matches for {query!r}.[/]")
+                return True
+            for h in hits:
+                console.print(
+                    f"[bold]{h['category']}[/].md "
+                    f"[dim]## {h['section']} (line {h['line_no']})[/]"
+                )
+                if h["context_above"]:
+                    console.print(f"  [dim]{h['context_above']}[/]")
+                console.print(f"  {h['line']}")
+                if h["context_below"]:
+                    console.print(f"  [dim]{h['context_below']}[/]")
+                console.print()
+            return True
+        # /memory audit  → list recent autonomous diffs from cron fires
+        if target.lower() == "audit":
+            audit_dir = config.MEMORY_DIR / "_audit"
+            if not audit_dir.is_dir():
+                console.print("[dim](no autonomous memory diffs yet)[/]")
+                return True
+            files = sorted(audit_dir.glob("*.md"), reverse=True)[:20]
+            if not files:
+                console.print("[dim](no autonomous memory diffs yet)[/]")
+                return True
+            for p in files:
+                console.print(f"[bold]{p.name}[/]")
+                console.print(Markdown(p.read_text(encoding="utf-8")))
+                console.print()
+            return True
         if target:
             txt = memory.read(target)
             if not txt:

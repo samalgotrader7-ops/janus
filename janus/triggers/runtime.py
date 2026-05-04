@@ -171,35 +171,72 @@ def _auto_approver(action_label: str, details: str, **kw) -> bool:
 
 
 def fire_once(t: Trigger, *, detail: dict | None = None) -> str:
-    """Run a single trigger now. Used by tests + manual `python -m janus fire <name>`."""
+    """Run a single trigger now. Used by tests + manual `python -m janus fire <name>`.
+
+    v1.7.0: switched from legacy executor.execute (interpret-then-execute,
+    pre-1.0 architecture) to executor.chat with mode="auto". This means
+    fired agents now get:
+      - The full JANUS_CHAT_SYSTEM rule set (Rule 10 about agent_create,
+        the WRONG/RIGHT examples, etc.)
+      - The unattended preamble injected into skill.body by agent_create
+      - The auto-mode safety analyzer (blocks rm -rf /, SSRF, etc.)
+        instead of a pure auto-approver that allowed everything
+      - The same on_step heartbeats and structured trace shape that the
+        chat surfaces use
+    Net: fired agents and chat agents are now ONE codepath. The behavior
+    differences come purely from the skill body's UNATTENDED preamble +
+    mode=auto, not from a separate execution path with its own bugs.
+    """
     if not t.skill:
         return f"trigger {t.name}: no skill specified — refusing to fire"
     skill = skills_mod.load(t.skill)
     if skill is None:
         return f"trigger {t.name}: skill {t.skill!r} not found"
 
-    interps = interpreter.interpret(
-        t.request,
-        memory_preamble=memory.prepend_for_prompt(),
-        skill_hints=f"- {skill.name} ({skill.state}): {skill.description}",
-        temperature=0.3,
-    )
-    chosen = interps[0] if interps else {
-        "label": "trigger-fallback", "action": t.request, "risk": "—"
-    }
-
     caps = skill.capabilities
-    tools = default_registry(capabilities=caps)
-    approver = make_capability_aware(_auto_approver, caps)
-    output, trace = executor.execute(
-        original_request=t.request,
-        chosen_label=chosen["label"],
-        chosen_action=chosen["action"],
-        tools=tools, approver=approver,
+    # If the skill restricted tools via frontmatter `tool_names`, honor it.
+    tool_names = None
+    fm = skill.raw_frontmatter or {}
+    if isinstance(fm.get("tool_names"), list):
+        tool_names = [str(n) for n in fm["tool_names"]]
+    tools = default_registry(capabilities=caps, tool_names=tool_names)
+    # Auto-mode: tool calls auto-approve but auto_mode.py risk patterns
+    # still block dangerous calls (rm -rf /, ~/.ssh writes, SSRF).
+    # Capability tokens additionally short-circuit to ALLOW.
+    from ..tools import make_protected
+    approver = make_protected(_auto_approver, caps, "auto")
+
+    output, _trace = executor.chat(
+        messages=[],
+        user_input=t.request,
+        tools=tools,
+        approver=approver,
         on_step=None,
         skill_body=skill.body,
         memory_preamble=memory.prepend_for_prompt(),
+        mode="auto",
+        workspace=str(config.WORKSPACE),
+        tool_count=len(tools.schemas()),
+        skill_count=1,
+        stream=False,  # no console to stream to in unattended mode
     )
+
+    # v1.7.0 — opt-in: skill frontmatter `memory-write: true` lets the
+    # fired agent propose memory diffs against its own output. Diffs are
+    # auto-applied (no human to approve) AND mirrored to
+    # ~/.janus/memory/_audit/ so the user can review what the agent
+    # added on its own initiative.
+    if fm.get("memory-write") or fm.get("memory_write"):
+        try:
+            _propose_and_audit_diff(t, skill, output)
+        except Exception as e:
+            logger.write({
+                "ts": _now_iso(),
+                "type": "memory_write_failed",
+                "trigger": t.name,
+                "error": f"{type(e).__name__}: {e}",
+            })
+
     event = FireEvent(
         trigger=t.name,
         request=t.request,
@@ -216,6 +253,56 @@ def fire_once(t: Trigger, *, detail: dict | None = None) -> str:
     # when the trigger doesn't set one (back-compat with pre-v1.6 yaml).
     _notify_per_trigger(t.deliver_to)(event, output)
     return output
+
+
+# ---------- Memory write from cron (v1.7.0 opt-in) ----------
+
+
+def _propose_and_audit_diff(t: Trigger, skill, output: str) -> None:
+    """Propose memory ops from a fired agent's output, auto-apply, audit.
+
+    Triggered when the skill's frontmatter has `memory-write: true`.
+    The fired agent runs unattended — there's no human to approve a diff
+    interactively — so we apply the diff AND write a copy to
+    ~/.janus/memory/_audit/<ts>__<agent>.md so the user can review and
+    revert via `/memory` slash commands.
+
+    Conservative scope: pre-v1.8 we only allow ops to project.md and
+    relationships.md (the two categories that legitimately accumulate
+    over time from autonomous activity). Other categories (soul, user,
+    preferences) are too identity-shaped to be touched without a human.
+    """
+    from .. import memory as memory_mod  # local: avoid circular import
+    ops = memory_mod.propose_diff(t.request, output)
+    if not ops:
+        return
+    # Filter to allowed categories.
+    allowed = {"project", "relationships"}
+    ops = [op for op in ops if (op.get("category") or "user") in allowed]
+    if not ops:
+        return
+
+    # Apply to live memory.
+    memory_mod.apply(ops)
+
+    # Mirror to audit log.
+    audit_dir = config.MEMORY_DIR / "_audit"
+    try:
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        ts_safe = _now_iso().replace(":", "-")
+        audit_path = audit_dir / f"{ts_safe}__{t.name}.md"
+        audit_path.write_text(
+            f"# memory diff applied by agent fire\n\n"
+            f"trigger: {t.name}\n"
+            f"skill: {skill.name}\n"
+            f"fired_at: {_now_iso()}\n"
+            f"request: {t.request!r}\n\n"
+            f"## proposed ops\n\n"
+            f"{memory_mod.render_diff(ops)}\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 # ---------- Output archive (Hermes-style) ----------

@@ -298,8 +298,10 @@ def _build_skill_md(
             tgts = targets if isinstance(targets, list) else [targets]
             for t in tgts:
                 fm.append(f"    - {_yaml_str(t)}")
-    else:
-        fm.append("capabilities: {}")
+    # No `capabilities:` line at all when empty. Writing
+    # `capabilities: {}` would parse as the literal string '{}' through
+    # our hand-rolled YAML reader (which doesn't handle inline dicts),
+    # which then breaks CapabilitySet.from_dict downstream.
     fm.append(f"created: {_iso_now()}")
     fm.append("last-promoted: null")
     fm.append("runs: 0")
