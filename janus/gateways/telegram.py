@@ -92,6 +92,10 @@ class Session:
         mode = self._persistent.mode or permissions.normalize(config.APPROVAL_MODE)
         self.mode_state = permissions.ModeState(current=mode)
         self.approval_futures: dict[str, asyncio.Future] = {}
+        # v1.8.0 — clarify-tool futures, same pattern as approval. The
+        # callback registers a future + token, sends the keyboard, blocks
+        # via run_coroutine_threadsafe; on_callback / on_text resolves it.
+        self.clarify_futures: dict[str, asyncio.Future] = {}
         # Session-scoped grants — cleared on /clear or process restart.
         # Keyed by "tool.verb" → True.
         self.session_grants: set[str] = set()
@@ -262,6 +266,78 @@ def _make_approver(chat_id: int, app, sess: Session, loop: asyncio.AbstractEvent
         except Exception:
             return False
     return approver
+
+
+# ---------- Clarify keyboard (v1.8.0) ----------
+
+
+def _make_telegram_clarify_cb(chat_id: int, app, sess: Session, loop: asyncio.AbstractEventLoop):
+    """Callback for the clarify tool when invoked from a Telegram chat.
+
+    Sends an inline keyboard (one button per choice + an OTHER button) or
+    a free-text prompt, blocks the executor thread on a future the
+    on_callback / on_text handler resolves. 5-minute timeout — the
+    tool emits the UNAVAILABLE sentinel on timeout so the model picks
+    a default and continues.
+    """
+    def callback(question: str, choices: list[str] | None) -> str | None:
+        token = uuid.uuid4().hex[:8]
+        fut: asyncio.Future = loop.create_future()
+        sess.clarify_futures[token] = fut
+
+        body = f"❓ *clarify*\n\n{question[:1000]}"
+        if choices:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            kb_rows = []
+            row = []
+            for i, c in enumerate(choices):
+                row.append(InlineKeyboardButton(
+                    c[:30], callback_data=f"clr:{token}:{i}",
+                ))
+                if len(row) == 2:
+                    kb_rows.append(row)
+                    row = []
+            if row:
+                kb_rows.append(row)
+            kb_rows.append([InlineKeyboardButton(
+                "✎ Other (type your answer)",
+                callback_data=f"clr:{token}:other",
+            )])
+            kb = InlineKeyboardMarkup(kb_rows)
+            coro = app.bot.send_message(
+                chat_id=chat_id, text=body,
+                parse_mode="Markdown", reply_markup=kb,
+            )
+        else:
+            body += "\n\n_type your answer in the chat._"
+            coro = app.bot.send_message(
+                chat_id=chat_id, text=body, parse_mode="Markdown",
+            )
+            # Mark this token as awaiting free text — on_text resolves it.
+            sess.clarify_futures["__awaiting_text__"] = fut  # type: ignore
+
+        asyncio.run_coroutine_threadsafe(coro, loop)
+        wait_coro = asyncio.wait_for(fut, timeout=300)
+        wait_fut = asyncio.run_coroutine_threadsafe(wait_coro, loop)
+        try:
+            answer = wait_fut.result(timeout=305)
+        except (asyncio.TimeoutError, concurrent.futures.TimeoutError):
+            return None
+        except Exception:
+            return None
+        finally:
+            sess.clarify_futures.pop(token, None)
+            sess.clarify_futures.pop("__awaiting_text__", None)
+        if answer is None or not str(answer).strip():
+            return None
+        # If a numeric/index resolution came back, map to the choice text.
+        s = str(answer)
+        if choices and s.isdigit():
+            i = int(s)
+            if 0 <= i < len(choices):
+                return choices[i]
+        return s
+    return callback
 
 
 # ---------- Live indicator emitter (Telegram-flavored) ----------
@@ -559,6 +635,18 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not req.strip():
         return
 
+    # v1.8.0 — if a clarify-free-text future is pending, this incoming
+    # message IS the answer (not a new chat turn). Resolve and bail
+    # before the normal chat path runs.
+    awaiting = sess.clarify_futures.pop("__awaiting_text__", None)
+    if awaiting is not None and not awaiting.done():
+        awaiting.set_result(req.strip())
+        try:
+            await update.message.reply_text(f"→ recorded: {req.strip()[:120]}")
+        except Exception:
+            pass
+        return
+
     # Self-introduction on first authorized text.
     if not sess.greeted:
         user_label = _user_label(update)
@@ -729,6 +817,16 @@ async def _run_chat_turn(
     from ..tools.gateway_send_file import GatewaySendFile
     tools.add_tool(GatewaySendFile(send_fn=_send_file_sync))
 
+    # v1.8.0: replace bundled callback-less Clarify with a Telegram-aware
+    # one — sends an inline keyboard for choices, a free-text prompt
+    # otherwise, and waits on a future the on_callback / on_text handler
+    # resolves. Same pattern as the approval keyboard.
+    from ..tools.clarify import Clarify as _Clarify
+    tools.remove_tool("clarify")
+    tools.add_tool(_Clarify(callback=_make_telegram_clarify_cb(
+        chat_id, ctx.application, sess, gateway_loop,
+    )))
+
     approver = make_protected(base_approver, caps, sess.mode_state.current)
 
     # Set up live indicators (reuse the gateway loop captured above).
@@ -820,17 +918,46 @@ async def _run_chat_turn(
 
 
 async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """4-button approval keyboard taps."""
+    """Inline-keyboard taps: approval (`appr:`) and clarify (`clr:`)."""
     q = update.callback_query
     await q.answer()
     if not _is_authorized(update.effective_chat.id):
         return
     data = q.data or ""
 
+    sess = _session(update.effective_chat.id)
+
+    # v1.8.0 — clarify keyboard taps.
+    if data.startswith("clr:"):
+        try:
+            _, token, choice = data.split(":", 2)
+        except ValueError:
+            return
+        fut = sess.clarify_futures.pop(token, None)
+        if fut is None or fut.done():
+            return
+        if choice == "other":
+            # User wants to type a free-text answer instead. Re-mark
+            # the future as awaiting text and tell them so.
+            sess.clarify_futures["__awaiting_text__"] = fut
+            try:
+                await q.edit_message_text(
+                    q.message.text + "\n\n→ type your answer in the chat."
+                )
+            except Exception:
+                pass
+            return
+        # Numeric index → resolve immediately (callback maps to choice text).
+        fut.set_result(choice)
+        try:
+            await q.edit_message_text(q.message.text + f"\n\n→ chose option {int(choice) + 1}")
+        except Exception:
+            pass
+        return
+
     if not data.startswith("appr:"):
         return
     _, token, choice = data.split(":", 2)
-    sess = _session(update.effective_chat.id)
     fut = sess.approval_futures.pop(token, None)
     cap_key = sess.approval_futures.pop(token + ".key", None)
 

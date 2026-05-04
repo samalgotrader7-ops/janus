@@ -112,6 +112,11 @@ class Registry:
         third-party tools after construction."""
         self._tools[tool.name] = tool
 
+    def remove_tool(self, name: str) -> None:
+        """Drop a tool by name (no-op if absent). v1.8: gateway swaps the
+        bundled callback-less Clarify with a callback-bearing instance."""
+        self._tools.pop(name, None)
+
 
 def make_capability_aware(approver: Approver, caps: CapabilitySet) -> Approver:
     """Wrap a base approver so it auto-approves capability-granted actions.

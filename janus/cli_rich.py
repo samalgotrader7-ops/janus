@@ -1058,6 +1058,39 @@ def _maybe_propose_memory(console, req: str, output: str,
             cache_snap.preamble = cache.snapshot().preamble
 
 
+# ---------- Clarify callback (v1.8.0) ----------
+
+
+def _make_console_clarify_cb(console):
+    """Console-side callback for the clarify tool.
+
+    Renders the model's question, lists choices (numbered) when present,
+    and reads one line from stdin. Empty answer → return None so the
+    tool emits the UNAVAILABLE sentinel (model picks a default).
+    """
+    def _cb(question: str, choices: list[str] | None) -> str | None:
+        console.print()
+        console.print(f"[bold yellow]? {question}[/]")
+        if choices:
+            for i, c in enumerate(choices, 1):
+                console.print(f"  [cyan]{i}.[/] {c}")
+            console.print(f"  [dim]{len(choices) + 1}. (other / type your own)[/]")
+        try:
+            ans = input("clarify > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if not ans:
+            return None
+        # Numeric pick → resolve to choice text.
+        if choices and ans.isdigit():
+            idx = int(ans)
+            if 1 <= idx <= len(choices):
+                return choices[idx - 1]
+            # else: fall through, treat as free text
+        return ans
+    return _cb
+
+
 # ---------- Main loop ----------
 
 
@@ -1220,6 +1253,12 @@ def main() -> None:
 
         caps = attached_skill.capabilities if attached_skill else CapabilitySet()
         tools = default_registry(capabilities=caps)
+        # v1.8.0: replace the bundled callback-less Clarify with one that
+        # actually prompts in the rich console. Drop the old registration
+        # first so the model sees a single tool definition.
+        from .tools.clarify import Clarify as _Clarify
+        tools.remove_tool("clarify")
+        tools.add_tool(_Clarify(callback=_make_console_clarify_cb(console)))
         approver = make_protected(base_approver, caps, mode_state.current)
 
         # v1.5.1: emit a thinking indicator BEFORE the first model call

@@ -27,6 +27,8 @@ from .telegram_send import TelegramSendFile, TelegramSendMessage
 from .agent import (
     AgentCreate, AgentList, AgentRunNow, AgentDelete, AgentSetEnabled,
 )
+from .clarify import Clarify
+from .delegate import Delegate
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -74,6 +76,18 @@ _BUILTIN_TOOL_FACTORIES = {
     "agent_run_now": AgentRunNow,
     "agent_delete": AgentDelete,
     "agent_set_enabled": AgentSetEnabled,
+    # v1.8.0 — Tier A item 2 (Hermes parity).
+    # `clarify` lets the model ask the user one question mid-turn.
+    # Constructor takes a callback the gateway/CLI injects; the bundled
+    # default is the no-callback variant (returns "[clarify unavailable]")
+    # so headless / sub-agent contexts don't crash. The chat surfaces
+    # (cli_rich, telegram) override the registration with a callback-
+    # bearing instance so the user actually sees the prompt.
+    "clarify": Clarify,
+    # `delegate` spawns a fresh executor.chat for one focused sub-task.
+    # Restricted tool surface (read-only by default), bounded steps,
+    # recursion blocked at depth 1. Lighter than swarm_run.
+    "delegate": Delegate,
 }
 
 
