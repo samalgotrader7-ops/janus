@@ -90,14 +90,12 @@ def _notify_log(event: FireEvent, output: str) -> None:
     })
 
 
-def _notify_telegram(event: FireEvent, output: str) -> None:
-    """Fire-and-forget HTTP POST. Tiny — no python-telegram-bot dep here."""
+def _send_telegram(chat_ids: list[str], event: FireEvent, output: str) -> None:
+    """Fire-and-forget HTTP POST to one or more Telegram chats."""
     import json as _json
     import urllib.request
-    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_ALLOWED_CHATS:
-        _notify_log(event, output)
+    if not config.TELEGRAM_BOT_TOKEN or not chat_ids:
         return
-    chat_ids = [c.strip() for c in config.TELEGRAM_ALLOWED_CHATS.split(",") if c.strip()]
     body = f"🔔 *{event.trigger}*\n\n{output[:3500]}"
     for cid in chat_ids:
         try:
@@ -111,13 +109,54 @@ def _notify_telegram(event: FireEvent, output: str) -> None:
             urllib.request.urlopen(req, timeout=10).read()
         except Exception:
             continue
+
+
+def _notify_telegram_global(event: FireEvent, output: str) -> None:
+    """Legacy path — uses JANUS_TELEGRAM_CHATS env var."""
+    if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_ALLOWED_CHATS:
+        chat_ids = [
+            c.strip() for c in config.TELEGRAM_ALLOWED_CHATS.split(",")
+            if c.strip()
+        ]
+        _send_telegram(chat_ids, event, output)
     _notify_log(event, output)
 
 
-def _make_notifier() -> Callable[[FireEvent, str], None]:
+def _notify_per_trigger(deliver_to: str) -> Callable[[FireEvent, str], None]:
+    """v1.6 per-trigger delivery: deliver_to overrides global config.
+
+    Format:
+      "log"                 → log only
+      "telegram:<chat_id>"  → that one chat (still logs too)
+      "telegram:<a>,<b>"    → multiple chats
+      ""                    → fall back to global config (back-compat)
+    """
+    s = (deliver_to or "").strip()
+    if not s:
+        return _make_notifier_global()
+    if s == "log":
+        return _notify_log
+    if s.startswith("telegram:"):
+        cids_raw = s[9:].strip()
+        chat_ids = [c.strip() for c in cids_raw.split(",") if c.strip()]
+        def _go(event: FireEvent, output: str) -> None:
+            _send_telegram(chat_ids, event, output)
+            _notify_log(event, output)
+        return _go
+    # Unknown deliver_to → log + warn via the log itself (don't crash).
+    def _unknown(event: FireEvent, output: str) -> None:
+        _notify_log(event, f"[unknown deliver_to {s!r}]\n\n{output}")
+    return _unknown
+
+
+def _make_notifier_global() -> Callable[[FireEvent, str], None]:
     if config.DAEMON_NOTIFY_GATEWAY == "telegram":
-        return _notify_telegram
+        return _notify_telegram_global
     return _notify_log
+
+
+# Back-compat alias — v1.5 callers (and tests) used this name.
+_make_notifier = _make_notifier_global
 
 
 # ---------- Auto-approver for triggers ----------
@@ -168,7 +207,9 @@ def fire_once(t: Trigger, *, detail: dict | None = None) -> str:
         fired_at=_now_iso(),
         detail=detail or {},
     )
-    _make_notifier()(event, output)
+    # v1.6 — honor per-trigger deliver_to. Falls back to global config
+    # when the trigger doesn't set one (back-compat with pre-v1.6 yaml).
+    _notify_per_trigger(t.deliver_to)(event, output)
     return output
 
 
@@ -190,9 +231,47 @@ def _read_log_tail(n: int = 20) -> list[str]:
 
 
 def run_daemon(*, once: bool = False) -> None:
-    """Polling loop. Set once=True for a single iteration (tests)."""
+    """Polling loop. Set once=True for a single iteration (tests).
+
+    v1.6: writes ~/.janus/daemon.pid on entry so agent_create's
+    _daemon_running_hint can detect us. The pid file is removed on
+    clean exit; a stale pid (process gone) is detected via os.kill(pid, 0).
+    """
+    import atexit
+    import os as _os
     config.assert_configured()
     config.ensure_home()
+
+    pid_file = config.HOME / "daemon.pid"
+    # If a previous daemon left a stale pid, overwrite. If a live one
+    # is already running we still continue (the user may want a second
+    # one for testing) — but warn.
+    if pid_file.exists():
+        try:
+            old_pid = int(pid_file.read_text().strip())
+            try:
+                _os.kill(old_pid, 0)
+                print(
+                    f"  [!] another daemon may already be running "
+                    f"(pid {old_pid} from {pid_file}). Continuing."
+                )
+            except OSError:
+                pass  # stale, fine
+        except (ValueError, OSError):
+            pass
+    try:
+        pid_file.write_text(str(_os.getpid()), encoding="utf-8")
+    except OSError:
+        pass
+
+    def _cleanup_pid() -> None:
+        try:
+            if pid_file.is_file() and pid_file.read_text().strip() == str(_os.getpid()):
+                pid_file.unlink()
+        except OSError:
+            pass
+    atexit.register(_cleanup_pid)
+
     print(f"janus daemon: polling every {config.DAEMON_POLL_SECONDS}s "
           f"({len(list_triggers())} triggers, gateway={config.DAEMON_NOTIFY_GATEWAY})")
 

@@ -59,6 +59,12 @@ class Trigger:
     dedupe_seconds: int = 0
     enabled: bool = True
     last_fired: str | None = None
+    # v1.6: per-trigger delivery target. "log" (default) writes only to
+    # ~/.janus/log.jsonl. "telegram:<chat_id>" sends each fire's output
+    # to a specific chat — overrides global JANUS_TELEGRAM_CHATS env so
+    # each agent can talk to its own user. Empty string = fall back to
+    # legacy DAEMON_NOTIFY_GATEWAY env behavior.
+    deliver_to: str = ""
     raw: dict = field(default_factory=dict)
     path: Path | None = None
 
@@ -75,6 +81,7 @@ class Trigger:
             request=str(d.get("request", "")).strip(),
             dedupe_seconds=int(d.get("dedupe_seconds") or 0),
             enabled=bool(d.get("enabled", True)),
+            deliver_to=str(d.get("deliver_to") or "").strip(),
             raw=d,
             path=path,
         )

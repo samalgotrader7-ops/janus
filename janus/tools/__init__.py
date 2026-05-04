@@ -24,6 +24,9 @@ from .browser import (
 from .vision import ImageDescribe
 from .swarm_run import SwarmRun
 from .telegram_send import TelegramSendFile, TelegramSendMessage
+from .agent import (
+    AgentCreate, AgentList, AgentRunNow, AgentDelete, AgentSetEnabled,
+)
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -62,6 +65,15 @@ _BUILTIN_TOOL_FACTORIES = {
     # inside the Telegram gateway). Need JANUS_TELEGRAM_TOKEN set.
     "telegram_send_file": TelegramSendFile,
     "telegram_send_message": TelegramSendMessage,
+    # v1.6.0 — scheduled-agent lifecycle. THE LIFETIME-SOLUTION TOOLS.
+    # Before these, the model would lie about creating agents (just
+    # writing to memory) because it had no real machinery. Now it
+    # creates a skill+trigger pair and the daemon fires it on schedule.
+    "agent_create": AgentCreate,
+    "agent_list": AgentList,
+    "agent_run_now": AgentRunNow,
+    "agent_delete": AgentDelete,
+    "agent_set_enabled": AgentSetEnabled,
 }
 
 

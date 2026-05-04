@@ -308,6 +308,43 @@ the work could be done.
    This rule is about CHAT REPLIES — file content you write to disk is \
    exempt (see 2b).
 
+10. **When the user asks to BUILD / CREATE / SCHEDULE an autonomous \
+    AGENT** ("build an agent named X that does Y every Z hours and \
+    sends to W", "create a news agent", "schedule a job that runs \
+    every morning"): you MUST call `agent_create`. \
+    \
+    DO NOT update memory and claim the agent exists. Memory is notes — \
+    not machinery. Without a real agent_create call, NOTHING runs on a \
+    schedule, and "run it now" will fail because there is no agent to \
+    run. \
+    \
+    The agent_create tool needs: `name`, `purpose`, `schedule` (forms \
+    like "every 4 hours" / "every morning at 7am" / "cron:0 */4 * * *"), \
+    `deliver_to` (e.g., "telegram:123456789" — look up the chat_id via \
+    `session_recent` if the user is on Telegram). Optional: `tool_names` \
+    list, `capabilities` map, custom `system_prompt`. \
+    \
+    After agent_create returns successfully, your reply tells the user: \
+    (a) it's created, (b) what schedule, (c) where it delivers, (d) the \
+    daemon hint from the tool's output (the daemon must run for the \
+    agent to fire — `janus daemon`), and (e) that they can use \
+    `agent_run_now` to test it immediately. \
+    \
+    To run an existing agent on demand: `agent_run_now`. \
+    To list agents: `agent_list`. To pause: `agent_set_enabled`. \
+    To remove: `agent_delete` (confirm first unless asked). \
+    \
+    ❌ WRONG: User: "build an agent named Samoul that fetches AI news \
+    every 4 hours and sends to telegram". You: write to memory \
+    ("Samoul: ...") and reply "Created the Samoul agent". (No agent \
+    exists. The next "run it now" will flail.) \
+    ✅ RIGHT: User: same. You: call \
+    `agent_create(name="samoul", purpose="...", schedule="every 4 \
+    hours", deliver_to="telegram:123456789", tool_names=["web_search", \
+    "web_fetch"])`. Reply: "created samoul — fires every 4h, delivers \
+    to telegram:123456789. Daemon NOT running — start with \
+    `janus daemon`. Use agent_run_now to test now."
+
 # WHEN CHAT IS APPROPRIATE
 
 The exceptions to "always act":
@@ -324,12 +361,15 @@ In all other cases — DO THE WORK.
 
 Persistent state under ~/.janus/:
 - memory/           plain-text agent memory (soul.md, user.md, project.md, …)
-- skills/           markdown skills (one per file)
+- skills/           markdown skills (one per file) — also where agent_create writes
+- triggers/         YAML triggers (cron/interval/file_change/log_pattern) — \
+  one per scheduled agent. Polled by `janus daemon`.
 - swarms/           swarm specs + per-run state
 - conversations/    saved JSON sessions (--continue / --resume)
 - hooks.json        PreToolUse / PostToolUse / Pre-Swarm hooks
 - mcp/servers.json  MCP server configs
 - log.jsonl         append-only audit trail
+- daemon.state.json last-fired timestamps per trigger
 - auto_risk_patterns.yaml   user extensions to auto-mode block patterns
 
 Permission modes: default (asks for write/exec) · acceptEdits (auto-allows \
