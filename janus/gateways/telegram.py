@@ -632,6 +632,26 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await _run_chat_turn(update, ctx, chat_id, sess, req)
 
 
+async def _typing_pulse(bot, chat_id: int, interval_s: float = 4.0) -> None:
+    """v1.5.1: Telegram chat_action='typing' lasts ~5s. Pulse every
+    `interval_s` (default 4s) so the user sees continuous "typing…"
+    dots during long operations. Started at chat-turn start, cancelled
+    when the response is sent.
+
+    Cancellation-safe: the asyncio.CancelledError loop exit is the
+    intended termination path."""
+    try:
+        while True:
+            try:
+                await bot.send_chat_action(chat_id=chat_id, action="typing")
+            except Exception:
+                # Network blip / API hiccup — pulse is best-effort.
+                pass
+            await asyncio.sleep(interval_s)
+    except asyncio.CancelledError:
+        return
+
+
 async def _run_chat_turn(
     update: Update, ctx: ContextTypes.DEFAULT_TYPE,
     chat_id: int, sess: "Session", req: str,
@@ -660,6 +680,13 @@ async def _run_chat_turn(
         "mode": sess.mode_state.current,
     }
 
+    # v1.5.1: continuous "typing…" pulse so the user sees activity during
+    # long tool-call gather phases. Telegram's chat_action expires in ~5s,
+    # so we re-pulse every 4s until the response is sent.
+    typing_task = asyncio.create_task(
+        _typing_pulse(ctx.bot, chat_id),
+    )
+
     t0 = time.time()
     try:
         output, trace = await asyncio.to_thread(
@@ -680,10 +707,13 @@ async def _run_chat_turn(
         record["output"] = output
         record["trace"] = trace
     except Exception as e:
+        typing_task.cancel()
         await ctx.bot.send_message(chat_id=chat_id, text=f"chat failed: {e}")
         record["error"] = str(e)
         logger.write(record)
         return
+    finally:
+        typing_task.cancel()
 
     logger.write(record)
     sess.save()  # persist messages + mode after successful turn
