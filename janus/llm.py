@@ -39,16 +39,24 @@ from . import config
 # on 4xx other than 429 — those are deterministic client errors.
 
 
-_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+# 529 = Anthropic 'overloaded'. Not in the OpenAI spec but Anthropic
+# uses it under load. Treating it as retryable matches Hermes.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504, 529})
 
 
-def _backoff_sleep(attempt: int) -> None:
+def _backoff_sleep(attempt: int, *, provider_cooldown: float = 0.0) -> None:
     """Exponential backoff with jitter. attempt is 0-indexed (0 = first try).
 
-    Sleep length: base * 2^attempt + uniform(0, base).
+    Sleep length: max(provider_cooldown, base * 2^attempt + uniform(0, base)).
+    The provider_cooldown override (v1.14.0) lets the rate-limit tracker
+    feed in 'this provider just rate-limited us, sleep at LEAST X seconds'
+    so we don't burn retry attempts hammering a provider that already
+    told us to slow down.
     Patched out in tests via monkeypatching `time.sleep`."""
     base = config.LLM_RETRY_BACKOFF_BASE_S
     delay = base * (2 ** attempt) + random.uniform(0, base)
+    if provider_cooldown > delay:
+        delay = provider_cooldown
     time.sleep(delay)
 
 
@@ -66,15 +74,35 @@ def _post_with_retry(
     response we got (5xx included) so the caller's `raise_for_status()`
     surfaces the error normally. Raises ConnectionError/Timeout if the
     last attempt also fails to connect.
+
+    v1.14.0: when the rate-limit tracker has a recent 429 cooldown for
+    this provider+model, _backoff_sleep honors it as a floor. Avoids
+    burning retry attempts hammering a provider that already told us
+    to slow down.
+
+    v1.14.0: 529 (Anthropic overloaded) added to retryable set.
     """
-    # Build kwargs once. Only pass `stream=` when True so existing test
-    # mocks of requests.post (which don't model the full signature) keep
-    # working — requests.post defaults to non-streaming anyway.
     post_kwargs: dict = {
         "headers": headers, "json": json_payload, "timeout": timeout,
     }
     if stream:
         post_kwargs["stream"] = True
+
+    # Pull cooldown hint from rate_limit module (best-effort, no hard dep).
+    provider_cooldown = 0.0
+    try:
+        from . import rate_limit
+        provider = _provider_from_base(config.API_BASE)
+        model = json_payload.get("model", "")
+        provider_cooldown = rate_limit.cooldown_seconds(provider, model)
+    except Exception:
+        provider_cooldown = 0.0
+
+    # If provider is in cooldown, sleep BEFORE the first attempt — the
+    # caller's expectation is "succeed eventually", and trying immediately
+    # would just return 429 again.
+    if provider_cooldown > 0:
+        time.sleep(provider_cooldown)
 
     last_exc: Exception | None = None
     for attempt in range(config.LLM_RETRY_MAX_ATTEMPTS):
@@ -90,7 +118,15 @@ def _post_with_retry(
             continue
         if r.status_code in _RETRYABLE_STATUS and not is_last_attempt:
             r.close()
-            _backoff_sleep(attempt)
+            # Re-pull cooldown — the just-failed call may have set it.
+            try:
+                from . import rate_limit
+                provider = _provider_from_base(config.API_BASE)
+                model = json_payload.get("model", "")
+                cd = rate_limit.cooldown_seconds(provider, model)
+            except Exception:
+                cd = 0.0
+            _backoff_sleep(attempt, provider_cooldown=cd)
             continue
         return r
     # Unreachable: loop body always returns or raises on last attempt.
@@ -100,29 +136,58 @@ def _post_with_retry(
 
 
 def apply_cache_markers(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Phase 20: wrap the LAST system message in Anthropic-style content
-    blocks with `cache_control: ephemeral`. OpenRouter honors this and
-    forwards to Anthropic's prompt cache; OpenAI ignores extra fields.
+    """Wrap select messages in Anthropic-style content blocks with
+    `cache_control: ephemeral`. OpenRouter forwards to Anthropic's
+    prompt cache; OpenAI ignores extra fields.
+
+    v1.14.0 — marks TWO points:
+      1) the LAST system message (always — that's the big static prompt)
+      2) the last user message (only if substantial, ≥1024 chars — the
+         turn-context block where memory + state introspection live)
+
+    Anthropic allows up to 4 cache breakpoints per message list, so two
+    is well under the limit. The 1024-char threshold matches Anthropic's
+    minimum cacheable size — anything shorter doesn't save tokens.
 
     No-op when:
       - JANUS_PROMPT_CACHE is off (default)
       - the message list has no system message
-      - the system content is already a list (caller built blocks itself)
+      - the message content is already a list (caller built blocks itself)
     """
     if not config.PROMPT_CACHE_MARKERS:
         return messages
+
     out: list[dict[str, Any]] = []
     last_system_idx = -1
+    last_user_idx = -1
     for i, m in enumerate(messages):
         if m.get("role") == "system":
             last_system_idx = i
+        elif m.get("role") == "user":
+            last_user_idx = i
+
     for i, m in enumerate(messages):
-        if i == last_system_idx and isinstance(m.get("content"), str):
+        content = m.get("content")
+        # Only string content is wrappable — already-list content was
+        # constructed by a caller that knows what it's doing.
+        if not isinstance(content, str):
+            out.append(m)
+            continue
+        if i == last_system_idx:
             out.append({
                 "role": "system",
                 "content": [{
                     "type": "text",
-                    "text": m["content"],
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+            })
+        elif i == last_user_idx and len(content) >= 1024:
+            out.append({
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": content,
                     "cache_control": {"type": "ephemeral"},
                 }],
             })
