@@ -23,6 +23,7 @@ from .browser import (
 )
 from .vision import ImageDescribe
 from .swarm_run import SwarmRun
+from .telegram_send import TelegramSendFile, TelegramSendMessage
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -56,6 +57,11 @@ _BUILTIN_TOOL_FACTORIES = {
     "image_describe": ImageDescribe,
     # v1.5 — model-callable swarm spawn (recursion guard already in place).
     "swarm_run": SwarmRun,
+    # v1.5.2 — direct Telegram Bot API tools so the model can send files /
+    # messages from CLI / headless / sub-agent contexts (not just from
+    # inside the Telegram gateway). Need JANUS_TELEGRAM_TOKEN set.
+    "telegram_send_file": TelegramSendFile,
+    "telegram_send_message": TelegramSendMessage,
 }
 
 
