@@ -85,6 +85,7 @@ def run_swarm(
     parent_chat_id: str | None = None,
     parent_run_id: str | None = None,
     emitter=None,
+    run_id_override: str | None = None,
 ) -> SwarmRunResult:
     """Run a swarm spec end-to-end.
 
@@ -119,7 +120,7 @@ def run_swarm(
         return _run_swarm_inner(
             spec, inputs=inputs,
             parent_chat_id=parent_chat_id, parent_run_id=parent_run_id,
-            emitter=emitter,
+            emitter=emitter, run_id_override=run_id_override,
         )
 
 
@@ -130,6 +131,7 @@ def _run_swarm_inner(
     parent_chat_id: str | None,
     parent_run_id: str | None,
     emitter=None,
+    run_id_override: str | None = None,
 ) -> SwarmRunResult:
     # No-op emitter if none supplied so call sites stay clean.
     if emitter is None:
@@ -157,7 +159,11 @@ def _run_swarm_inner(
             error=f"hook_denied: {pre_decision.reason or 'PreSwarmSpawn refused'}",
         )
 
-    run_id = state.new_run_id()
+    # v1.5: background mode pre-mints the run_id in the parent process
+    # and passes it to the child via run_id_override so the parent can
+    # report the id to the user immediately. Without override we mint
+    # fresh per-run as usual.
+    run_id = run_id_override or state.new_run_id()
     state.init_run_dir(run_id)
 
     # Freeze the spec for replay/audit.

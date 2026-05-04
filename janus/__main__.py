@@ -9,7 +9,7 @@
   uninstall [--yes] [--dry-run] inventory and remove ~/.janus/ state directory
   swarm list                    list installed specs and recent runs
   swarm describe <name>         show one spec's details
-  swarm run <name> [k=v ...]    launch a swarm; inputs as key=value args
+  swarm run <name> [--background] [k=v ...]   launch a swarm; --background detaches
   swarm status <run-id>         show current state of a swarm run
   swarm cancel <run-id>         write cancel.flag (cooperative cancellation)
   swarm cost <run-id>           per-swarm cost breakdown
@@ -41,6 +41,7 @@
   --quiet                       suppress non-output lines
 """
 
+import json as _json
 import sys
 
 # Windows: console default is cp1252 which can't render the ╱─► / ┄ / ► /
@@ -595,8 +596,17 @@ def _run_swarm_cli(args: list[str]) -> None:
         _swarm_describe(rest[0]); return
     if sub == "run":
         if not rest:
-            print("usage: janus swarm run <spec-name> [key=value ...]"); sys.exit(2)
+            print("usage: janus swarm run <spec-name> [--background] [key=value ...]"); sys.exit(2)
+        if "--background" in rest:
+            cleaned = [r for r in rest if r != "--background"]
+            _swarm_run_background(cleaned[0], cleaned[1:]); return
         _swarm_run(rest[0], rest[1:]); return
+    if sub == "_bg_run":
+        # Internal — invoked by _swarm_run_background. NOT in help.
+        if len(rest) < 3:
+            print("internal: _bg_run <run_id> <spec_name> <inputs_json>")
+            sys.exit(2)
+        _swarm_bg_child(rest[0], rest[1], rest[2]); return
     if sub == "status":
         if not rest:
             print("usage: janus swarm status <run-id>"); sys.exit(2)
@@ -621,7 +631,7 @@ janus swarm — parallel sub-agent coordination driven by markdown specs.
 
   list                          list installed specs + recent runs
   describe <spec-name>          show a spec's frontmatter and phases
-  run <spec-name> [key=value]   launch a swarm; inputs as key=value pairs
+  run <spec-name> [--background] [key=value]  launch (--background detaches the run)
   status <run-id>               show current run state (last timeline event)
   cancel <run-id>               write cancel.flag (cooperative cancellation)
   cost <run-id>                 per-swarm cost breakdown by role + phase
@@ -734,6 +744,111 @@ def _swarm_run(name: str, kv_args: list[str]) -> None:
         n_err = sum(1 for s_ in p.sub_agents if s_.error)
         print(f"  {p.name}  sub-agents={len(p.sub_agents)}  errors={n_err}")
     print(f"final.json: ~/.janus/swarms/runs/{result.run_id}/final.json")
+
+
+def _swarm_run_background(name: str, kv_args: list[str]) -> None:
+    """Spawn a swarm in a detached child process, return run_id immediately.
+
+    The parent pre-mints the run_id and writes the metadata stub so
+    `janus swarm status` works as soon as the spawn returns. The child
+    runs the swarm; its stdout/stderr go to {run_dir}/stdout.log and
+    {run_dir}/stderr.log so logs persist after the parent exits.
+
+    Detachment uses POSIX start_new_session=True or Windows DETACHED_PROCESS
+    so the child survives parent exit (terminal close, ssh disconnect)."""
+    import os
+    import subprocess
+    from . import swarms as _swarms
+
+    spec = _swarms.spec.find_spec(name)
+    if spec is None:
+        print(f"no spec named {name!r}"); sys.exit(2)
+    inputs = _parse_kv_args(kv_args)
+    try:
+        _swarms.spec.validate_inputs(spec, inputs)
+    except _swarms.spec.SpecError as e:
+        print(f"spec error: {e}"); sys.exit(2)
+
+    run_id = _swarms.state.new_run_id()
+    _swarms.state.init_run_dir(run_id)
+    _swarms.state.write_metadata(run_id, {
+        "started": _swarms.state._now_iso(),
+        "spec_name": spec.name,
+        "spec_version": spec.version,
+        "background": True,
+        "default_mode": spec.permissions.default_mode,
+    })
+    _swarms.state.append_timeline(run_id, {
+        "type": "background_spawn",
+        "spec": spec.name, "n_phases": len(spec.phases),
+    })
+
+    run_dir = _swarms.state.run_dir(run_id)
+    out_log = open(run_dir / "stdout.log", "w", encoding="utf-8")
+    err_log = open(run_dir / "stderr.log", "w", encoding="utf-8")
+
+    child_cmd = [
+        sys.executable, "-m", "janus", "swarm", "_bg_run",
+        run_id, name, _json.dumps(inputs),
+    ]
+    spawn_kwargs: dict = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": out_log,
+        "stderr": err_log,
+        "close_fds": True,
+    }
+    if os.name == "posix":
+        spawn_kwargs["start_new_session"] = True
+    elif os.name == "nt":
+        # Detach so child survives parent exit; DETACHED_PROCESS removes
+        # the inherited console.
+        spawn_kwargs["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            | getattr(subprocess, "DETACHED_PROCESS", 0)
+        )
+
+    try:
+        proc = subprocess.Popen(child_cmd, **spawn_kwargs)
+    except Exception as e:
+        print(f"failed to spawn child: {type(e).__name__}: {e}")
+        sys.exit(1)
+
+    # Write the child PID to a file so cancel/status can find it.
+    (run_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
+
+    print(f"swarm spawned in background")
+    print(f"  run_id: {run_id}")
+    print(f"  pid:    {proc.pid}")
+    print(f"  status: janus swarm status {run_id}")
+    print(f"  cancel: janus swarm cancel {run_id}")
+    print(f"  logs:   {run_dir}/stdout.log + stderr.log")
+
+
+def _swarm_bg_child(run_id: str, spec_name: str, inputs_json: str) -> None:
+    """Child entry point invoked by _swarm_run_background's subprocess."""
+    from . import swarms as _swarms
+    try:
+        inputs = _json.loads(inputs_json)
+    except Exception as e:
+        sys.stderr.write(f"bad inputs JSON: {e}\n")
+        sys.exit(2)
+    spec = _swarms.spec.find_spec(spec_name)
+    if spec is None:
+        sys.stderr.write(f"no spec named {spec_name!r}\n")
+        sys.exit(2)
+    try:
+        result = _swarms.runner.run_swarm(
+            spec, inputs=inputs, run_id_override=run_id,
+        )
+    except Exception as e:
+        sys.stderr.write(f"swarm crashed: {type(e).__name__}: {e}\n")
+        # Write final.json with the crash so status reads cleanly.
+        _swarms.state.write_final(run_id, {
+            "error": f"crashed: {type(e).__name__}: {e}",
+        })
+        sys.exit(1)
+    sys.stderr.write(f"swarm complete: {result.run_id}\n")
+    sys.exit(0 if not result.error else 1)
 
 
 def _swarm_status(run_id: str) -> None:
