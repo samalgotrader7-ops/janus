@@ -547,6 +547,97 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if req.lower().strip(" .!,?") in ("hi", "hello", "hey", "yo", "sup"):
             return
 
+    await _run_chat_turn(update, ctx, chat_id, sess, req)
+
+
+# v1.5.1: photo/document upload handlers. Without these, attachments
+# silently never reach any callback (the bot didn't even know the user
+# uploaded anything). Now uploads land in ~/.janus/uploads/<chat_id>/
+# and the path is injected into the conversation as a synthetic user
+# message — the system prompt tells the model to call image_describe
+# or fs_read on it.
+
+
+async def on_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """User uploaded a photo. Download, ack, inject path as a chat turn."""
+    chat_id = update.effective_chat.id
+    if not _is_authorized(chat_id):
+        await _send_pairing_prompt(update); return
+    sess = _session(chat_id)
+    if not update.message.photo:
+        return
+
+    # Download highest-resolution variant.
+    photo = update.message.photo[-1]
+    upload_dir = config.HOME / "uploads" / str(chat_id)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    local_path = upload_dir / f"photo_{int(time.time())}.jpg"
+    try:
+        f = await photo.get_file()
+        await f.download_to_drive(custom_path=str(local_path))
+    except Exception as e:
+        await update.message.reply_text(f"failed to download image: {e}")
+        return
+
+    await update.message.reply_text(
+        f"📷 received image · saved to `{local_path.name}` · processing…",
+        parse_mode="Markdown",
+    )
+
+    caption = (update.message.caption or "").strip()
+    if caption:
+        req = f"{caption}\n[user uploaded image at {local_path}]"
+    else:
+        req = f"[user uploaded image at {local_path}]"
+
+    await _run_chat_turn(update, ctx, chat_id, sess, req)
+
+
+async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """User uploaded a file. Download, ack, inject path as a chat turn."""
+    chat_id = update.effective_chat.id
+    if not _is_authorized(chat_id):
+        await _send_pairing_prompt(update); return
+    sess = _session(chat_id)
+    doc = update.message.document
+    if not doc:
+        return
+
+    # Sanitize filename — no path traversal, no shell metachars.
+    raw_name = doc.file_name or f"upload_{int(time.time())}"
+    safe_name = "".join(
+        c if c.isalnum() or c in ".-_" else "_" for c in raw_name
+    )[:120]
+    upload_dir = config.HOME / "uploads" / str(chat_id)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    local_path = upload_dir / safe_name
+    try:
+        f = await doc.get_file()
+        await f.download_to_drive(custom_path=str(local_path))
+    except Exception as e:
+        await update.message.reply_text(f"failed to download file: {e}")
+        return
+
+    await update.message.reply_text(
+        f"📎 received file · saved to `{safe_name}` ({doc.file_size or '?'} bytes) · processing…",
+        parse_mode="Markdown",
+    )
+
+    caption = (update.message.caption or "").strip()
+    if caption:
+        req = f"{caption}\n[user uploaded file at {local_path}]"
+    else:
+        req = f"[user uploaded file at {local_path}]"
+
+    await _run_chat_turn(update, ctx, chat_id, sess, req)
+
+
+async def _run_chat_turn(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+    chat_id: int, sess: "Session", req: str,
+):
+    """Shared chat-flow used by on_text / on_photo / on_document.
+    Runs executor.chat with full memory + indicators + cost tracking."""
     preamble = memory.prepend_for_prompt()
 
     base_approver = _make_approver(chat_id, ctx.application, sess)
@@ -724,6 +815,9 @@ def serve() -> None:
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("cost", cmd_cost))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    # v1.5.1: photo + document handlers so attachments don't silently disappear.
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(CallbackQueryHandler(on_callback))
 
     print(f"janus telegram gateway running ({branding.VERSION}). ctrl-c to stop.")
