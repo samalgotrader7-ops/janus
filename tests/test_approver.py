@@ -5,7 +5,7 @@ from janus.tools.capabilities import CapabilitySet
 def test_capability_grant_skips_user_prompt():
     calls = []
 
-    def base(action, details):
+    def base(action, details, **kw):
         calls.append((action, details))
         return False  # would deny
 
@@ -20,7 +20,7 @@ def test_capability_grant_skips_user_prompt():
 def test_no_capability_falls_through():
     calls = []
 
-    def base(action, details):
+    def base(action, details, **kw):
         calls.append((action, details))
         return True
 
@@ -35,7 +35,7 @@ def test_no_capability_falls_through():
 def test_no_capability_kwarg_falls_through():
     calls = []
 
-    def base(action, details):
+    def base(action, details, **kw):
         calls.append((action, details))
         return True
 
@@ -50,7 +50,7 @@ def test_no_capability_kwarg_falls_through():
 def test_empty_caps_always_falls_through():
     calls = []
 
-    def base(action, details):
+    def base(action, details, **kw):
         calls.append((action, details))
         return False
 

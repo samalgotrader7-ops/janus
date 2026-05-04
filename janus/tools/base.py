@@ -83,10 +83,15 @@ class Registry:
         # v1.0: inject the tool's risk class into every approver call so
         # the permission-mode approver can decide allow / ask / deny without
         # each individual tool having to opt in.
+        # v1.5: also inject `args` + `tool_name` so auto-mode wrappers can
+        # do per-call risk analysis (e.g., flag `rm -rf /` even when the
+        # matrix says allow). Tools didn't have to pass these manually.
         risk = getattr(tool, "risk", "exec")
 
         def tool_approver(action_label: str, details: str, **kw: Any) -> bool:
             kw.setdefault("risk", risk)
+            kw.setdefault("args", args)
+            kw.setdefault("tool_name", name)
             return approver(action_label, details, **kw)
 
         try:
@@ -114,6 +119,10 @@ def make_capability_aware(approver: Approver, caps: CapabilitySet) -> Approver:
     Tools call approver("action", "details", capability=("fs", "write", "src/x.py")).
     If caps.grants(...), we return True without prompting.
     Otherwise we delegate to the base approver.
+
+    v1.5: kwargs (risk, args, tool_name, capability, ...) are forwarded
+    to the base approver — earlier versions dropped them, breaking the
+    auto-mode wrapper which needs `args` + `tool_name` for risk analysis.
     """
     def wrapped(action_label: str, details: str, **kw: Any) -> bool:
         cap = kw.get("capability")
@@ -121,5 +130,49 @@ def make_capability_aware(approver: Approver, caps: CapabilitySet) -> Approver:
             tool, verb, target = cap
             if caps.grants(tool, verb, target):
                 return True
-        return approver(action_label, details)
+        return approver(action_label, details, **kw)
+    return wrapped
+
+
+def make_auto_aware(approver: Approver) -> Approver:
+    """Wrap a base approver so dangerous tool calls are auto-blocked
+    based on heuristic risk analysis (v1.5 auto mode).
+
+    Pipeline:
+      1. Run auto_mode.analyze_call(tool_name, args) on the raw call.
+      2. If the analyzer returns BLOCK, refuse without consulting the
+         base approver — Janus says "this action is risky" and the
+         model gets a refusal string it can react to (P8: errors are
+         observations).
+      3. Otherwise delegate to the base approver as normal.
+
+    The wrapper reads tool_name and args from approver kwargs, which the
+    Registry now injects automatically (Registry.call). Tools that
+    haven't been updated still work — auto-mode just can't analyze them
+    (no kwargs → falls through to base approver).
+
+    Used by executor.execute / executor.chat when mode='auto'. Composes
+    cleanly with make_capability_aware: in production the layering is
+    auto → capability → permission-mode (auto checks first because a
+    capability-granted `rm -rf /` is still bad).
+    """
+    # Lazy import: auto_mode imports config which imports environment;
+    # avoid the cycle at module-load time.
+    from .. import auto_mode
+
+    def wrapped(action_label: str, details: str, **kw: Any) -> bool:
+        tool_name = kw.get("tool_name") or ""
+        args = kw.get("args") or {}
+        verdict = auto_mode.analyze_call(
+            tool_name, args, capability=kw.get("capability"),
+        )
+        if not verdict.allowed:
+            # Record the block in kw so the base approver (or a logger
+            # wrapper) can surface it. Block is FINAL — don't fall
+            # through; auto-mode's whole point is to refuse without
+            # asking.
+            kw["auto_blocked"] = True
+            kw["auto_block_reason"] = verdict.reason
+            return False
+        return approver(action_label, details, **kw)
     return wrapped
