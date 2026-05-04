@@ -663,6 +663,25 @@ async def _run_chat_turn(
     base_approver = _make_approver(chat_id, ctx.application, sess)
     caps = CapabilitySet()
     tools = default_registry(capabilities=caps)
+    # v1.5.1: register the gateway send-file tool so the model can deliver
+    # files as attachments (not paste content). Closure captures the bot
+    # + chat_id + asyncio loop so the sync executor thread can schedule
+    # the async send back on the bot's event loop.
+    loop_for_send = asyncio.get_event_loop()
+
+    def _send_file_sync(path: str, caption: str = "") -> None:
+        async def _send():
+            with open(path, "rb") as fh:
+                await ctx.bot.send_document(
+                    chat_id=chat_id, document=fh,
+                    caption=(caption or "")[:1024],
+                )
+        fut = asyncio.run_coroutine_threadsafe(_send(), loop_for_send)
+        fut.result(timeout=60)
+
+    from ..tools.gateway_send_file import GatewaySendFile
+    tools.add_tool(GatewaySendFile(send_fn=_send_file_sync))
+
     approver = make_protected(base_approver, caps, sess.mode_state.current)
 
     # Set up live indicators.
