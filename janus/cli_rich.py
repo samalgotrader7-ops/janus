@@ -1184,6 +1184,12 @@ def main() -> None:
         tools = default_registry(capabilities=caps)
         approver = make_protected(base_approver, caps, mode_state.current)
 
+        # v1.5.1: emit a thinking indicator BEFORE the first model call
+        # so the user sees Janus is alive during the silent gather phase
+        # (multiple fs_read / web_fetch / etc. before the first text
+        # token). Without this, long task setups look like a hang.
+        console.print("[magenta dim]⚡ thinking…[/magenta dim]")
+
         try:
             t0 = time.time()
             step_renderer = _render_step_factory(console, state)

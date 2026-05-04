@@ -1150,6 +1150,10 @@ def main():
         tools = default_registry(capabilities=skill_caps)
         approver = make_protected(base_approver, skill_caps, mode_state.current)
 
+        # v1.5.1: thinking indicator before the first model call so the
+        # user sees Janus is alive during long tool-call gathering.
+        print(f"  {C.MAGENTA}{C.DIM}⚡ thinking…{C.R}")
+
         try:
             t0 = time.time()
             output, trace = executor.chat(
