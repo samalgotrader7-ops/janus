@@ -29,25 +29,46 @@ from . import config, llm, hooks, injection
 from .tools import Registry
 
 
-# v1.17.0 — chatbot-vs-agent guard.
+# v1.17.0 / v1.17.1 — chatbot-vs-agent guard.
+#
 # Smaller models (gpt-oss, qwen, llama-3 8B-class) frequently emit
 # "I'll create the file..." text WITHOUT calling the tool, then return
-# control to the user. Or they emit empty content. The pre-v1.17 chat
-# loop accepted both as final answers — the user sees a hang or a
-# broken promise, and the multi-step task stalls mid-way (Sam's KV
-# store benchmark: agent did stage 1+2, "self-audited" itself into a
-# regression on stage 3, then stopped without writing WEAKNESS.md or
-# SUMMARY.md and never recovered).
+# control to the user. Or they emit empty content. Or they finish stage
+# 1 of a multi-stage task and stop with "Stage 1 complete. Moving to
+# Stage 2." — never actually moving to stage 2. The pre-v1.17 chat loop
+# accepted ALL these as final answers — the user saw a hang or a broken
+# promise, and the multi-step task stalled mid-way (Sam's KV store
+# benchmark: agent did stage 1, then drifted off without writing
+# test_kv_store.py, WEAKNESS.md, or SUMMARY.md).
+#
+# v1.17.1 changes:
+#   - Nudge budget bumped 1 → 3 (one wasn't enough for multi-stage tasks)
+#   - Nudge messages now include the user's original task as a reminder
+#   - Added "stage N complete" / "moving to" / "next step" patterns to
+#     stall detection (gpt-oss likes to emit completion-claims without
+#     actually calling the next tool)
 #
 # Fix: when assistant returns no tool_calls, classify the response.
-# Empty or stall → inject a system reminder and retry the SAME step.
-# Bounded to ONE nudge per chat() call so a model that keeps stalling
-# doesn't burn the entire MAX_STEPS budget on retries.
+# Empty or stall → inject a system reminder (with task reminder) and
+# retry the SAME step. Bounded to NUDGE_MAX_PER_CALL nudges per chat()
+# call so a chronically-stalling model can't burn MAX_STEPS on retries.
+
+NUDGE_MAX_PER_CALL = 3
 
 _STALL_PHRASES = (
+    # Future-tense action verbs — model promises an action.
     "i'll ", "i will ", "let me ", "i'm going to ", "i am going to ",
-    "i'd be happy to", "should i ", "would you like me to",
+    "i'd be happy to",
+    # Permission-asking patterns (auto/bypass mode means user opted in;
+    # the model shouldn't be asking).
+    "should i ", "would you like me to",
     "shall i ", "do you want me to",
+    # Stage-progress markers without tool calls — model claims progress
+    # but didn't actually take the action that would constitute it.
+    "moving to ", "next step ", "next, i", "now i'll", "now i will",
+    "next i'll", "next i will", "i'll now", "i will now",
+    "stage 1 complete", "stage 2 complete", "stage 3 complete",
+    "step 1 complete", "step 2 complete", "step 3 complete",
 )
 
 
@@ -68,19 +89,51 @@ def _looks_like_stall(text: str) -> bool:
     return any(p in lower for p in _STALL_PHRASES)
 
 
-_NUDGE_EMPTY = (
-    "[system] Your last response was empty. Either call a tool to do the "
-    "work the user asked for, or give a clear text answer. Do not return "
-    "empty content."
-)
+def _build_nudge(reason: str, user_input: str, attempt: int) -> str:
+    """Build a context-aware nudge message.
 
-_NUDGE_STALL = (
-    "[system] You said you would do something but didn't call any tool. "
-    "Tools are how you actually do things in this framework — call the "
-    "appropriate tool NOW (fs_write to create files, fs_edit to modify "
-    "them, shell to run commands, etc.) instead of just describing the "
-    "action. The user is in an auto-execution mode; do not ask permission."
-)
+    reason: 'empty' | 'stall'
+    user_input: the original user task (the last user message). Included
+        verbatim so the model remembers what it's supposed to be doing —
+        smaller models lose track in multi-stage tasks.
+    attempt: 1-indexed; later attempts use stronger language.
+    """
+    if reason == "empty":
+        head = (
+            "[system] Your last response was empty. Either call a tool to "
+            "do the work the user asked for, or give a clear text answer. "
+            "Do not return empty content."
+        )
+    else:
+        head = (
+            "[system] You said you would do something but didn't call any "
+            "tool. Tools are how you actually do things in this framework "
+            "— call the appropriate tool NOW (fs_write to create files, "
+            "fs_edit to modify them, shell to run commands, etc.) instead "
+            "of just describing the action. The user is in an "
+            "auto-execution mode; do not ask permission."
+        )
+
+    if attempt >= 2:
+        # Second+ nudge — escalate to direct language.
+        head += (
+            "\n\nThis is nudge #" + str(attempt) + ". You have stalled "
+            "before. STOP narrating and CALL THE NEXT TOOL. If you have "
+            "nothing left to do, output a final summary and STOP — but "
+            "only if every part of the user's request is done."
+        )
+
+    if user_input:
+        snippet = user_input.strip()
+        if len(snippet) > 800:
+            snippet = snippet[:800].rstrip() + " […truncated]"
+        head += (
+            "\n\nThe user's ORIGINAL TASK was:\n----\n" + snippet +
+            "\n----\n\nIf this task has multiple stages, complete EVERY "
+            "stage before returning. Do not stop after one stage."
+        )
+
+    return head
 
 
 def execute(
@@ -682,22 +735,23 @@ def chat(
         if not tool_calls:
             text = msg.get("content") or ""
 
-            # v1.17.0 — empty/stall nudge. See module comment.
-            # Only fires when:
-            #   - we haven't already nudged this turn (bounded retry)
+            # v1.17.0 / v1.17.1 — empty/stall nudge. See module comment.
+            # Fires when:
+            #   - we haven't exhausted the nudge budget (NUDGE_MAX_PER_CALL)
             #   - AND there are tools available (no point nudging if the
             #     model literally has no actions to take — e.g. NO_TOOLS
             #     mode, or a chat-only call)
-            if nudge_count < 1 and tools.schemas():
+            if nudge_count < NUDGE_MAX_PER_CALL and tools.schemas():
                 stripped = text.strip()
-                nudge_msg = ""
                 nudge_reason = ""
                 if not stripped:
-                    nudge_msg = _NUDGE_EMPTY
                     nudge_reason = "empty"
                 elif _looks_like_stall(stripped):
-                    nudge_msg = _NUDGE_STALL
                     nudge_reason = "stall"
+                nudge_msg = (
+                    _build_nudge(nudge_reason, user_input, nudge_count + 1)
+                    if nudge_reason else ""
+                )
                 if nudge_msg:
                     # Drop the empty/stall assistant turn from the
                     # visible history so the next iteration sees a clean

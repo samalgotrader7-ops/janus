@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-VERSION = "1.17.0"
+VERSION = "1.17.1"
 TAGLINE = "intent-first · safety-first agent"
 
 # The prompt glyph echoes the bifurcation arrows. ASCII-safe enough on
