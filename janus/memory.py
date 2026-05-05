@@ -341,39 +341,8 @@ Return STRICT JSON:
 No prose, no markdown fences, no commentary."""
 
 
-def propose_diff(request: str, output: str) -> list[Op]:
-    """Ask the LLM to propose memory updates across all categories.
-
-    Returns a possibly-empty list of Ops. Each op has a `category` field
-    (defaults to "user" if the model omits it).
-    """
-    if not config.MEMORY_PROPOSE_ENABLED:
-        return []
-
-    cats_block = []
-    for cat in list_categories() or config.MEMORY_CATEGORIES:
-        body = read(cat).strip() or "(empty)"
-        cats_block.append(f"### memory/{cat}.md\n{body[:2000]}")
-    current = "\n\n".join(cats_block) if cats_block else "(empty)"
-
-    user_msg = (
-        f"User request:\n{request}\n\n"
-        f"Agent final output:\n{output[:4000]}\n\n"
-        f"Current memory across categories:\n{current[:8000]}"
-    )
-    msg = _chat_with_model(
-        model=config.memory_model(),
-        messages=[
-            {"role": "system", "content": PROPOSE_SYSTEM},
-            {"role": "user", "content": user_msg},
-        ],
-        temperature=0.2,
-        json_mode=True,
-    )
-    try:
-        data = llm.parse_json_loose(msg.get("content") or "{}")
-    except Exception:
-        return []
+def _parse_ops(data: dict) -> list[Op]:
+    """Pull ops out of the LLM JSON response. Defensive; bad ops dropped."""
     valid_cats = set(config.MEMORY_CATEGORIES)
     ops_raw = data.get("ops") or []
     out: list[Op] = []
@@ -384,12 +353,155 @@ def propose_diff(request: str, output: str) -> list[Op]:
         section = str(op.get("section", "")).strip()
         text = str(op.get("text") or "").strip()
         cat = str(op.get("category") or "user").strip() or "user"
-        # Allow extra categories the user added on disk; only filter obvious junk
         if cat not in valid_cats and not category_path(cat).exists():
             cat = "user"
         if kind in ("append", "replace", "create_section", "delete") and section:
             out.append({"op": kind, "category": cat, "section": section, "text": text})
     return out
+
+
+def propose_diff(request: str, output: str) -> dict:
+    """Ask the LLM to propose memory updates across all categories.
+
+    v1.18: returns ``{"ops": [...], "cards": [CardProposal]}``. The
+    ``cards`` list is empty when the model proposes no typed cards
+    (most turns). Single LLM call produces both outputs; cost unchanged
+    from the v1.3 ops-only flow.
+
+    Callers that previously did ``ops = memory.propose_diff(req, out)``
+    should now do
+    ``result = memory.propose_diff(req, out); ops = result["ops"]``.
+    """
+    if not config.MEMORY_PROPOSE_ENABLED:
+        return {"ops": [], "cards": []}
+    # v1.18: /memory pause writes a marker file; honor it here.
+    if (config.MEMORY_DIR / "_paused").exists():
+        return {"ops": [], "cards": []}
+
+    cats_block = []
+    for cat in list_categories() or config.MEMORY_CATEGORIES:
+        body = read(cat).strip() or "(empty)"
+        cats_block.append(f"### memory/{cat}.md\n{body[:2000]}")
+    current = "\n\n".join(cats_block) if cats_block else "(empty)"
+
+    # v1.18: append the typed-cards section to the system prompt.
+    from . import memory_extract, session_context
+    current_scope = session_context.current_scope()
+    existing_block = memory_extract.render_existing_cards_block()
+    extension = memory_extract.build_extension(
+        current_scope=current_scope,
+        existing_block=existing_block,
+    )
+
+    user_msg = (
+        f"User request:\n{request}\n\n"
+        f"Agent final output:\n{output[:4000]}\n\n"
+        f"Current memory across categories:\n{current[:8000]}"
+    )
+    msg = _chat_with_model(
+        model=config.memory_model(),
+        messages=[
+            {"role": "system", "content": PROPOSE_SYSTEM + "\n\n" + extension},
+            {"role": "user", "content": user_msg},
+        ],
+        temperature=0.2,
+        json_mode=True,
+    )
+    try:
+        data = llm.parse_json_loose(msg.get("content") or "{}")
+    except Exception:
+        return {"ops": [], "cards": []}
+
+    ops = _parse_ops(data)
+    cards = memory_extract.parse_cards(
+        data, current_scope=current_scope, origin_kind="user_turn",
+    )
+    return {"ops": ops, "cards": cards}
+
+
+def apply_cards(
+    proposals: list,
+    *,
+    conversation_id: str = "",
+    turn: int = 0,
+    gateway: str = "",
+) -> list[str]:
+    """Apply a list of CardProposal objects.
+
+    Handles conflict resolution at apply time:
+      - ``ignore`` → skip
+      - ``mark_uncertain`` → clamp confidence to 0.5
+      - ``replace`` → supersede existing UNLESS any existing card has
+        durability >= MEMORY_PROTECTED_DURABILITY (identity-class
+        protection); in that case, fall through to append-style write
+      - ``append`` → just write the new card
+
+    Provenance (conversation_id, turn, gateway) is filled here from
+    the caller's session — extractor never sees those fields.
+
+    Returns the list of card ids actually written. After all writes,
+    triggers a single ``memory_index.reconcile()`` so the new cards are
+    immediately searchable.
+    """
+    from . import memory_cards, memory_index, session_context
+    if not proposals:
+        return []
+
+    # Default gateway from origin if caller didn't supply one.
+    if not gateway:
+        gateway = session_context.get_origin().get("platform") or "cli"
+
+    written: list[str] = []
+    for p in proposals:
+        if getattr(p, "conflict_resolution", "append") == "ignore":
+            continue
+
+        existing = memory_index.lookup_by_subject(p.type, p.subject)
+
+        confidence = p.confidence
+        if p.conflict_resolution == "mark_uncertain":
+            confidence = min(confidence, 0.5)
+
+        if p.conflict_resolution == "replace" and existing:
+            max_dur = max(float(e["durability"]) for e in existing)
+            if max_dur >= config.MEMORY_PROTECTED_DURABILITY:
+                # Refuse to supersede identity-class cards. Fall through:
+                # the new card is still written; both coexist (effectively
+                # append). Recall ranks by recency.
+                pass
+            else:
+                for e in existing:
+                    memory_cards.supersede(e["id"])
+
+        source = memory_cards.Source(
+            conversation_id=conversation_id,
+            turn=turn,
+            gateway=gateway,
+            origin_kind=getattr(p, "origin_kind", "user_turn"),
+        )
+        try:
+            card = memory_cards.make_card(
+                type=p.type,
+                subject=p.subject,
+                content=p.content,
+                confidence=confidence,
+                importance=p.importance,
+                durability=p.durability,
+                scope=p.scope,
+                source=source,
+            )
+            memory_cards.write_card(card)
+            written.append(card.id)
+        except memory_cards.CardValidationError:
+            continue
+
+    if written:
+        try:
+            memory_index.reconcile()
+        except Exception:
+            pass
+
+    return written
 
 
 def _chat_with_model(*, model: str, messages, temperature, json_mode) -> dict:

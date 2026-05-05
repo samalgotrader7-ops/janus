@@ -49,5 +49,15 @@ def snapshot() -> CacheSnapshot:
 
     Cheap (one disk read + one truncation). Re-call after any operation
     that mutates `user.md` to keep the cache valid.
+
+    v1.18: also runs the one-shot legacy → cards migration on first call
+    (idempotent — checks a marker file). After migration, recall picks
+    up the migrated cards alongside any new extractions.
     """
+    try:
+        from . import memory_migrate
+        memory_migrate.maybe_migrate()
+    except Exception:
+        # Migration failure must not block session boot.
+        pass
     return CacheSnapshot(preamble=memory.prepend_for_prompt())

@@ -180,7 +180,7 @@ def _is_headless_invocation(args: list[str]) -> bool:
             "chat", "--chat", "telegram", "web", "whatsapp", "daemon",
             "fire", "--analyze", "-a", "--reindex", "--eval",
             "--logo", "--conversations", "--help", "-h", "help",
-            "insights", "stats", "onboard", "service", "swarm", "pair", "uninstall",
+            "insights", "stats", "memory", "onboard", "service", "swarm", "pair", "uninstall",
         }
         if not args or all(a not in non_pipe_subs for a in args):
             return True
@@ -579,6 +579,153 @@ def _run_logo(args):
     )
     for logo, title in branding.logo_with_titles(b):
         sys.stdout.write(f"{logo}{title}\n")
+
+
+_MEMORY_HELP = """\
+janus memory subcommands (v1.18):
+  janus memory stats             aggregate counts + recall stats
+  janus memory search <query>    FTS5 search across cards + legacy .md
+  janus memory show <id>         dump one card to stdout
+  janus memory reindex           drop and rebuild SQLite cache from cards/
+  janus memory pause             stop auto-extraction
+  janus memory resume            resume auto-extraction
+  janus memory prune             pure-compute prune by age + durability
+  janus memory consolidate       LLM-driven reflection pass
+  janus memory clear --type=<t>  destructive: move all cards of one type
+                                 to _superseded/
+"""
+
+
+def _run_memory_cli(args: list[str]) -> None:
+    """Dispatch `janus memory <subcmd>`."""
+    config.ensure_home()
+    if not args or args[0] in ("--help", "-h", "help"):
+        print(_MEMORY_HELP); return
+    sub = args[0]
+    rest = args[1:]
+    if sub == "stats":
+        from . import memory_index
+        try:
+            memory_index.reconcile()
+        except Exception:
+            pass
+        s = memory_index.summary()
+        print(f"Memory cards: {s['total']}")
+        if s["per_type"]:
+            print("  by type:")
+            for t, n in sorted(s["per_type"].items()):
+                print(f"    {t}: {n}")
+        if s["per_scope"]:
+            print("  by scope:")
+            for sc, n in sorted(s["per_scope"].items()):
+                print(f"    {sc}: {n}")
+        print(f"  total recalls: {s['total_recalls']}")
+        if s["most_recalled"]:
+            print("  most-recalled cards:")
+            for r in s["most_recalled"]:
+                print(f"    [{r['type']}:{r['subject']}] × {r['recall_count']}")
+        paused = (config.MEMORY_DIR / "_paused").exists()
+        print(f"  extraction: {'PAUSED' if paused else 'enabled'}")
+        return
+    if sub == "search":
+        if not rest:
+            print("usage: janus memory search <query>"); sys.exit(2)
+        query = " ".join(rest)
+        from . import memory_recall, memory_state
+        cards = memory_recall.top_k(query, top_k=10, budget_bytes=2000)
+        if cards:
+            print(f"Cards ({len(cards)}):")
+            for c in cards:
+                print(f"  {c['_line']}  (id={c['id']} scope={c['scope']})")
+        hits = memory_state.search_memory(query, top_k=10)
+        if hits:
+            print(f"\nLegacy .md matches ({len(hits)}):")
+            for h in hits:
+                print(f"  {h['category']}.md ## {h['section']}")
+                print(f"    {h['line']}")
+        if not cards and not hits:
+            print(f"(no matches for {query!r})")
+        return
+    if sub == "show":
+        if not rest:
+            print("usage: janus memory show <card-id>"); sys.exit(2)
+        from . import memory_cards
+        p = memory_cards.card_path(rest[0])
+        if not p.exists():
+            print(f"card not found: {rest[0]}"); sys.exit(1)
+        print(p.read_text("utf-8")); return
+    if sub == "reindex":
+        from . import memory_index
+        memory_index.reset()
+        counts = memory_index.reconcile()
+        print(
+            f"reindexed: {counts['added']} added, "
+            f"{counts['updated']} updated, {counts['deleted']} dropped."
+        )
+        return
+    if sub == "pause":
+        config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        (config.MEMORY_DIR / "_paused").touch()
+        print("memory extraction paused"); return
+    if sub == "resume":
+        marker = config.MEMORY_DIR / "_paused"
+        if marker.exists():
+            marker.unlink()
+        print("memory extraction enabled"); return
+    if sub == "prune":
+        from . import memory_prune
+        counts = memory_prune.run_once()
+        print(
+            f"pruned: {counts['removed']} dropped "
+            f"(active={counts['active_drops']}, "
+            f"low_conf={counts['low_conf_drops']}, "
+            f"superseded={counts['superseded_drops']})"
+        )
+        return
+    if sub == "consolidate":
+        try:
+            from . import memory_consolidate
+        except ImportError:
+            print("consolidate module not available"); sys.exit(1)
+        try:
+            summary = memory_consolidate.run_once()
+        except Exception as e:
+            print(f"error: {type(e).__name__}: {e}"); sys.exit(1)
+        print(
+            f"consolidated: {summary['written']} reflection card(s) "
+            f"from {summary['examined']} examined"
+        )
+        return
+    if sub == "clear":
+        from . import memory_cards, memory_index
+        type_filter = None
+        for token in rest:
+            if token.startswith("--type="):
+                type_filter = token[len("--type="):]
+        if not type_filter or type_filter not in memory_cards.TYPES:
+            print(
+                "usage: janus memory clear --type=<one of "
+                f"{', '.join(memory_cards.TYPES)}>"
+            )
+            sys.exit(2)
+        try:
+            memory_index.reconcile()
+        except Exception:
+            pass
+        rows = memory_index.list_all(type=type_filter)
+        n = 0
+        for r in rows:
+            memory_cards.supersede(r["id"])
+            n += 1
+        try:
+            memory_index.reconcile()
+        except Exception:
+            pass
+        print(f"moved {n} {type_filter} card(s) to _superseded/")
+        return
+    print(f"unknown memory subcommand: {sub}")
+    print(_MEMORY_HELP)
+    sys.exit(2)
 
 
 def _run_swarm_cli(args: list[str]) -> None:
@@ -1007,6 +1154,8 @@ def main():
     if sub == "stats":
         from . import rate_limit
         print(rate_limit.render_summary(rate_limit.get_summary())); return
+    if sub == "memory":
+        _run_memory_cli(args[1:]); return
     if sub == "onboard":
         from . import onboarding
         ok = onboarding.run_wizard()

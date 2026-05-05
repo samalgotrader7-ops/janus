@@ -637,6 +637,20 @@ def chat(
     audit (same shape as execute()'s trace) for logging.
     """
     ws = workspace or str(config.WORKSPACE)
+
+    # v1.18: per-turn dynamic recall — inject relevant memory cards above
+    # the static memory_preamble. Built from user_input (the new turn's
+    # query), filtered by current scope, ranked by BM25 + recency.
+    # Best-effort: never break the chat loop if recall fails.
+    if user_input:
+        try:
+            from . import memory_recall as _mr
+            _recall = _mr.top_k_block(user_input)
+            if _recall:
+                memory_preamble = _recall + "\n" + (memory_preamble or "")
+        except Exception:
+            pass
+
     system = _build_chat_system(
         workspace=ws,
         mode=mode,

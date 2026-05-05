@@ -32,6 +32,7 @@ from .delegate import Delegate
 from .ssh_exec import SshExec
 from .shell_bg import ShellRunBg, ShellOutput, ShellKill, ShellList
 from .plan_mode import ExitPlanMode
+from .memory_search import MemorySearch
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -106,6 +107,10 @@ _BUILTIN_TOOL_FACTORIES = {
     # Only meaningful in mode=plan. Approver shows plan to user;
     # framework switches mode on approval.
     "exit_plan_mode": ExitPlanMode,
+    # v1.18.0 — structured memory search. Lets the model query the
+    # FTS5-backed card store mid-turn (complements pre-injection recall).
+    # Restricts to current origin scope unless caller passes scope=global.
+    "memory_search": MemorySearch,
 }
 
 

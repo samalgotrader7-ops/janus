@@ -166,9 +166,10 @@ def test_fire_writes_memory_when_skill_has_memory_write_true(tmp_path, monkeypat
         {"op": "append", "category": "project", "section": "current",
          "text": "Working on Hermes parity migration."},
     ]
+    # v1.18: propose_diff returns dict {"ops": [...], "cards": [...]}.
     monkeypatch.setattr(
         "janus.memory.propose_diff",
-        lambda req, out: fake_ops,
+        lambda req, out: {"ops": fake_ops, "cards": []},
     )
 
     apply_calls: list = []
@@ -217,7 +218,11 @@ def test_fire_memory_write_filters_to_safe_categories(tmp_path, monkeypatch):
         {"op": "append", "category": "preferences", "section": "x", "text": "bad"},
         {"op": "append", "category": "project", "section": "x", "text": "ok"},
     ]
-    monkeypatch.setattr("janus.memory.propose_diff", lambda req, out: bad_ops)
+    # v1.18: propose_diff returns dict.
+    monkeypatch.setattr(
+        "janus.memory.propose_diff",
+        lambda req, out: {"ops": bad_ops, "cards": []},
+    )
 
     apply_calls: list = []
     monkeypatch.setattr(

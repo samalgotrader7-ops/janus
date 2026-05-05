@@ -273,17 +273,23 @@ def _propose_and_audit_diff(t: Trigger, skill, output: str) -> None:
     preferences) are too identity-shaped to be touched without a human.
     """
     from .. import memory as memory_mod  # local: avoid circular import
-    ops = memory_mod.propose_diff(t.request, output)
-    if not ops:
-        return
-    # Filter to allowed categories.
+    result = memory_mod.propose_diff(t.request, output)
+    ops = result.get("ops") or []
+    cards = result.get("cards") or []
+    # Filter ops to allowed categories.
     allowed = {"project", "relationships"}
     ops = [op for op in ops if (op.get("category") or "user") in allowed]
-    if not ops:
+    # v1.18: cards from autonomous fires also auto-apply (no UI to confirm)
+    # but stay scoped to current origin (daemon — not global) per the
+    # session_context defaults.
+    if not ops and not cards:
         return
 
     # Apply to live memory.
-    memory_mod.apply(ops)
+    if ops:
+        memory_mod.apply(ops)
+    if cards:
+        memory_mod.apply_cards(cards, gateway="daemon")
 
     # Mirror to audit log.
     audit_dir = config.MEMORY_DIR / "_audit"

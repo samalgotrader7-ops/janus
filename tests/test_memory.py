@@ -59,14 +59,16 @@ def test_prepend_for_prompt_truncates(janus_home, monkeypatch):
 
 def test_propose_diff_disabled(janus_home, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_PROPOSE_ENABLED", False)
-    assert memory.propose_diff("hi", "hello") == []
+    # v1.18: returns dict {"ops": [...], "cards": [...]}.
+    assert memory.propose_diff("hi", "hello") == {"ops": [], "cards": []}
 
 
 def test_propose_diff_parses_llm(janus_home, fake_llm):
     fake_llm.append({
         "content": '{"ops": [{"op": "create_section", "section": "Identity", "text": "Sam"}]}',
     })
-    ops = memory.propose_diff("im sam", "hi sam")
+    result = memory.propose_diff("im sam", "hi sam")
+    ops = result["ops"]
     assert len(ops) == 1
     assert ops[0]["section"] == "Identity"
     assert ops[0]["category"] == "user"  # default when LLM omits
@@ -168,10 +170,11 @@ def test_propose_diff_routes_to_soul(janus_home, fake_llm):
             '"section": "Name", "text": "Samoul"}]}'
         ),
     })
-    ops = memory.propose_diff(
+    result = memory.propose_diff(
         "your name is Samoul",
         "Hi! I'm Samoul, locked and loaded.",
     )
+    ops = result["ops"]
     assert len(ops) == 1
     assert ops[0]["category"] == "soul"
     memory.apply(ops)

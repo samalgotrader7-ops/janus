@@ -65,7 +65,7 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/why",          "re-interpret your last message and show 2-3 candidate readings", "built-in"),
     SlashCommand("/workspace",    "show or change the active workspace directory",       "built-in"),
     SlashCommand("/analyze",      "scan the workspace for tools, skills, project hints", "built-in"),
-    SlashCommand("/memory",       "show memory: /memory <cat>, /memory search <q>, /memory audit", "built-in"),
+    SlashCommand("/memory",       "memory: /memory [<cat>|search <q>|stats|show <id>|pause|resume|reindex|clear --type=<t>|prune|consolidate|audit]", "built-in"),
     SlashCommand("/search",       "search prior interactions in the log index",          "built-in"),
     SlashCommand("/skills",       "list/filter skills, or install-bundled to copy the starter catalog", "built-in"),
     SlashCommand("/promote",      "promote a quarantined skill to a trusted state",      "built-in"),
@@ -438,28 +438,185 @@ def _dispatch(console, line: str, state: dict) -> bool:
         return True
     if cmd == "/memory":
         target = arg.strip()
-        # /memory search <query>  → substring search across categories + audit
+        # /memory stats — v1.18 dashboard: per-type / per-scope / recall counts.
+        if target.lower() == "stats":
+            from . import memory_index, memory_recall
+            try:
+                memory_index.reconcile()
+            except Exception:
+                pass
+            s = memory_index.summary()
+            console.print(f"[bold]Memory cards: {s['total']}[/]")
+            if s["per_type"]:
+                console.print("  by type:")
+                for t, n in sorted(s["per_type"].items()):
+                    console.print(f"    {t}: {n}")
+            if s["per_scope"]:
+                console.print("  by scope:")
+                for sc, n in sorted(s["per_scope"].items()):
+                    console.print(f"    {sc}: {n}")
+            console.print(f"  total recalls: {s['total_recalls']}")
+            if s["most_recalled"]:
+                console.print("  most-recalled cards:")
+                for r in s["most_recalled"]:
+                    console.print(
+                        f"    [{r['type']}:{r['subject']}] "
+                        f"× {r['recall_count']}"
+                    )
+            log_p = config.MEMORY_DIR / "recalls.jsonl"
+            if log_p.exists():
+                lines = log_p.read_text("utf-8").splitlines()
+                console.print(f"  recall log: {len(lines)} entries")
+            paused = (config.MEMORY_DIR / "_paused").exists()
+            console.print(
+                f"  extraction: {'PAUSED' if paused else 'enabled'}"
+            )
+            return True
+        # /memory show <id> — full card view
+        if target.lower().startswith("show "):
+            card_id = target[5:].strip()
+            if not card_id:
+                console.print("[red]usage:[/] /memory show <card-id>")
+                return True
+            from . import memory_cards
+            p = memory_cards.card_path(card_id)
+            if not p.exists():
+                console.print(f"[red]card not found:[/] {card_id}")
+                return True
+            console.print(Markdown(p.read_text("utf-8")))
+            return True
+        # /memory pause — write marker file; propose_diff honors it.
+        if target.lower() == "pause":
+            (config.MEMORY_DIR).mkdir(parents=True, exist_ok=True)
+            (config.MEMORY_DIR / "_paused").touch()
+            console.print("[yellow]memory extraction paused[/]")
+            return True
+        # /memory resume — remove marker file.
+        if target.lower() == "resume":
+            marker = config.MEMORY_DIR / "_paused"
+            if marker.exists():
+                marker.unlink()
+            console.print("[green]memory extraction enabled[/]")
+            return True
+        # /memory reindex — drop and rebuild the SQLite cache from cards/.
+        if target.lower() == "reindex":
+            from . import memory_index, memory_recall
+            memory_index.reset()
+            counts = memory_index.reconcile()
+            memory_recall.reset_reconcile_flag()
+            console.print(
+                f"[green]reindexed:[/] {counts['added']} added, "
+                f"{counts['updated']} updated, {counts['deleted']} dropped."
+            )
+            return True
+        # /memory clear --type=<t> — DESTRUCTIVE wipe of one type.
+        if target.lower().startswith("clear"):
+            from . import memory_cards, memory_index
+            rest = target[5:].strip()
+            type_filter = None
+            for token in rest.split():
+                if token.startswith("--type="):
+                    type_filter = token[len("--type="):]
+            if not type_filter or type_filter not in memory_cards.TYPES:
+                console.print(
+                    "[red]usage:[/] /memory clear --type=<one of "
+                    f"{', '.join(memory_cards.TYPES)}>"
+                )
+                return True
+            try:
+                ans = input(
+                    f"clear ALL {type_filter} cards? this is destructive [y/N]: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return True
+            if ans not in ("y", "yes"):
+                console.print("[dim]aborted[/]")
+                return True
+            try:
+                memory_index.reconcile()
+            except Exception:
+                pass
+            rows = memory_index.list_all(type=type_filter)
+            n = 0
+            for r in rows:
+                memory_cards.supersede(r["id"])
+                n += 1
+            try:
+                memory_index.reconcile()
+            except Exception:
+                pass
+            console.print(
+                f"[green]moved {n} {type_filter} card(s) to _superseded/[/]"
+            )
+            return True
+        # /memory consolidate — manual reflection pass (Phase 8 module).
+        if target.lower() == "consolidate":
+            try:
+                from . import memory_consolidate
+            except ImportError:
+                console.print("[dim]consolidate module not available[/]")
+                return True
+            console.print("[dim]running consolidation (LLM call)...[/]")
+            try:
+                summary = memory_consolidate.run_once()
+            except Exception as e:
+                console.print(f"[red]error:[/] {type(e).__name__}: {e}")
+                return True
+            console.print(
+                f"[green]consolidated:[/] {summary['written']} reflection card(s) "
+                f"from {summary['examined']} examined"
+            )
+            return True
+        # /memory prune — pure-compute pruning pass.
+        if target.lower() == "prune":
+            from . import memory_prune
+            counts = memory_prune.run_once()
+            console.print(
+                f"[green]pruned:[/] {counts['removed']} dropped "
+                f"(active={counts['active_drops']}, "
+                f"low_conf={counts['low_conf_drops']}, "
+                f"superseded={counts['superseded_drops']})"
+            )
+            return True
+        # /memory search <query> — v1.18: searches both FTS-indexed cards
+        # AND the legacy substring search across .md files.
         if target.lower().startswith("search "):
             query = target[7:].strip()
             if not query:
                 console.print("[red]usage:[/] /memory search <query>")
                 return True
+            # First: FTS5 search over cards.
+            from . import memory_recall
+            cards = memory_recall.top_k(
+                query, top_k=10, budget_bytes=2000,
+            )
+            if cards:
+                console.print(f"[bold]Cards ({len(cards)}):[/]")
+                for c in cards:
+                    console.print(
+                        f"  {c['_line']}  "
+                        f"[dim](id={c['id']} scope={c['scope']})[/]"
+                    )
+                console.print()
+            # Then: legacy substring search across .md files.
             from . import memory_state
             hits = memory_state.search_memory(query, top_k=15)
-            if not hits:
+            if not hits and not cards:
                 console.print(f"[dim]no matches for {query!r}.[/]")
                 return True
-            for h in hits:
-                console.print(
-                    f"[bold]{h['category']}[/].md "
-                    f"[dim]## {h['section']} (line {h['line_no']})[/]"
-                )
-                if h["context_above"]:
-                    console.print(f"  [dim]{h['context_above']}[/]")
-                console.print(f"  {h['line']}")
-                if h["context_below"]:
-                    console.print(f"  [dim]{h['context_below']}[/]")
-                console.print()
+            if hits:
+                console.print(f"[bold]Legacy .md matches ({len(hits)}):[/]")
+                for h in hits:
+                    console.print(
+                        f"[bold]{h['category']}[/].md "
+                        f"[dim]## {h['section']} (line {h['line_no']})[/]"
+                    )
+                    if h["context_above"]:
+                        console.print(f"  [dim]{h['context_above']}[/]")
+                    console.print(f"  {h['line']}")
+                    if h["context_below"]:
+                        console.print(f"  [dim]{h['context_below']}[/]")
+                    console.print()
             return True
         # /memory audit  → list recent autonomous diffs from cron fires
         if target.lower() == "audit":
@@ -1193,28 +1350,59 @@ def _maybe_propose_memory(console, req: str, output: str,
     if not config.MEMORY_PROPOSE_ENABLED:
         return
     try:
-        ops = memory.propose_diff(req, output)
+        result = memory.propose_diff(req, output)
     except Exception as e:
         console.print(f"[dim]memory propose skipped: {type(e).__name__}: {e}[/]")
         return
-    if not ops:
+    ops = result.get("ops") or []
+    cards = result.get("cards") or []
+    if not ops and not cards:
         return
-    console.print(Panel(memory.render_diff(ops), title="proposed memory updates",
-                        border_style="cyan"))
+    if ops:
+        console.print(Panel(memory.render_diff(ops), title="proposed memory updates",
+                            border_style="cyan"))
+    if cards:
+        # v1.18: also show typed cards being proposed.
+        from .memory_extract import CardProposal as _CP  # noqa: F401
+        lines = []
+        for c in cards:
+            tag = (
+                f" → {c.conflict_resolution}({c.conflict_with})"
+                if c.conflict_with else ""
+            )
+            lines.append(
+                f"  [{c.type}:{c.subject}] conf={c.confidence:.1f} "
+                f"imp={c.importance:.1f} dur={c.durability:.1f} "
+                f"scope={c.scope}{tag}"
+            )
+            lines.append(f"    {c.content[:120]}")
+        console.print(Panel(
+            "\n".join(lines),
+            title=f"proposed memory cards ({len(cards)})",
+            border_style="magenta",
+        ))
     try:
         ans = input("apply? [y/N]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return
     if ans in ("y", "yes"):
-        memory.apply(ops)
-        # v1.17.0 — print the actual categories the ops touched, not a
-        # hardcoded "user.md". Pre-v1.17 this lied: if the model proposed
-        # a project.md / soul.md / preferences.md update, the UI claimed
-        # it landed in user.md even though memory.apply correctly routed
-        # it. The DATA was right; the DISPLAY was wrong.
-        cats = sorted({(op.get("category") or "user") for op in ops})
-        label = ", ".join(f"{c}.md" for c in cats)
-        console.print(f"  [green]applied to {label}[/]")
+        if ops:
+            memory.apply(ops)
+            # v1.17.0 — print the actual categories the ops touched, not a
+            # hardcoded "user.md". Pre-v1.17 this lied: if the model proposed
+            # a project.md / soul.md / preferences.md update, the UI claimed
+            # it landed in user.md even though memory.apply correctly routed
+            # it. The DATA was right; the DISPLAY was wrong.
+            cats = sorted({(op.get("category") or "user") for op in ops})
+            label = ", ".join(f"{c}.md" for c in cats)
+            console.print(f"  [green]applied to {label}[/]")
+        if cards:
+            written = memory.apply_cards(cards, gateway="cli")
+            if written:
+                console.print(
+                    f"  [green]wrote {len(written)} card(s) to "
+                    f"~/.janus/memory/cards/[/]"
+                )
         if cache_snap is not None:
             cache_snap.preamble = cache.snapshot().preamble
 

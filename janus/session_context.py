@@ -40,6 +40,7 @@ The trigger YAML's deliver_to field IS the persistent record.
 from __future__ import annotations
 import threading
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Iterator
 
 
@@ -110,3 +111,88 @@ def origin_context(
             clear_origin()
         else:
             _LOCAL.origin = prev
+
+
+# ---------- v1.18: scope helpers for memory cards ----------
+
+
+def current_project_root() -> Path | None:
+    """Resolve the project root containing config.WORKSPACE, or None.
+
+    A directory qualifies as a project root if it contains either a
+    ``.git/`` subdirectory OR one of the instruction files recognized
+    by ``project_context.py`` (CLAUDE.md / JANUS.md / AGENTS.md / etc.).
+
+    Walk-up stops at the home directory (so user-home isn't treated as
+    a project even if it accidentally has a CLAUDE.md).
+    """
+    from . import config, project_context as _pc
+    try:
+        cur = Path(config.WORKSPACE).resolve()
+    except (OSError, RuntimeError):
+        return None
+    home = Path.home().resolve()
+    while True:
+        if (cur / ".git").exists():
+            return cur
+        for fname in _pc.INSTRUCTION_FILENAMES:
+            if (cur / fname).is_file():
+                return cur
+        parent = cur.parent
+        if cur == parent or cur == home:
+            return None
+        cur = parent
+
+
+def current_scope() -> str:
+    """Resolve the scope string for memory cards in this turn.
+
+    Returns one of:
+      - ``telegram:<chat_id>`` / ``web:<chat_id>`` / ``whatsapp:<chat_id>``
+        when inside a gateway origin
+      - ``project:<absolute_path>`` when at CLI inside a recognized project
+      - ``cli`` otherwise
+
+    NEVER returns ``global``. Promotion to global requires user gesture
+    (Phase 5 extraction enforces this — model can't auto-promote).
+    """
+    o = get_origin()
+    platform = o.get("platform")
+    chat_id = o.get("chat_id")
+    if platform and chat_id and platform in ("telegram", "web", "whatsapp"):
+        return f"{platform}:{chat_id}"
+    root = current_project_root()
+    if root is not None:
+        return f"project:{root}"
+    return "cli"
+
+
+def scope_matches(card_scope: str, current: str,
+                  *, cwd: Path | None = None) -> bool:
+    """Does a card with ``scope=card_scope`` apply in the current scope?
+
+    Rules:
+      - ``card_scope == 'global'`` → always match
+      - exact string match → match (covers ``telegram:X``, ``web:X``,
+        ``whatsapp:X``, ``cli``, exact ``project:`` paths)
+      - ``card_scope`` starts with ``project:`` AND ``cwd`` is at-or-under
+        that path → match (a card scoped to a project is visible from
+        any subdirectory of that project, regardless of how the current
+        scope was resolved)
+      - else → no match
+
+    The optional ``cwd`` parameter exists for testing; in production it
+    defaults to the current working directory at call time.
+    """
+    if card_scope == "global":
+        return True
+    if card_scope == current:
+        return True
+    if card_scope.startswith("project:"):
+        try:
+            card_path = Path(card_scope[len("project:"):]).resolve()
+        except (ValueError, OSError):
+            return False
+        cwd = (cwd or Path.cwd()).resolve()
+        return cwd == card_path or card_path in cwd.parents
+    return False

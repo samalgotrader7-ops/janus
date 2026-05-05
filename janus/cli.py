@@ -421,8 +421,182 @@ def _cmd_memory(arg=""):
     """`/memory` — show all categories. `/memory <cat>` — show one category.
 
     v1.3: memory is multi-category at ~/.janus/memory/<cat>.md.
+    v1.18: adds stats, show, pause/resume, reindex, clear, prune,
+    consolidate subcommands operating on the structured card store.
     """
     arg = (arg or "").strip()
+    low = arg.lower()
+    # v1.18 subcommands
+    if low == "stats":
+        from . import memory_index
+        try:
+            memory_index.reconcile()
+        except Exception:
+            pass
+        s = memory_index.summary()
+        print(f"\n  {C.BOLD}Memory cards: {s['total']}{C.R}")
+        if s["per_type"]:
+            print("    by type:")
+            for t, n in sorted(s["per_type"].items()):
+                print(f"      {t}: {n}")
+        if s["per_scope"]:
+            print("    by scope:")
+            for sc, n in sorted(s["per_scope"].items()):
+                print(f"      {sc}: {n}")
+        print(f"    total recalls: {s['total_recalls']}")
+        if s["most_recalled"]:
+            print("    most-recalled cards:")
+            for r in s["most_recalled"]:
+                print(
+                    f"      [{r['type']}:{r['subject']}] × {r['recall_count']}"
+                )
+        paused = (config.MEMORY_DIR / "_paused").exists()
+        print(
+            f"    extraction: "
+            f"{'PAUSED' if paused else 'enabled'}"
+        )
+        return True
+    if low.startswith("show "):
+        from . import memory_cards
+        card_id = arg[5:].strip()
+        if not card_id:
+            print(f"  {C.RED}usage: /memory show <card-id>{C.R}")
+            return True
+        p = memory_cards.card_path(card_id)
+        if not p.exists():
+            print(f"  {C.RED}card not found: {card_id}{C.R}")
+            return True
+        print()
+        print(p.read_text("utf-8"))
+        return True
+    if low == "pause":
+        config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        (config.MEMORY_DIR / "_paused").touch()
+        print(f"  {C.YELLOW}memory extraction paused{C.R}")
+        return True
+    if low == "resume":
+        marker = config.MEMORY_DIR / "_paused"
+        if marker.exists():
+            marker.unlink()
+        print(f"  {C.GREEN}memory extraction enabled{C.R}")
+        return True
+    if low == "reindex":
+        from . import memory_index, memory_recall
+        memory_index.reset()
+        counts = memory_index.reconcile()
+        memory_recall.reset_reconcile_flag()
+        print(
+            f"  {C.GREEN}reindexed:{C.R} {counts['added']} added, "
+            f"{counts['updated']} updated, {counts['deleted']} dropped."
+        )
+        return True
+    if low.startswith("clear"):
+        from . import memory_cards, memory_index
+        rest = arg[5:].strip()
+        type_filter = None
+        for token in rest.split():
+            if token.startswith("--type="):
+                type_filter = token[len("--type="):]
+        if not type_filter or type_filter not in memory_cards.TYPES:
+            print(
+                f"  {C.RED}usage: /memory clear --type=<one of "
+                f"{', '.join(memory_cards.TYPES)}>{C.R}"
+            )
+            return True
+        try:
+            ans = input(
+                f"clear ALL {type_filter} cards? destructive [y/N]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return True
+        if ans not in ("y", "yes"):
+            print(f"  {C.DIM}aborted{C.R}")
+            return True
+        try:
+            memory_index.reconcile()
+        except Exception:
+            pass
+        rows = memory_index.list_all(type=type_filter)
+        n = 0
+        for r in rows:
+            memory_cards.supersede(r["id"])
+            n += 1
+        try:
+            memory_index.reconcile()
+        except Exception:
+            pass
+        print(f"  {C.GREEN}moved {n} {type_filter} card(s) to _superseded/{C.R}")
+        return True
+    if low == "consolidate":
+        try:
+            from . import memory_consolidate
+        except ImportError:
+            print(f"  {C.DIM}consolidate module not available{C.R}")
+            return True
+        print(f"  {C.DIM}running consolidation (LLM call)...{C.R}")
+        try:
+            summary = memory_consolidate.run_once()
+        except Exception as e:
+            print(f"  {C.RED}error: {type(e).__name__}: {e}{C.R}")
+            return True
+        print(
+            f"  {C.GREEN}consolidated:{C.R} {summary['written']} reflection "
+            f"card(s) from {summary['examined']} examined"
+        )
+        return True
+    if low == "prune":
+        from . import memory_prune
+        counts = memory_prune.run_once()
+        print(
+            f"  {C.GREEN}pruned:{C.R} {counts['removed']} dropped "
+            f"(active={counts['active_drops']}, "
+            f"low_conf={counts['low_conf_drops']}, "
+            f"superseded={counts['superseded_drops']})"
+        )
+        return True
+    if low.startswith("search "):
+        query = arg[7:].strip()
+        if not query:
+            print(f"  {C.RED}usage: /memory search <query>{C.R}")
+            return True
+        from . import memory_recall, memory_state
+        cards = memory_recall.top_k(query, top_k=10, budget_bytes=2000)
+        if cards:
+            print(f"\n  {C.BOLD}Cards ({len(cards)}):{C.R}")
+            for c in cards:
+                print(
+                    f"    {c['_line']}  "
+                    f"{C.DIM}(id={c['id']} scope={c['scope']}){C.R}"
+                )
+        hits = memory_state.search_memory(query, top_k=15)
+        if hits:
+            print(f"\n  {C.BOLD}Legacy .md matches ({len(hits)}):{C.R}")
+            for h in hits:
+                print(
+                    f"  {C.BOLD}{h['category']}.md{C.R} "
+                    f"{C.DIM}## {h['section']} (line {h['line_no']}){C.R}"
+                )
+                print(f"    {h['line']}")
+        if not cards and not hits:
+            print(f"  {C.DIM}no matches for {query!r}.{C.R}")
+        return True
+    if low == "audit":
+        audit_dir = config.MEMORY_DIR / "_audit"
+        if not audit_dir.is_dir():
+            print(f"  {C.DIM}(no autonomous memory diffs yet){C.R}")
+            return True
+        files = sorted(audit_dir.glob("*.md"), reverse=True)[:20]
+        if not files:
+            print(f"  {C.DIM}(no autonomous memory diffs yet){C.R}")
+            return True
+        print()
+        for p in files:
+            print(f"  {C.BOLD}{p.name}{C.R}")
+            for ln in p.read_text("utf-8").splitlines():
+                print(f"    {ln}")
+            print()
+        return True
+    # Original /memory <cat> / /memory all
     if arg:
         txt = memory.read(arg)
         if not txt:
@@ -996,25 +1170,46 @@ def maybe_propose_memory(req, output, cache_snap=None):
     if not config.MEMORY_PROPOSE_ENABLED:
         return
     try:
-        ops = memory.propose_diff(req, output)
+        result = memory.propose_diff(req, output)
     except Exception as e:
         print(f"  {C.DIM}memory propose skipped: {type(e).__name__}: {e}{C.R}")
         return
-    if not ops:
+    ops = result.get("ops") or []
+    cards = result.get("cards") or []
+    if not ops and not cards:
         return
-    print(f"\n  {C.BOLD}proposed memory updates{C.R}\n")
-    for line in memory.render_diff(ops).splitlines():
-        print(f"  {line}")
+    if ops:
+        print(f"\n  {C.BOLD}proposed memory updates{C.R}\n")
+        for line in memory.render_diff(ops).splitlines():
+            print(f"  {line}")
+    if cards:
+        print(f"\n  {C.BOLD}proposed memory cards ({len(cards)}){C.R}\n")
+        for c in cards:
+            tag = (
+                f" → {c.conflict_resolution}({c.conflict_with})"
+                if c.conflict_with else ""
+            )
+            print(
+                f"  [{c.type}:{c.subject}] conf={c.confidence:.1f} "
+                f"imp={c.importance:.1f} dur={c.durability:.1f} "
+                f"scope={c.scope}{tag}"
+            )
+            print(f"    {c.content[:120]}")
     try:
         ans = input("\napply? [y/N]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return
     if ans in ("y", "yes"):
-        memory.apply(ops)
-        # v1.17.0 — print actual touched categories (was hardcoded "user.md").
-        cats = sorted({(op.get("category") or "user") for op in ops})
-        label = ", ".join(f"{c}.md" for c in cats)
-        print(f"  {C.GREEN}applied to {label}{C.R}")
+        if ops:
+            memory.apply(ops)
+            # v1.17.0 — print actual touched categories (was hardcoded "user.md").
+            cats = sorted({(op.get("category") or "user") for op in ops})
+            label = ", ".join(f"{c}.md" for c in cats)
+            print(f"  {C.GREEN}applied to {label}{C.R}")
+        if cards:
+            written = memory.apply_cards(cards, gateway="cli")
+            if written:
+                print(f"  {C.GREEN}wrote {len(written)} card(s){C.R}")
         if cache_snap is not None:
             cache_snap.preamble = cache.snapshot().preamble
 

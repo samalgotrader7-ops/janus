@@ -74,6 +74,31 @@ MEMORY_PROPOSE_MODEL: str = os.getenv("JANUS_MEMORY_MODEL", "")
 MEMORY_PREPEND_BYTES: int = int(os.getenv("JANUS_MEMORY_BYTES", "4096"))
 MEMORY_PROPOSE_ENABLED: bool = os.getenv("JANUS_MEMORY_PROPOSE", "1") not in ("0", "false", "no")
 
+# v1.18: structured memory cards live alongside the legacy 5 .md files.
+# Each card is a single markdown file with typed frontmatter; SQLite at
+# index.db is a derived cache (rebuildable from cards/). P5 holds: cards
+# remain plain-text canonical.
+MEMORY_CARDS_DIR: Path = MEMORY_DIR / "cards"
+MEMORY_INDEX_DB: Path = MEMORY_DIR / "index.db"
+MEMORY_RECALLS_LOG: Path = MEMORY_DIR / "recalls.jsonl"
+MEMORY_RECALL_TOP_K: int = int(os.getenv("JANUS_MEMORY_RECALL_TOP_K", "5"))
+MEMORY_RECALL_BUDGET_BYTES: int = int(
+    os.getenv("JANUS_MEMORY_RECALL_BUDGET", "900")
+)
+# Auto-pruning thresholds (Phase 8). Pure compute; no LLM call.
+MEMORY_AUTO_PRUNE: bool = os.getenv("JANUS_MEMORY_AUTO_PRUNE", "1") not in ("0", "false", "no")
+MEMORY_PRUNE_ACTIVE_DAYS: int = int(os.getenv("JANUS_MEMORY_PRUNE_ACTIVE_DAYS", "21"))
+MEMORY_PRUNE_LOWCONF_DAYS: int = int(os.getenv("JANUS_MEMORY_PRUNE_LOWCONF_DAYS", "120"))
+MEMORY_PRUNE_LOWCONF_THRESHOLD: float = float(
+    os.getenv("JANUS_MEMORY_PRUNE_LOWCONF", "0.4")
+)
+MEMORY_PRUNE_SUPERSEDED_DAYS: int = int(
+    os.getenv("JANUS_MEMORY_PRUNE_SUPERSEDED_DAYS", "30")
+)
+MEMORY_PROTECTED_DURABILITY: float = float(
+    os.getenv("JANUS_MEMORY_PROTECTED_DURABILITY", "0.7")
+)
+
 # v1.3 — multi-category memory. Each category is a separate .md under
 # MEMORY_DIR; the loader concatenates them in this order into the system
 # prompt (earlier categories weigh more — soul first frames the agent's

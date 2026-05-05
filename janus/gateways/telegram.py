@@ -910,8 +910,12 @@ async def _run_chat_turn(
 
     # Memory diff proposal — emit indicator if any ops, then ask in console.
     # (Telegram-side review with inline keyboard is L3; for now, log only.)
+    # v1.18: also auto-applies typed cards (scoped to telegram:<chat_id> by
+    # default per session_context.current_scope()).
     try:
-        ops = memory.propose_diff(req, output)
+        result = memory.propose_diff(req, output)
+        ops = result.get("ops") or []
+        cards = result.get("cards") or []
         if ops:
             emitter.memory_update(
                 len(ops),
@@ -920,6 +924,8 @@ async def _run_chat_turn(
                     for op in ops[:3]
                 ),
             )
+        if cards:
+            memory.apply_cards(cards, gateway="telegram")
     except Exception:
         pass
 
