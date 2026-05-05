@@ -29,6 +29,60 @@ from . import config, llm, hooks, injection
 from .tools import Registry
 
 
+# v1.17.0 — chatbot-vs-agent guard.
+# Smaller models (gpt-oss, qwen, llama-3 8B-class) frequently emit
+# "I'll create the file..." text WITHOUT calling the tool, then return
+# control to the user. Or they emit empty content. The pre-v1.17 chat
+# loop accepted both as final answers — the user sees a hang or a
+# broken promise, and the multi-step task stalls mid-way (Sam's KV
+# store benchmark: agent did stage 1+2, "self-audited" itself into a
+# regression on stage 3, then stopped without writing WEAKNESS.md or
+# SUMMARY.md and never recovered).
+#
+# Fix: when assistant returns no tool_calls, classify the response.
+# Empty or stall → inject a system reminder and retry the SAME step.
+# Bounded to ONE nudge per chat() call so a model that keeps stalling
+# doesn't burn the entire MAX_STEPS budget on retries.
+
+_STALL_PHRASES = (
+    "i'll ", "i will ", "let me ", "i'm going to ", "i am going to ",
+    "i'd be happy to", "should i ", "would you like me to",
+    "shall i ", "do you want me to",
+)
+
+
+def _looks_like_stall(text: str) -> bool:
+    """Detect future-tense action stalls — model promises but didn't act.
+
+    Triggers on SHORT responses (≤ 400 chars) containing future-tense
+    action phrases. Long responses are usually genuine explanations,
+    not stalls. Question marks at the end mean the model is asking
+    something — accept those as final (the user can answer).
+    """
+    text = text.strip()
+    if not text or len(text) > 400:
+        return False
+    if text.rstrip().endswith("?"):
+        return False
+    lower = text.lower()
+    return any(p in lower for p in _STALL_PHRASES)
+
+
+_NUDGE_EMPTY = (
+    "[system] Your last response was empty. Either call a tool to do the "
+    "work the user asked for, or give a clear text answer. Do not return "
+    "empty content."
+)
+
+_NUDGE_STALL = (
+    "[system] You said you would do something but didn't call any tool. "
+    "Tools are how you actually do things in this framework — call the "
+    "appropriate tool NOW (fs_write to create files, fs_edit to modify "
+    "them, shell to run commands, etc.) instead of just describing the "
+    "action. The user is in an auto-execution mode; do not ask permission."
+)
+
+
 def execute(
     original_request: str,
     chosen_label: str,
@@ -291,7 +345,12 @@ the work could be done.
 7. **When you're uncertain whether to act or ask**, default to ACT. The \
    permission mode (default / acceptEdits / plan / bypassPermissions / auto) \
    gates dangerous tools — you do not need to ask the user too. If a tool \
-   is denied, you'll see the refusal as feedback and can adapt.
+   is denied, you'll see the refusal as feedback and can adapt. \
+   \
+   In `auto` and `bypassPermissions` modes specifically, the user has \
+   EXPLICITLY opted into hands-off execution. NEVER ask "should I?" / \
+   "shall I?" / "would you like me to?" / "do you want me to?". Those \
+   questions belong in `default` mode. In auto/bypass: just do the work.
 
 8. **When a tool fails, ADAPT FAST.** Try at most ONE alternative approach. \
    If that also fails, tell the user the failure in ONE sentence \
@@ -345,6 +404,23 @@ the work could be done.
     to telegram:123456789. Daemon NOT running — start with \
     `janus daemon`. Use agent_run_now to test now."
 
+# MULTI-STEP TASKS — DON'T STOP MID-TASK (v1.17.0)
+
+When the user asks for work with multiple stages (build → test → audit → \
+report; research → analyze → summarize → write file; etc.): COMPLETE ALL \
+STAGES IN ONE TURN unless genuinely blocked. Do NOT stop after stage 1 to \
+"wait for the user to confirm" — the user already asked for the whole task. \
+\
+After each stage, VERIFY: run the tests you wrote, read back the file you \
+created, check that the expected output appeared. If verification fails, \
+fix it and re-verify. Only return control to the user when every stage is \
+genuinely done OR you are blocked on something only the user can resolve \
+(missing credential, ambiguous requirement, etc.). \
+\
+If you find yourself typing "I'll continue with stage N" or "next, I'll \
+do X" or "now I will Y" — STOP. That's a stall. Call the next tool instead. \
+Future-tense narration without a tool call is the chatbot failure mode.
+
 # WHEN CHAT IS APPROPRIATE
 
 The exceptions to "always act":
@@ -394,6 +470,10 @@ When you're working on code (the common case), follow these:
    CLAUDE.md / JANUS.md / AGENTS.md, those rules apply. Honor them \
    above the generic conventions in this prompt — they're the \
    project's own conventions.
+
+17. **After editing code that has tests, run the tests.** Don't \
+   declare an edit done until the test suite passes. If your edit \
+   broke a test, fix the test or the edit — don't just return.
 
 # Janus configuration surface (for context, not for narration)
 
@@ -557,6 +637,10 @@ def chat(
     # working. Real llm.chat / chat_stream always accept it.
     model_kw = {"model": model} if model is not None else {}
 
+    # v1.17.0 — chatbot guard: at most ONE nudge per chat() call.
+    # See module-level comment on _looks_like_stall.
+    nudge_count = 0
+
     for step in range(config.MAX_STEPS):
         # v1.4: cooperative cancellation between steps.
         if cancel_event is not None and cancel_event.is_set():
@@ -597,6 +681,50 @@ def chat(
 
         if not tool_calls:
             text = msg.get("content") or ""
+
+            # v1.17.0 — empty/stall nudge. See module comment.
+            # Only fires when:
+            #   - we haven't already nudged this turn (bounded retry)
+            #   - AND there are tools available (no point nudging if the
+            #     model literally has no actions to take — e.g. NO_TOOLS
+            #     mode, or a chat-only call)
+            if nudge_count < 1 and tools.schemas():
+                stripped = text.strip()
+                nudge_msg = ""
+                nudge_reason = ""
+                if not stripped:
+                    nudge_msg = _NUDGE_EMPTY
+                    nudge_reason = "empty"
+                elif _looks_like_stall(stripped):
+                    nudge_msg = _NUDGE_STALL
+                    nudge_reason = "stall"
+                if nudge_msg:
+                    # Drop the empty/stall assistant turn from the
+                    # visible history so the next iteration sees a clean
+                    # conversation followed by the nudge. The trace
+                    # still records what happened for debugging.
+                    messages.pop()
+                    messages.append({"role": "system", "content": nudge_msg})
+                    nudge_count += 1
+                    trace.append({
+                        "step": step, "type": "nudge",
+                        "reason": nudge_reason,
+                        "preview": stripped[:120],
+                    })
+                    if on_step:
+                        on_step(trace[-1])
+                    if _trajectory_writer is not None:
+                        try:
+                            from . import trajectory as _traj
+                            _traj.record({
+                                "type": "nudge",
+                                "reason": nudge_reason,
+                                "preview": stripped[:120],
+                            })
+                        except Exception:
+                            pass
+                    continue
+
             trace.append({"step": step, "type": "final", "text": text})
             if on_step:
                 on_step(trace[-1])

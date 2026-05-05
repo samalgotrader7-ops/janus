@@ -1207,7 +1207,14 @@ def _maybe_propose_memory(console, req: str, output: str,
         return
     if ans in ("y", "yes"):
         memory.apply(ops)
-        console.print("  [green]applied to user.md[/]")
+        # v1.17.0 — print the actual categories the ops touched, not a
+        # hardcoded "user.md". Pre-v1.17 this lied: if the model proposed
+        # a project.md / soul.md / preferences.md update, the UI claimed
+        # it landed in user.md even though memory.apply correctly routed
+        # it. The DATA was right; the DISPLAY was wrong.
+        cats = sorted({(op.get("category") or "user") for op in ops})
+        label = ", ".join(f"{c}.md" for c in cats)
+        console.print(f"  [green]applied to {label}[/]")
         if cache_snap is not None:
             cache_snap.preamble = cache.snapshot().preamble
 
@@ -1405,11 +1412,17 @@ def main() -> None:
             record["skill"] = attached_skill.name
             record["skill_state"] = attached_skill.state
         elif matches:
-            names = ", ".join(s.name for s in matches[:3])
-            console.print(
-                f"[dim]matching skills (not auto):[/] {names} "
-                f"[dim](promote one to attach automatically)[/]"
-            )
+            # v1.17.0 — only surface skill matches when the user message
+            # is substantive AND the match set differs from last turn.
+            # Pre-v1.17 this printed on EVERY turn (including "yes" / "ok"
+            # / one-word answers) which was pure visual noise.
+            names = tuple(s.name for s in matches[:3])
+            if len(req.strip()) >= 30 and state.get("_last_match_set") != names:
+                state["_last_match_set"] = names
+                console.print(
+                    f"[dim]matching skills (not auto):[/] {', '.join(names)} "
+                    f"[dim](promote one to attach automatically)[/]"
+                )
 
         caps = attached_skill.capabilities if attached_skill else CapabilitySet()
         tools = default_registry(capabilities=caps)

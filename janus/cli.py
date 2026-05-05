@@ -1011,7 +1011,10 @@ def maybe_propose_memory(req, output, cache_snap=None):
         return
     if ans in ("y", "yes"):
         memory.apply(ops)
-        print(f"  {C.GREEN}applied to user.md{C.R}")
+        # v1.17.0 — print actual touched categories (was hardcoded "user.md").
+        cats = sorted({(op.get("category") or "user") for op in ops})
+        label = ", ".join(f"{c}.md" for c in cats)
+        print(f"  {C.GREEN}applied to {label}{C.R}")
         if cache_snap is not None:
             cache_snap.preamble = cache.snapshot().preamble
 
@@ -1140,11 +1143,14 @@ def main():
             record["skill"] = attached_skill.name
             record["skill_state"] = attached_skill.state
         elif matches:
-            names = ", ".join(s.name for s in matches[:3])
-            print(
-                f"{C.DIM}matching skills (not auto):{C.R} {names} "
-                f"{C.DIM}(promote one to attach automatically){C.R}"
-            )
+            # v1.17.0 — substantive messages + dedupe (see cli_rich.py).
+            names = tuple(s.name for s in matches[:3])
+            if len(req.strip()) >= 30 and _RUN_STATE.get("_last_match_set") != names:
+                _RUN_STATE["_last_match_set"] = names
+                print(
+                    f"{C.DIM}matching skills (not auto):{C.R} {', '.join(names)} "
+                    f"{C.DIM}(promote one to attach automatically){C.R}"
+                )
 
         skill_caps = attached_skill.capabilities if attached_skill else CapabilitySet()
         tools = default_registry(capabilities=skill_caps)
