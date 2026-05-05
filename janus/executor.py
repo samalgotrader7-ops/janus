@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from typing import Callable
 
-from . import config, llm, hooks, injection
+from . import config, llm, hooks, injection, tool_call_recovery
 from .tools import Registry
 
 
@@ -731,6 +731,38 @@ def chat(
 
         messages.append(msg)
         tool_calls = msg.get("tool_calls") or []
+
+        # v1.17.2 — recover tool calls leaked into content.
+        # Some endpoints (vLLM without --enable-auto-tool-choice, gpt-oss
+        # via misconfigured proxies, etc.) emit the model's tool call as
+        # raw JSON in the content field instead of the proper tool_calls
+        # field. The user sees the JSON dumped to chat. Detect that
+        # pattern and synthesize a real tool_call so the loop can
+        # actually execute the action the model intended.
+        if not tool_calls and tools.schemas():
+            recovered = tool_call_recovery.recover(
+                msg.get("content") or "", tools.schemas(),
+            )
+            if recovered:
+                tool_calls = [recovered]
+                msg["tool_calls"] = tool_calls
+                # Drop the JSON-blob content so the conversation history
+                # is clean — what the model "meant" was the tool call,
+                # not the JSON-as-text.
+                msg["content"] = ""
+                messages[-1] = msg
+                trace.append({
+                    "step": step,
+                    "type": "recovered_tool_call",
+                    "tool": recovered["function"]["name"],
+                    "warning": (
+                        "tool call leaked into content field; the "
+                        "endpoint is missing --enable-auto-tool-choice "
+                        "or has the wrong tool-call parser"
+                    ),
+                })
+                if on_step:
+                    on_step(trace[-1])
 
         if not tool_calls:
             text = msg.get("content") or ""

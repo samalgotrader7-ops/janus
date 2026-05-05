@@ -1588,6 +1588,30 @@ def _render_step_factory(console, state=None):
             head = preview.splitlines()[0][:80] if preview else ""
             if head:
                 console.print(f"[dim]    {branding.TOOL_OK} {head}[/]")
+        elif step["type"] == "recovered_tool_call":
+            # v1.17.2 — model emitted a tool call as JSON in content
+            # rather than a proper tool_calls field. Janus recovered it
+            # so the loop could continue, but the user should know the
+            # endpoint is misconfigured (likely missing
+            # --enable-auto-tool-choice on the vLLM side).
+            _flush_stream(console, state)
+            console.print(
+                f"[yellow]⚠ recovered tool call from content:[/] "
+                f"[bold]{step.get('tool', '?')}[/] "
+                f"[dim](endpoint missing --enable-auto-tool-choice?)[/]"
+            )
+        elif step["type"] == "nudge":
+            # v1.17.0 / v1.17.1 — assistant returned empty/stall content;
+            # injected a system reminder and retrying. Surfacing this
+            # tells the user "yes, the model stalled — Janus is pushing
+            # it to continue" rather than leaving a silent gap.
+            _flush_stream(console, state)
+            reason = step.get("reason", "?")
+            preview = step.get("preview", "")
+            console.print(
+                f"[magenta dim]↻ nudge ({reason}) — "
+                f"{('model stalled: ' + preview[:60]) if preview else 'retrying'}[/]"
+            )
         elif step["type"] == "stream_chunk":
             text = step.get("text", "")
             if text:
