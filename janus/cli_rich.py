@@ -65,7 +65,8 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/why",          "re-interpret your last message and show 2-3 candidate readings", "built-in"),
     SlashCommand("/workspace",    "show or change the active workspace directory",       "built-in"),
     SlashCommand("/analyze",      "scan the workspace for tools, skills, project hints", "built-in"),
-    SlashCommand("/memory",       "memory: /memory [<cat>|search <q>|stats|show <id>|pause|resume|reindex|clear --type=<t>|prune|consolidate|audit]", "built-in"),
+    SlashCommand("/memory",       "memory: /memory [<cat>|search <q>|stats|show <id>|pause|resume|reindex|clear --type=<t>|prune|consolidate|audit|about-me]", "built-in"),
+    SlashCommand("/interview",    "fill memory cards Q&A-style: /interview [<category>|daily [N]|pause]", "built-in"),
     SlashCommand("/search",       "search prior interactions in the log index",          "built-in"),
     SlashCommand("/skills",       "list/filter skills, or install-bundled to copy the starter catalog", "built-in"),
     SlashCommand("/promote",      "promote a quarantined skill to a trusted state",      "built-in"),
@@ -250,6 +251,211 @@ def _show_interpretations(console, interps) -> None:
             border_style="cyan",
             padding=(0, 1),
         ))
+
+
+def _cmd_memory_about_me(console) -> bool:
+    """`/memory about-me` — Janus reads back its current understanding.
+
+    v1.19.0 Phase 6. Renders cards grouped by category + legacy .md
+    snippets so the user can verify accuracy. Corrections flow through
+    the normal propose_diff path on the next chat turn.
+    """
+    from . import interviews, memory, memory_cards, memory_index
+    from pathlib import Path
+    try:
+        memory_index.reconcile()
+    except Exception:
+        pass
+
+    rows = memory_index.list_all()
+    by_type: dict[str, list[dict]] = {}
+    for r in rows:
+        by_type.setdefault(r["type"], []).append(r)
+
+    console.print("[bold]Here's what I know about you:[/]")
+
+    any_cards = False
+    for cat in interviews.SUPPORTED_CATEGORIES:
+        cat_rows = by_type.get(cat, [])
+        if not cat_rows:
+            console.print(f"\n[bold]{cat}[/] [dim italic](no cards yet)[/]")
+            continue
+        any_cards = True
+        console.print(f"\n[bold]{cat}[/]")
+        for r in cat_rows[:10]:
+            try:
+                card = memory_cards.read_card(Path(r["path"]))
+                content = card.content[:200].replace("\n", " ")
+                console.print(f"  • [cyan]{r['subject']}:[/] {content}")
+            except Exception:
+                continue
+
+    # Legacy categories — show only non-empty ones, briefly.
+    legacy_shown = False
+    for cat in ("soul", "user", "project", "preferences", "relationships"):
+        body = memory.read(cat).strip() if hasattr(memory, "read") else ""
+        if not body:
+            continue
+        if not legacy_shown:
+            console.print("\n[dim]Legacy .md notes (curated by you):[/]")
+            legacy_shown = True
+        console.print(f"\n  [bold dim]{cat}.md:[/]")
+        for line in body.splitlines()[:6]:
+            console.print(f"    [dim]{line}[/]")
+
+    if not any_cards and not legacy_shown:
+        console.print(
+            "\n[dim](nothing yet — try `/interview` to fill in your profile)[/]"
+        )
+        return True
+
+    console.print(
+        "\n[dim italic]anything wrong? reply with corrections — "
+        "I'll update memory.[/]"
+    )
+    return True
+
+
+def _cmd_interview_rich(console, arg: str) -> bool:
+    """`/interview [<category>|daily]` — populate memory cards Q&A-style.
+
+    v1.19.0 Phases 3+4. No arg → walk all 8 categories. With a category
+    name → walk just that one. With ``daily`` → enable drip mode (Phase 4).
+    """
+    from . import interviews, interview_runner
+    arg = (arg or "").strip().lower()
+
+    # Auto-install bundled library if missing (Phase 8 will move this
+    # to cache.snapshot()).
+    interviews.maybe_install_bundled()
+
+    # Drip subcommand handled in Phase 4 wire-in.
+    if arg == "daily":
+        return _cmd_interview_drip_rich(console, "")
+    if arg.startswith("daily "):
+        return _cmd_interview_drip_rich(console, arg[6:])
+    if arg in ("pause", "stop"):
+        state = interviews.load_state("cli", "default")
+        state.mode = "idle"
+        interviews.save_state(state)
+        console.print("[yellow]interview paused[/]")
+        return True
+
+    category_filter: str | None = None
+    if arg and arg in interviews.SUPPORTED_CATEGORIES:
+        category_filter = arg
+    elif arg:
+        console.print(
+            f"[red]usage:[/] /interview [<category>|daily|pause]\n"
+            f"  category: {', '.join(interviews.SUPPORTED_CATEGORIES)}"
+        )
+        return True
+
+    state = interviews.load_state("cli", "default")
+    library = interviews.load_all()
+    if not library:
+        console.print(
+            "[yellow]interview library is empty[/] — "
+            "rerun `/interview` after restart to auto-install bundled questions."
+        )
+        return True
+
+    # Print header
+    if category_filter:
+        cat = library.get(category_filter)
+        if cat is None:
+            console.print(
+                f"[red]category {category_filter!r} not in library[/]"
+            )
+            return True
+        console.print(
+            f"\n[bold]{category_filter}[/] — {cat.description}"
+        )
+    else:
+        console.print(
+            "\n[bold]Memory interview[/] — let's fill in your profile.\n"
+            "[dim]Type your answer, 'skip' to skip a question, "
+            "'later' to pause.[/]"
+        )
+
+    def _ask(question, fqid: str) -> str:
+        console.print(f"\n[bold cyan]?[/] {question.question}")
+        if question.placeholder:
+            console.print(f"  [dim]e.g. {question.placeholder}[/]")
+        if question.mode == "choices" and question.choices:
+            for i, c in enumerate(question.choices, 1):
+                console.print(f"  [dim]{i}.[/] {c}")
+            console.print(
+                "  [dim](number, free text, 'skip', or 'later')[/]"
+            )
+        else:
+            console.print("  [dim]('skip' or 'later' to skip / pause)[/]")
+        try:
+            raw = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return interview_runner.LATER_TOKEN
+        low = raw.lower()
+        if low in ("skip", "/skip"):
+            return interview_runner.SKIP_TOKEN
+        if low in ("later", "/later", "/cancel"):
+            return interview_runner.LATER_TOKEN
+        if question.mode == "choices" and raw.isdigit():
+            idx = int(raw) - 1
+            if 0 <= idx < len(question.choices):
+                return question.choices[idx]
+        return raw
+
+    result = interview_runner.run_one_shot(
+        state, library, _ask,
+        category_filter=category_filter,
+        scope="global",
+    )
+
+    # Summary
+    console.print()
+    console.print(
+        f"[green]✓ {result.answered} answered, "
+        f"{result.skipped} skipped, "
+        f"{len(result.cards_written)} cards written[/]"
+    )
+    if result.cancelled:
+        console.print("[dim](paused — resume with /interview)[/]")
+
+    # Profile completion meter
+    console.print("\n[bold]Profile completion[/]")
+    for line in interview_runner.render_completion_meter(
+        result.completion_pct,
+    ):
+        console.print(line)
+    return True
+
+
+def _cmd_interview_drip_rich(console, arg: str) -> bool:
+    """`/interview daily [N]` — turn on drip mode for this gateway.
+
+    v1.19.0 Phase 4. Sets state.mode='drip' so each subsequent chat
+    turn prepends ONE question via the gateway hook.
+    """
+    from . import interviews
+    interviews.maybe_install_bundled()
+    state = interviews.load_state("cli", "default")
+    try:
+        per_day = int(arg.strip()) if arg.strip() else interviews.DRIP_DEFAULT_PER_DAY
+    except ValueError:
+        per_day = interviews.DRIP_DEFAULT_PER_DAY
+    per_day = max(1, min(10, per_day))
+    state.mode = "drip"
+    if not state.started_at:
+        state.started_at = interviews._now_iso()
+    interviews.reset_drip_quota(state, per_day=per_day)
+    interviews.save_state(state)
+    console.print(
+        f"[green]drip mode on[/] — Janus will ask up to {per_day} "
+        f"question(s) per day on this surface. "
+        f"Auto-pauses at {int(interviews.DRIP_AUTO_PAUSE_PCT*100)}% "
+        f"profile completion. Resume manually with `/interview daily`."
+    )
+    return True
 
 
 def _cmd_skills_rich(console, arg: str) -> bool:
@@ -471,7 +677,26 @@ def _dispatch(console, line: str, state: dict) -> bool:
             console.print(
                 f"  extraction: {'PAUSED' if paused else 'enabled'}"
             )
+            # v1.19.0 Phase 6 — interview profile completion meter.
+            try:
+                from . import interviews, interview_runner
+                state = interviews.load_state("cli", "default")
+                library = interviews.load_all()
+                if library:
+                    pcts = interviews.compute_completion(state, library)
+                    overall = interviews.overall_completion(state, library)
+                    console.print(
+                        f"\n[bold]Profile completion[/] "
+                        f"({int(overall*100)}% overall)"
+                    )
+                    for line in interview_runner.render_completion_meter(pcts):
+                        console.print(line)
+            except Exception:
+                pass
             return True
+        # /memory about-me — Janus reads back current understanding.
+        if target.lower() in ("about-me", "aboutme", "about me"):
+            return _cmd_memory_about_me(console)
         # /memory show <id> — full card view
         if target.lower().startswith("show "):
             card_id = target[5:].strip()
@@ -678,6 +903,8 @@ def _dispatch(console, line: str, state: dict) -> bool:
                       (h.output.splitlines() or [""])[0][:60])
         console.print(t)
         return True
+    if cmd == "/interview":
+        return _cmd_interview_rich(console, arg)
     if cmd == "/skills":
         # v1.12.0: /skills validate runs the schema check across all
         # skill files. Other /skills <args> shapes go to the existing
@@ -1622,6 +1849,21 @@ def main() -> None:
         tools.add_tool(_Clarify(callback=_make_console_clarify_cb(console)))
         approver = make_protected(base_approver, caps, mode_state.current)
 
+        # v1.19.0 Phase 4: drip-mode pre-turn — if a drip question was
+        # asked last turn and is still pending, treat user input as the
+        # answer (write a high-confidence card). The user's input ALSO
+        # goes to the executor as a normal chat turn, so they can both
+        # answer and chat in one message.
+        try:
+            from . import interviews as _iv
+            drip_handled, drip_ack = _iv.consume_pending_drip_answer(
+                "cli", "default", req,
+            )
+            if drip_handled and drip_ack:
+                console.print(f"[green dim]→ {drip_ack}[/]")
+        except Exception:
+            pass
+
         # v1.5.1: emit a thinking indicator BEFORE the first model call
         # so the user sees Janus is alive during the silent gather phase
         # (multiple fs_read / web_fetch / etc. before the first text
@@ -1654,6 +1896,36 @@ def main() -> None:
             record["error"] = f"execute: {e}"
             logger.write(record)
             continue
+
+        # v1.19.0 Phase 4: drip-mode post-turn — after the assistant
+        # replies, ask the next drip question (one per turn while quota
+        # remains). Best-effort; never break the chat loop.
+        try:
+            from . import interviews as _iv
+            drip_q = _iv.get_drip_question("cli", "default")
+            if drip_q is not None:
+                question_text, _fqid = drip_q
+                console.print(
+                    f"\n[cyan]💬 quick question:[/] {question_text}\n"
+                    f"[dim](answer normally, 'skip' to skip, "
+                    f"'stop drip' to pause)[/]"
+                )
+        except Exception:
+            pass
+
+        # v1.19.0 Phase 7: inferred-suggestion offer. propose_diff (which
+        # ran inside executor.chat) may have queued ONE offer based on
+        # category hints in the conversation. Show it once, pop it; the
+        # model handles "yes"/"no" interpretation in the next turn.
+        try:
+            from . import interview_inferred as _inf
+            offer = _inf.pop_pending("cli", "default")
+            if offer is not None:
+                console.print(
+                    f"\n[yellow]💡[/] {_inf.render_offer(offer)}"
+                )
+        except Exception:
+            pass
 
         # v1.15.0 — detect ExitPlanMode approval. The trace records
         # tool calls as type='tool_call' with a 'result_preview' field

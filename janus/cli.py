@@ -263,6 +263,8 @@ def handle_command(line):
         analyze(); return True
     if cmd == "/memory":
         return _cmd_memory(arg)
+    if cmd == "/interview":
+        return _cmd_interview(arg)
     if cmd == "/search":
         return _cmd_search(arg)
     if cmd == "/skills":
@@ -417,6 +419,168 @@ def _cmd_workspace(arg):
     return True
 
 
+def _cmd_memory_about_me():
+    """`/memory about-me` — read back current understanding (basic CLI)."""
+    from . import interviews, memory_cards, memory_index
+    from pathlib import Path
+    try:
+        memory_index.reconcile()
+    except Exception:
+        pass
+    rows = memory_index.list_all()
+    by_type: dict[str, list[dict]] = {}
+    for r in rows:
+        by_type.setdefault(r["type"], []).append(r)
+
+    print(f"\n  {C.BOLD}Here's what I know about you:{C.R}")
+    any_cards = False
+    for cat in interviews.SUPPORTED_CATEGORIES:
+        cat_rows = by_type.get(cat, [])
+        if not cat_rows:
+            print(f"\n  {C.BOLD}{cat}{C.R} {C.DIM}(no cards yet){C.R}")
+            continue
+        any_cards = True
+        print(f"\n  {C.BOLD}{cat}{C.R}")
+        for r in cat_rows[:10]:
+            try:
+                card = memory_cards.read_card(Path(r["path"]))
+                content = card.content[:200].replace("\n", " ")
+                print(f"    • {C.CYAN}{r['subject']}:{C.R} {content}")
+            except Exception:
+                continue
+
+    legacy_shown = False
+    for cat in ("soul", "user", "project", "preferences", "relationships"):
+        body = memory.read(cat).strip() if hasattr(memory, "read") else ""
+        if not body:
+            continue
+        if not legacy_shown:
+            print(f"\n  {C.DIM}Legacy .md notes (curated by you):{C.R}")
+            legacy_shown = True
+        print(f"\n    {C.BOLD}{C.DIM}{cat}.md:{C.R}")
+        for line in body.splitlines()[:6]:
+            print(f"      {C.DIM}{line}{C.R}")
+
+    if not any_cards and not legacy_shown:
+        print(f"\n  {C.DIM}(nothing yet — try /interview to fill in your profile){C.R}")
+        return True
+    print(
+        f"\n  {C.DIM}anything wrong? reply with corrections — "
+        f"I'll update memory.{C.R}"
+    )
+    return True
+
+
+def _cmd_interview(arg=""):
+    """`/interview [<category>|daily [N]|pause]` — populate memory Q&A-style.
+
+    v1.19.0 Phases 3+4. Basic ANSI variant of cli_rich's _cmd_interview_rich.
+    """
+    from . import interviews, interview_runner
+    arg = (arg or "").strip().lower()
+    interviews.maybe_install_bundled()
+
+    if arg == "daily":
+        return _cmd_interview_drip("")
+    if arg.startswith("daily "):
+        return _cmd_interview_drip(arg[6:])
+    if arg in ("pause", "stop"):
+        state = interviews.load_state("cli", "default")
+        state.mode = "idle"
+        interviews.save_state(state)
+        print(f"  {C.YELLOW}interview paused{C.R}")
+        return True
+
+    category_filter: str | None = None
+    if arg and arg in interviews.SUPPORTED_CATEGORIES:
+        category_filter = arg
+    elif arg:
+        print(
+            f"  {C.RED}usage:{C.R} /interview [<category>|daily|pause]\n"
+            f"  category: {', '.join(interviews.SUPPORTED_CATEGORIES)}"
+        )
+        return True
+
+    state = interviews.load_state("cli", "default")
+    library = interviews.load_all()
+    if not library:
+        print(f"  {C.YELLOW}interview library empty — restart janus to install bundled.{C.R}")
+        return True
+
+    if category_filter:
+        cat = library.get(category_filter)
+        if cat is None:
+            print(f"  {C.RED}category {category_filter!r} not in library{C.R}")
+            return True
+        print(f"\n  {C.BOLD}{category_filter}{C.R} — {cat.description}")
+    else:
+        print(f"\n  {C.BOLD}Memory interview{C.R} — let's fill in your profile.")
+        print(f"  {C.DIM}Type your answer, 'skip' to skip, 'later' to pause.{C.R}")
+
+    def _ask(question, fqid: str) -> str:
+        print(f"\n  {C.BOLD}? {question.question}{C.R}")
+        if question.placeholder:
+            print(f"    {C.DIM}e.g. {question.placeholder}{C.R}")
+        if question.mode == "choices" and question.choices:
+            for i, c in enumerate(question.choices, 1):
+                print(f"    {C.DIM}{i}.{C.R} {c}")
+            print(f"    {C.DIM}(number, free text, 'skip', or 'later'){C.R}")
+        else:
+            print(f"    {C.DIM}('skip' or 'later' to skip / pause){C.R}")
+        try:
+            raw = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return interview_runner.LATER_TOKEN
+        low = raw.lower()
+        if low in ("skip", "/skip"):
+            return interview_runner.SKIP_TOKEN
+        if low in ("later", "/later", "/cancel"):
+            return interview_runner.LATER_TOKEN
+        if question.mode == "choices" and raw.isdigit():
+            idx = int(raw) - 1
+            if 0 <= idx < len(question.choices):
+                return question.choices[idx]
+        return raw
+
+    result = interview_runner.run_one_shot(
+        state, library, _ask,
+        category_filter=category_filter,
+        scope="global",
+    )
+    print()
+    print(
+        f"  {C.GREEN}{result.answered} answered, {result.skipped} skipped, "
+        f"{len(result.cards_written)} cards written{C.R}"
+    )
+    if result.cancelled:
+        print(f"  {C.DIM}(paused — resume with /interview){C.R}")
+    print(f"\n  {C.BOLD}Profile completion{C.R}")
+    for line in interview_runner.render_completion_meter(result.completion_pct):
+        print(line)
+    return True
+
+
+def _cmd_interview_drip(arg=""):
+    from . import interviews
+    interviews.maybe_install_bundled()
+    state = interviews.load_state("cli", "default")
+    try:
+        per_day = int(arg.strip()) if arg.strip() else interviews.DRIP_DEFAULT_PER_DAY
+    except ValueError:
+        per_day = interviews.DRIP_DEFAULT_PER_DAY
+    per_day = max(1, min(10, per_day))
+    state.mode = "drip"
+    if not state.started_at:
+        state.started_at = interviews._now_iso()
+    interviews.reset_drip_quota(state, per_day=per_day)
+    interviews.save_state(state)
+    print(
+        f"  {C.GREEN}drip mode on{C.R} — up to {per_day} question(s) per day. "
+        f"Auto-pauses at {int(interviews.DRIP_AUTO_PAUSE_PCT*100)}% completion."
+    )
+    return True
+
+
 def _cmd_memory(arg=""):
     """`/memory` — show all categories. `/memory <cat>` — show one category.
 
@@ -426,6 +590,9 @@ def _cmd_memory(arg=""):
     """
     arg = (arg or "").strip()
     low = arg.lower()
+    # v1.19 — about-me
+    if low in ("about-me", "aboutme", "about me"):
+        return _cmd_memory_about_me()
     # v1.18 subcommands
     if low == "stats":
         from . import memory_index
@@ -455,6 +622,22 @@ def _cmd_memory(arg=""):
             f"    extraction: "
             f"{'PAUSED' if paused else 'enabled'}"
         )
+        # v1.19.0 Phase 6 — interview profile completion meter.
+        try:
+            from . import interviews, interview_runner
+            state = interviews.load_state("cli", "default")
+            library = interviews.load_all()
+            if library:
+                pcts = interviews.compute_completion(state, library)
+                overall = interviews.overall_completion(state, library)
+                print(
+                    f"\n    {C.BOLD}Profile completion{C.R} "
+                    f"({int(overall*100)}% overall)"
+                )
+                for line in interview_runner.render_completion_meter(pcts):
+                    print(line)
+        except Exception:
+            pass
         return True
     if low.startswith("show "):
         from . import memory_cards
@@ -1351,6 +1534,17 @@ def main():
         tools = default_registry(capabilities=skill_caps)
         approver = make_protected(base_approver, skill_caps, mode_state.current)
 
+        # v1.19.0 Phase 4: drip pre-turn — answer pending interview Q.
+        try:
+            from . import interviews as _iv
+            drip_handled, drip_ack = _iv.consume_pending_drip_answer(
+                "cli", "default", req,
+            )
+            if drip_handled and drip_ack:
+                print(f"  {C.GREEN}{C.DIM}→ {drip_ack}{C.R}")
+        except Exception:
+            pass
+
         # v1.5.1: thinking indicator before the first model call so the
         # user sees Janus is alive during long tool-call gathering.
         print(f"  {C.MAGENTA}{C.DIM}⚡ thinking…{C.R}")
@@ -1378,6 +1572,29 @@ def main():
             print(f"{C.RED}executor failed:{C.R} {e}")
             record["error"] = f"execute: {e}"
             logger.write(record); continue
+
+        # v1.19.0 Phase 4: drip post-turn — ask next question if quota left.
+        try:
+            from . import interviews as _iv
+            drip_q = _iv.get_drip_question("cli", "default")
+            if drip_q is not None:
+                question_text, _fqid = drip_q
+                print(
+                    f"\n  {C.CYAN}💬 quick question:{C.R} {question_text}\n"
+                    f"  {C.DIM}(answer normally, 'skip' to skip, "
+                    f"'stop drip' to pause){C.R}"
+                )
+        except Exception:
+            pass
+
+        # v1.19.0 Phase 7: inferred-suggestion offer.
+        try:
+            from . import interview_inferred as _inf
+            offer = _inf.pop_pending("cli", "default")
+            if offer is not None:
+                print(f"\n  {C.YELLOW}💡{C.R} {_inf.render_offer(offer)}")
+        except Exception:
+            pass
 
         # Apply output style and render.
         rendered = output_styles.render(

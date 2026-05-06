@@ -53,11 +53,21 @@ def snapshot() -> CacheSnapshot:
     v1.18: also runs the one-shot legacy → cards migration on first call
     (idempotent — checks a marker file). After migration, recall picks
     up the migrated cards alongside any new extractions.
+
+    v1.19: also installs the bundled interview question library on
+    first call (idempotent — checks `_bundled_installed` marker). The
+    user can then run `/interview` immediately.
     """
     try:
         from . import memory_migrate
         memory_migrate.maybe_migrate()
     except Exception:
         # Migration failure must not block session boot.
+        pass
+    try:
+        from . import interviews
+        interviews.maybe_install_bundled()
+    except Exception:
+        # Same defensive guard — interview install must not block boot.
         pass
     return CacheSnapshot(preamble=memory.prepend_for_prompt())

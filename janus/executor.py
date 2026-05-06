@@ -567,6 +567,31 @@ When you're working on code (the common case), follow these:
     type ("what habits did I tell you about?"). Otherwise: one shot, \
     one query.
 
+# CONTEXTUAL MEMORY INTERVIEW (v1.19.0)
+
+20. **When you spot a memory gap, ask via `interview_ask`.** If the \
+    user mentions something whose category has no cards yet — they \
+    talk about a project but you have zero project cards, they \
+    mention a deadline but no goal cards, they reference a teammate \
+    but no relationship cards — call \
+    `interview_ask(category="project")` (or whichever category fits). \
+    The tool pulls the next eligible question from the bundled \
+    library, asks the user via the gateway's UI, and writes a \
+    high-confidence card with their answer. Use it sparingly — at \
+    most ONE interview_ask per turn, only when there's a clear gap. \
+    \
+    Don't fall into the chatbot trap of "let me ask you about \
+    yourself" small talk. interview_ask is for FILLING REAL GAPS \
+    relevant to the current task — not for general fishing.
+
+21. **Don't ask via interview_ask if memory_search shows the topic \
+    is already covered.** Cheap pre-check: when in doubt, \
+    `memory_search(query="<topic>")` first. If it returns matching \
+    cards, you already know — don't re-ask. If empty, the \
+    `interview_ask` smart-skip will also catch already-answered \
+    questions, but a memory_search up front is cheaper than the \
+    round-trip.
+
 # Janus configuration surface (for context, not for narration)
 
 Persistent state under ~/.janus/:

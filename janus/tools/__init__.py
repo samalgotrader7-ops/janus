@@ -25,6 +25,7 @@ from .vision import ImageDescribe
 from .swarm_run import SwarmRun
 from .telegram_send import TelegramSendFile, TelegramSendMessage
 from .telegram_react import TelegramReact
+from .interview_ask import InterviewAsk
 from .agent import (
     AgentCreate, AgentList, AgentRunNow, AgentDelete, AgentSetEnabled,
 )
@@ -76,6 +77,12 @@ _BUILTIN_TOOL_FACTORIES = {
     # most-recent message with an emoji. Gateway-bound: outside the
     # Telegram chat loop, returns "not on Telegram" gracefully.
     "telegram_react": TelegramReact,
+    # v1.19.0 Phase 5 — model-callable contextual interview question.
+    # Pulls the next eligible question from the bundled library and
+    # asks via the gateway's clarify UI. Gateway-bound (callback-less
+    # outside a chat); replaced per-turn in cli_rich/telegram with a
+    # callback-bearing instance.
+    "interview_ask": InterviewAsk,
     # v1.6.0 — scheduled-agent lifecycle. THE LIFETIME-SOLUTION TOOLS.
     # Before these, the model would lie about creating agents (just
     # writing to memory) because it had no real machinery. Now it

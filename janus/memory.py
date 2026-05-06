@@ -416,6 +416,22 @@ def propose_diff(request: str, output: str) -> dict:
     cards = memory_extract.parse_cards(
         data, current_scope=current_scope, origin_kind="user_turn",
     )
+
+    # v1.19.0 Phase 7 — heuristic inferred-suggestion scan. Pure compute;
+    # no extra LLM call. Queues at most one offer per turn for the
+    # NEXT turn's pre-reply prepend.
+    try:
+        from . import interview_inferred
+        origin = session_context.get_origin()
+        gateway = origin.get("platform") or "cli"
+        chat_id = origin.get("chat_id") or "default"
+        interview_inferred.scan_and_queue(
+            request, output,
+            gateway=gateway, chat_id=str(chat_id),
+        )
+    except Exception:
+        pass
+
     return {"ops": ops, "cards": cards}
 
 
