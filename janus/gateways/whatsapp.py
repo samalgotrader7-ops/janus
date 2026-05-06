@@ -191,6 +191,20 @@ def _handle_inbound(msg: dict) -> str | None:
         if s.lower().strip(" .!,?") in ("hi", "hello", "hey", "yo", "sup"):
             return intro.strip()
 
+    # v1.19.1 — drip-mode pre-turn: if interview question pending,
+    # treat user input as the answer. Input ALSO goes to executor for
+    # normal chat.
+    drip_ack_message = ""
+    try:
+        from .. import interviews as _iv
+        drip_handled, drip_ack = _iv.consume_pending_drip_answer(
+            "whatsapp", sender, text,
+        )
+        if drip_handled and drip_ack:
+            drip_ack_message = f"→ {drip_ack}\n\n"
+    except Exception:
+        pass
+
     messages = _load_messages(sender)
     mode = permissions.normalize(config.APPROVAL_MODE)
     base_approver = _make_whatsapp_approver(mode)
@@ -243,7 +257,105 @@ def _handle_inbound(msg: dict) -> str | None:
         record["error"] = f"execute: {e}"
         output = f"executor error: {e}"
     logger.write(record)
-    return (intro + output) if intro else output
+
+    # v1.19.1 — drip post-turn + inferred-suggestion offer appended.
+    drip_suffix = ""
+    try:
+        from .. import interviews as _iv, interview_inferred as _inf
+        drip_q = _iv.get_drip_question("whatsapp", sender)
+        if drip_q is not None:
+            question_text, _fqid = drip_q
+            drip_suffix += (
+                f"\n\n━━━━━\n💬 Quick question: {question_text}\n"
+                f"(answer normally, 'skip' to skip, 'stop drip' to pause)"
+            )
+        offer = _inf.pop_pending("whatsapp", sender)
+        if offer is not None:
+            drip_suffix += f"\n\n━━━━━\n💡 {_inf.render_offer(offer)}"
+    except Exception:
+        pass
+
+    final_output = (intro + output) if intro else output
+    return drip_ack_message + final_output + drip_suffix
+
+
+def _whatsapp_interview_handle(sender: str, arg: str) -> str:
+    """v1.19.1 — handle /interview <subcommand> on WhatsApp."""
+    from .. import interviews as _iv
+    _iv.maybe_install_bundled()
+    state = _iv.load_state("whatsapp", sender)
+    arg_low = (arg or "").strip().lower()
+
+    if arg_low in ("pause", "stop"):
+        state.mode = "idle"
+        state.drip_filter_category = ""
+        state.current_question_id = ""
+        _iv.save_state(state)
+        return "interview paused."
+
+    if arg_low in ("about-me", "aboutme", "about me"):
+        from .. import memory_index, memory_cards
+        try:
+            memory_index.reconcile()
+        except Exception:
+            pass
+        rows = memory_index.list_all()
+        by_type: dict[str, list[dict]] = {}
+        for r in rows:
+            by_type.setdefault(r["type"], []).append(r)
+        parts = ["Here's what I know about you:", ""]
+        any_cards = False
+        for cat in _iv.SUPPORTED_CATEGORIES:
+            cat_rows = by_type.get(cat, [])
+            if not cat_rows:
+                continue
+            any_cards = True
+            parts.append(f"━ {cat} ━")
+            from pathlib import Path
+            for r in cat_rows[:10]:
+                try:
+                    card = memory_cards.read_card(Path(r["path"]))
+                    content = card.content[:200].replace("\n", " ")
+                    parts.append(f"• {r['subject']}: {content}")
+                except Exception:
+                    continue
+            parts.append("")
+        if not any_cards:
+            parts.append("(nothing yet — try /interview to fill in your profile)")
+        else:
+            parts.append("anything wrong? reply with corrections.")
+        return "\n".join(parts)
+
+    category_filter = ""
+    per_day = 10
+    suffix = " (about all categories)"
+    if arg_low.startswith("daily"):
+        rest = arg[5:].strip()
+        try:
+            per_day = max(1, min(20, int(rest))) if rest else _iv.DRIP_DEFAULT_PER_DAY
+        except ValueError:
+            per_day = _iv.DRIP_DEFAULT_PER_DAY
+        suffix = " (slow drip)"
+    elif arg_low in _iv.SUPPORTED_CATEGORIES:
+        category_filter = arg_low
+        suffix = f" about {arg_low}"
+    elif arg_low:
+        return (
+            f"usage: /interview [<category>|daily [N]|pause|about-me]\n"
+            f"category: {', '.join(_iv.SUPPORTED_CATEGORIES)}"
+        )
+
+    state.mode = "drip"
+    state.drip_filter_category = category_filter
+    if not state.started_at:
+        state.started_at = _iv._now_iso()
+    _iv.reset_drip_quota(state, per_day=per_day)
+    _iv.save_state(state)
+    return (
+        f"🎯 interview mode on — Janus will ask up to {per_day} "
+        f"question(s)/day{suffix}.\n\n"
+        f"Reply normally to answer, 'skip' to skip, 'stop drip' to pause."
+    )
 
 
 def _handle_command(sender: str, line: str) -> str:
@@ -276,6 +388,8 @@ def _handle_command(sender: str, line: str) -> str:
     if cmd == "/swarm":
         from .. import swarms as _swarms
         return _swarms.slash.handle(arg)
+    if cmd == "/interview":
+        return _whatsapp_interview_handle(sender, arg)
     if cmd == "/clear":
         _SESSIONS[sender] = []
         try:

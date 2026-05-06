@@ -63,6 +63,7 @@ _BOT_COMMANDS = [
     ("sethome", "set this chat as the home channel for cron/cross-platform"),
     ("skills",  "list installed skills with state and trust score"),
     ("memory",  "show all memory categories, or /memory <cat> for one"),
+    ("interview", "fill memory cards Q&A-style: /interview [<cat>|daily [N]|pause|about-me]"),
     ("cost",    "per-chat cost ledger"),
     ("search",  "search prior interactions in the log index"),
     ("swarm",   "agent swarms — list | describe | run | status | cancel"),
@@ -689,6 +690,119 @@ async def cmd_memory(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await _send(update.get_bot(), update.effective_chat.id, "\n\n".join(parts))
 
 
+async def cmd_interview(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """v1.19.1 — /interview slash command on Telegram.
+
+    Subcommands:
+      /interview                    enable drip mode (10 questions/day,
+                                     all categories) — effectively walks
+                                     the full library one Q per turn
+      /interview <category>         enable drip filtered to <category>
+      /interview daily [N]          slow drip (N q/day, default 2)
+      /interview pause              stop drip
+      /interview about-me           list current memory snapshot
+
+    Each user message in drip mode answers the pending question AND
+    optionally chats normally (the answer is recorded as a high-
+    confidence card without blocking the chat).
+    """
+    chat_id = update.effective_chat.id
+    if not _is_authorized(chat_id):
+        await _send_pairing_prompt(update)
+        return
+    arg = " ".join(ctx.args or []).strip()
+    arg_low = arg.lower()
+
+    from .. import interviews as _iv
+    _iv.maybe_install_bundled()
+    state = _iv.load_state("telegram", str(chat_id))
+
+    # Pause / stop
+    if arg_low in ("pause", "stop"):
+        state.mode = "idle"
+        state.drip_filter_category = ""
+        state.current_question_id = ""
+        _iv.save_state(state)
+        await update.message.reply_text("interview paused.")
+        return
+
+    # /interview about-me — read-back of current memory
+    if arg_low in ("about-me", "aboutme", "about me"):
+        await _telegram_send_about_me(update, ctx, chat_id)
+        return
+
+    # Parse category vs daily vs default
+    category_filter = ""
+    per_day = 10  # one-shot-ish mode: walks library quickly
+    msg_suffix = " (about all categories)"
+    if arg_low.startswith("daily"):
+        rest = arg[5:].strip()
+        try:
+            per_day = max(1, min(20, int(rest))) if rest else _iv.DRIP_DEFAULT_PER_DAY
+        except ValueError:
+            per_day = _iv.DRIP_DEFAULT_PER_DAY
+        msg_suffix = " (slow drip)"
+    elif arg_low in _iv.SUPPORTED_CATEGORIES:
+        category_filter = arg_low
+        msg_suffix = f" about {arg_low}"
+    elif arg_low:
+        await update.message.reply_text(
+            f"usage: /interview [<category>|daily [N]|pause|about-me]\n"
+            f"category: {', '.join(_iv.SUPPORTED_CATEGORIES)}"
+        )
+        return
+
+    state.mode = "drip"
+    state.drip_filter_category = category_filter
+    if not state.started_at:
+        state.started_at = _iv._now_iso()
+    _iv.reset_drip_quota(state, per_day=per_day)
+    _iv.save_state(state)
+
+    await update.message.reply_text(
+        f"🎯 interview mode on — Janus will ask up to {per_day} "
+        f"question(s)/day{msg_suffix}.\n\n"
+        f"Reply normally to answer, 'skip' to skip a question, "
+        f"'stop drip' to pause."
+    )
+
+
+async def _telegram_send_about_me(update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+                                  chat_id: int) -> None:
+    """v1.19.1 — Telegram-side /interview about-me."""
+    from .. import interviews as _iv, memory_index, memory_cards
+    try:
+        memory_index.reconcile()
+    except Exception:
+        pass
+    rows = memory_index.list_all()
+    by_type: dict[str, list[dict]] = {}
+    for r in rows:
+        by_type.setdefault(r["type"], []).append(r)
+
+    parts = ["*Here's what I know about you:*"]
+    any_cards = False
+    for cat in _iv.SUPPORTED_CATEGORIES:
+        cat_rows = by_type.get(cat, [])
+        if not cat_rows:
+            continue
+        any_cards = True
+        parts.append(f"\n*{cat}*")
+        from pathlib import Path
+        for r in cat_rows[:10]:
+            try:
+                card = memory_cards.read_card(Path(r["path"]))
+                content = card.content[:200].replace("\n", " ")
+                parts.append(f"  • {r['subject']}: {content}")
+            except Exception:
+                continue
+    if not any_cards:
+        parts.append("\n_(nothing yet — try /interview to fill in your profile)_")
+    else:
+        parts.append("\n_anything wrong? reply with corrections._")
+    await _send(ctx.bot, chat_id, "\n".join(parts))
+
+
 async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update.effective_chat.id):
         await _send_pairing_prompt(update); return
@@ -900,6 +1014,25 @@ async def _run_chat_turn(
     except Exception:
         sess.last_user_message_id = None
 
+    # v1.19.1 — drip-mode pre-turn: if a question is pending, treat
+    # user's message as the answer. The user's input ALSO goes to the
+    # executor as a normal chat turn, so they can both answer AND chat
+    # in one message.
+    try:
+        from .. import interviews as _iv
+        drip_handled, drip_ack = _iv.consume_pending_drip_answer(
+            "telegram", str(chat_id), req,
+        )
+        if drip_handled and drip_ack:
+            try:
+                await ctx.bot.send_message(
+                    chat_id=chat_id, text=f"→ {drip_ack}",
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     preamble = memory.prepend_for_prompt()
     # v1.18.2 — Telegram-specific friendliness preamble. Prepended above
     # the static memory block so it's load-bearing for chat tone.
@@ -1062,6 +1195,49 @@ async def _run_chat_turn(
         pass
 
     await _send(ctx.bot, chat_id, output or "(no output)")
+
+    # v1.19.1 — drip-mode post-turn + inferred-suggestion display.
+    # Best-effort; never break the chat reply.
+    try:
+        from .. import interviews as _iv
+        drip_q = _iv.get_drip_question("telegram", str(chat_id))
+        if drip_q is not None:
+            question_text, _fqid = drip_q
+            try:
+                await ctx.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"💬 *Quick question:* {question_text}\n\n"
+                        f"_(answer normally, 'skip' to skip, "
+                        f"'stop drip' to pause)_"
+                    ),
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                # Markdown parse failure → send plain.
+                try:
+                    await ctx.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"💬 Quick question: {question_text}",
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        from .. import interview_inferred as _inf
+        offer = _inf.pop_pending("telegram", str(chat_id))
+        if offer is not None:
+            try:
+                await ctx.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"💡 {_inf.render_offer(offer)}",
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1251,6 +1427,7 @@ def serve() -> None:
     app.add_handler(CommandHandler("skills", cmd_skills))
     app.add_handler(CommandHandler("swarm", cmd_swarm))
     app.add_handler(CommandHandler("memory", cmd_memory))
+    app.add_handler(CommandHandler("interview", cmd_interview))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("cost", cmd_cost))

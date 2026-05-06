@@ -357,6 +357,7 @@ class InterviewState:
     skipped: dict[str, dict] = field(default_factory=dict)
     drip_quota_remaining: int = 0
     drip_quota_resets_at: str = ""
+    drip_filter_category: str = ""       # "" = no filter, walk all 8 categories
     completion_pct: dict[str, float] = field(default_factory=dict)
 
 
@@ -400,6 +401,7 @@ def load_state(gateway: str, chat_id: str) -> InterviewState:
         skipped=dict(data.get("skipped") or {}),
         drip_quota_remaining=int(data.get("drip_quota_remaining") or 0),
         drip_quota_resets_at=str(data.get("drip_quota_resets_at") or ""),
+        drip_filter_category=str(data.get("drip_filter_category") or ""),
         completion_pct=dict(data.get("completion_pct") or {}),
     )
 
@@ -419,6 +421,7 @@ def save_state(state: InterviewState) -> None:
         "skipped": state.skipped,
         "drip_quota_remaining": state.drip_quota_remaining,
         "drip_quota_resets_at": state.drip_quota_resets_at,
+        "drip_filter_category": state.drip_filter_category,
         "completion_pct": state.completion_pct,
     }
     fd, tmp = tempfile.mkstemp(prefix="." + path.name + ".", dir=str(path.parent))
@@ -780,10 +783,14 @@ def get_drip_question(
     if state.drip_quota_remaining <= 0:
         return None
 
-    nxt = next_question(state, library)
+    # Honor optional category filter (set by /interview <category> on
+    # gateways — restricts drip to a single category until drip ends).
+    cat_filter = state.drip_filter_category or None
+    nxt = next_question(state, library, category_filter=cat_filter)
     if nxt is None:
         # No eligible question (everything covered / cooldown). Auto-pause.
         state.mode = "idle"
+        state.drip_filter_category = ""
         state.completion_pct = compute_completion(state, library)
         save_state(state)
         return None
