@@ -47,61 +47,15 @@ except ImportError:  # pragma: no cover
     Completer = object  # placeholder so subclass definition doesn't crash
 
 
-@dataclass(frozen=True)
-class SlashCommand:
-    """One entry in the slash-command palette.
-
-    `category` drives both dropdown grouping and the colored marker dot:
-    "built-in" (cyan) for hardcoded commands, "custom" (green) for files
-    in `~/.janus/commands/` or `<workspace>/.janus/commands/`.
-    """
-    name: str          # e.g. "/workspace"
-    description: str
-    category: str      # "built-in" | "custom"
-
-
-BUILTIN_COMMANDS: list[SlashCommand] = [
-    SlashCommand("/mode",         "switch permission mode: default | acceptEdits | plan | auto | bypassPermissions", "built-in"),
-    SlashCommand("/why",          "re-interpret your last message and show 2-3 candidate readings", "built-in"),
-    SlashCommand("/workspace",    "show or change the active workspace directory",       "built-in"),
-    SlashCommand("/analyze",      "scan the workspace for tools, skills, project hints", "built-in"),
-    SlashCommand("/memory",       "memory: /memory [<cat>|search <q>|stats|show <id>|pause|resume|reindex|clear --type=<t>|prune|consolidate|audit|about-me]", "built-in"),
-    SlashCommand("/interview",    "fill memory cards Q&A-style: /interview [<category>|daily [N]|pause]", "built-in"),
-    SlashCommand("/search",       "search prior interactions in the log index",          "built-in"),
-    SlashCommand("/skills",       "list/filter skills, or install-bundled to copy the starter catalog", "built-in"),
-    SlashCommand("/promote",      "promote a quarantined skill to a trusted state",      "built-in"),
-    SlashCommand("/skill",        "skill authoring — subcommands: new | review | import","built-in"),
-    SlashCommand("/cost",         "show token + cost summary for this session",          "built-in"),
-    SlashCommand("/clear",        "clear conversation turns and cost counters",          "built-in"),
-    SlashCommand("/compact",      "summarize and prune older turns in this conversation","built-in"),
-    SlashCommand("/compress",     "alias for /compact",                                  "built-in"),
-    SlashCommand("/retry",        "re-run the last user turn (drops last assistant reply)", "built-in"),
-    SlashCommand("/undo",         "drop the last user+assistant pair from this conversation", "built-in"),
-    SlashCommand("/insights",     "activity summary: /insights [days] (default 7)",      "built-in"),
-    SlashCommand("/stats",        "rate-limit + token usage in the rolling 60s window",  "built-in"),
-    SlashCommand("/pin",          "pin turn so /compact never drops it: /pin <N|last>",  "built-in"),
-    SlashCommand("/unpin",        "unpin turn N (or 'last')",                            "built-in"),
-    SlashCommand("/pins",         "list pinned turns in this conversation",              "built-in"),
-    SlashCommand("/resume",       "resume a saved conversation by id",                   "built-in"),
-    SlashCommand("/continue",     "continue the most recent conversation",               "built-in"),
-    SlashCommand("/verbose",      "toggle verbose tool-arg display",                     "built-in"),
-    SlashCommand("/stream",       "toggle token streaming on/off",                       "built-in"),
-    SlashCommand("/init",         "scan codebase and propose starter user.md + skills",  "built-in"),
-    SlashCommand("/model",        "show or set the model id for this session",           "built-in"),
-    SlashCommand("/doctor",       "run diagnostics on configuration and environment",    "built-in"),
-    SlashCommand("/output-style", "switch output rendering (markdown, plain, json, …)",  "built-in"),
-    SlashCommand("/commands",     "list user-defined slash commands and their files",    "built-in"),
-    SlashCommand("/eval",         "replay last N records at temp=0 to check stability",  "built-in"),
-    SlashCommand("/mcp",          "manage MCP servers — list | connect | disconnect",    "built-in"),
-    SlashCommand("/triggers",     "list configured triggers",                            "built-in"),
-    SlashCommand("/swarm",        "agent swarms — list | describe | run | status | cancel", "built-in"),
-    SlashCommand("/help",         "show all available slash commands grouped by source", "built-in"),
-    SlashCommand("/quit",         "exit the CLI",                                        "built-in"),
-]
-
-
-# Back-compat: a flat list of names, still consulted by older call-sites.
-SLASH_COMMANDS = [c.name for c in BUILTIN_COMMANDS]
+# v1.24.0: SlashCommand and BUILTIN_COMMANDS moved to slash_dispatch.py
+# (single source of truth across cli_rich / cli / tui). Re-exported here
+# for back-compat with anything that still imports from cli_rich.
+from .slash_dispatch import (
+    SlashCommand,
+    BUILTIN_COMMANDS,
+    SLASH_COMMANDS,
+    all_slash_commands as _shared_all_slash_commands,
+)
 
 
 _CATEGORY_DOT = {
@@ -112,15 +66,14 @@ _CATEGORY_ORDER = {"built-in": 0, "custom": 1}
 
 
 def _all_slash_commands(customs: dict | None) -> list[SlashCommand]:
-    """Built-ins + customs, sorted by (category, name) for stable grouping."""
-    out = list(BUILTIN_COMMANDS)
-    for name, cc in (customs or {}).items():
-        out.append(SlashCommand(
-            name=f"/{name}",
-            description=cc.description or "(no description)",
-            category="custom",
-        ))
-    return sorted(out, key=lambda c: (_CATEGORY_ORDER.get(c.category, 9), c.name))
+    """Built-ins + customs, sorted by (category, name) for stable grouping.
+
+    v1.24.0: thin wrapper around slash_dispatch.all_slash_commands so
+    cli_rich's dropdown stays untouched. Custom command rendering
+    differs from the shared helper (cli_rich uses cc.description as an
+    attribute, not key); we delegate when the shape matches.
+    """
+    return _shared_all_slash_commands(customs)
 
 
 if HAVE_RICH:
@@ -554,6 +507,14 @@ def _make_mode_approver(console, mode_state: permissions.ModeState):
     grants doesn't have to ask.
 
     Decision matrix per mode lives in permissions.decide().
+
+    v1.24.0 — modal upgrade:
+      * prompt uses prompt_toolkit so streaming output above keeps
+        rendering while the user thinks
+      * Once / Session / Always / Deny — Session adds a grant for
+        (tool_name, risk) that bypasses future prompts in this session
+      * mode_state.session_grants is consulted BEFORE prompting, so
+        the user sees the prompt at most once per "always" tool
     """
     def approver(action_label: str, details: str, **kw) -> bool:
         risk = kw.get("risk") or permissions.risk_from_verb(
@@ -570,18 +531,56 @@ def _make_mode_approver(console, mode_state: permissions.ModeState):
             )
             return False
 
-        # ASK — show panel + y/N.
+        # ASK path. v1.24.0: check session grants BEFORE rendering anything.
+        tool_name = str(kw.get("tool_name") or "")
+        grant_key = (tool_name, str(risk))
+        if tool_name and mode_state.has_grant(grant_key):
+            console.print(
+                f"[dim]⚡ {action_label}[/] "
+                f"[dim](session-approved: {tool_name})[/]"
+            )
+            return True
+
         console.print(Panel(
             details,
             title=f"[yellow]⚠ approval needed[/]: {action_label}  "
                   f"[dim](risk={risk}, mode={mode_state.current})[/]",
             border_style="yellow",
         ))
+        # v1.24.0: prompt_toolkit-based prompt (when available) for
+        # consistent line editing + history-aware behavior. Falls back
+        # to input() if prompt_toolkit is missing.
+        prompt_text = "[Y]es  [s]ession  [a]lways  [N]o  > "
+        ans = ""
         try:
-            ans = input("approve? [y/N]: ").strip().lower()
+            if HAVE_RICH:
+                from prompt_toolkit import prompt as _pt_prompt
+                ans = _pt_prompt(prompt_text, default="").strip().lower()
+            else:
+                ans = input(prompt_text).strip().lower()
         except (EOFError, KeyboardInterrupt):
             return False
-        return ans in ("y", "yes")
+        if ans in ("y", "yes"):
+            return True
+        if ans in ("s", "session"):
+            if tool_name:
+                mode_state.grant(grant_key)
+                console.print(
+                    f"[dim]→ session grant added for {tool_name}[/]"
+                )
+            return True
+        if ans in ("a", "always"):
+            # "always" is alias for session for now — persistent grants
+            # would need a config file write and survive restart.
+            # That's a v1.24.x follow-up.
+            if tool_name:
+                mode_state.grant(grant_key)
+                console.print(
+                    f"[dim]→ session grant added for {tool_name} "
+                    f"(persistent 'always' grants in v1.24.x)[/]"
+                )
+            return True
+        return False
 
     return approver
 

@@ -1053,6 +1053,72 @@ def _build_app():
         except Exception as e:
             return JSONResponse({"error": f"read failed: {e}"})
 
+    # ---------- v1.24.0: file write (Files panel editing) ----------
+
+    @app.post("/api/files/write")
+    async def api_files_write(request: Request):
+        """v1.24.0: write a file in the workspace.
+
+        Body: {"path": str, "content": str}
+        - path is relative to config.WORKSPACE; resolved via
+          security.resolve_within (no escape).
+        - content size capped at 1MB (matches read cap).
+        - directories must already exist (no implicit mkdir — caller
+          must use shell tool / chat for that to keep file ops
+          straightforward).
+        - existing files are overwritten atomically (temp + rename).
+        """
+        auth_sid, err_resp, ip = _gate_post(request, "/api/files/write")
+        if err_resp is not None:
+            return err_resp
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "json body required"}, status_code=400)
+        path = (body.get("path") or "").strip()
+        content = body.get("content")
+        if not path:
+            return JSONResponse({"error": "path required"}, status_code=400)
+        if not isinstance(content, str):
+            return JSONResponse(
+                {"error": "content must be a string"}, status_code=400,
+            )
+        if len(content) > 1_000_000:
+            return JSONResponse(
+                {"error": f"content too large ({len(content)} bytes); 1MB cap"},
+                status_code=413,
+            )
+        try:
+            from .. import security
+            ws = Path(config.WORKSPACE).resolve()
+            target = security.resolve_within(ws, path)
+            if not target.parent.is_dir():
+                return JSONResponse(
+                    {"error": f"parent directory missing: {target.parent}"},
+                    status_code=400,
+                )
+            # Atomic write — temp file in same dir, then rename.
+            tmp = target.with_suffix(target.suffix + ".tmp.janusweb")
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(target)
+            web_audit.mutate(
+                auth_sid, ip, "/api/files/write",
+                [str(target.relative_to(ws)).replace("\\", "/")],
+            )
+            return JSONResponse({
+                "ok": True,
+                "path": str(target.relative_to(ws)).replace("\\", "/"),
+                "size": len(content.encode("utf-8")),
+            })
+        except ValueError as e:
+            return JSONResponse(
+                {"error": f"path outside workspace: {e}"}, status_code=400,
+            )
+        except Exception as e:
+            return JSONResponse({"error": f"write failed: {e}"})
+
     # ---------- v1.22.1: mutations (cards, skills, interview) ----------
 
     def _gate_post(request, route: str):
@@ -1464,6 +1530,111 @@ def _build_app():
             return JSONResponse({"output": output})
         except Exception as e:
             return JSONResponse({"error": f"output read failed: {e}"})
+
+    @app.get("/api/shells/{shell_id}/stream")
+    async def api_shell_stream(shell_id: str, request: Request):
+        """v1.24.0: SSE-stream the bg shell's stdout/stderr.
+
+        The endpoint tails ~/.janus/shells/<id>/stdout.log + stderr.log
+        every 200ms and yields any new bytes as SSE 'data' events. The
+        browser's xterm.js writes the raw bytes to its terminal — full
+        ANSI / cursor / color support.
+
+        Stops naturally when:
+          * the shell exits (status file reads 'exited' / 'killed' /
+            'failed') AND no new bytes have appeared for 1 second
+          * the client disconnects
+          * `disconnected` reached via request.is_disconnected
+        """
+        auth_sid, err = _check_auth(request)
+        if err:
+            return JSONResponse({"error": err}, status_code=401)
+        from fastapi.responses import StreamingResponse
+        from ..tools import shell_bg as _sh
+        import asyncio as _asyncio
+
+        d = _sh._shell_dir(shell_id)
+        if not d.is_dir():
+            return JSONResponse(
+                {"error": "no such shell"}, status_code=404,
+            )
+        stdout_path = d / "stdout.log"
+        stderr_path = d / "stderr.log"
+
+        async def gen():
+            stdout_pos = 0
+            stderr_pos = 0
+            stable_count = 0  # consecutive ticks with no new bytes after exit
+            while True:
+                if await request.is_disconnected():
+                    return
+                # Refresh status (may transition pid-running -> exited).
+                try:
+                    status = _sh._refresh_status(shell_id)
+                except Exception:
+                    status = "unknown"
+
+                # Read whatever is new in stdout/stderr.
+                new_chunks: list[tuple[str, str]] = []
+                for path, pos_attr in (
+                    (stdout_path, "stdout"),
+                    (stderr_path, "stderr"),
+                ):
+                    if not path.is_file():
+                        continue
+                    try:
+                        with path.open("rb") as f:
+                            f.seek(stdout_pos if pos_attr == "stdout" else stderr_pos)
+                            data = f.read()
+                    except OSError:
+                        continue
+                    if data:
+                        if pos_attr == "stdout":
+                            stdout_pos += len(data)
+                        else:
+                            stderr_pos += len(data)
+                        # Decode liberally — bg shells may emit non-UTF-8.
+                        text = data.decode("utf-8", errors="replace")
+                        new_chunks.append((pos_attr, text))
+
+                if new_chunks:
+                    stable_count = 0
+                    for stream_name, text in new_chunks:
+                        # SSE encoding: each line of `text` becomes a
+                        # data: line. xterm.js handles \r\n itself.
+                        # We yield one event per chunk to preserve the
+                        # cursor positioning.
+                        import json as _json
+                        payload = _json.dumps({
+                            "stream": stream_name, "text": text,
+                        })
+                        yield f"event: chunk\ndata: {payload}\n\n"
+                else:
+                    # No new data. If shell has exited and stayed idle
+                    # for a couple of ticks, send a final marker and
+                    # close the stream.
+                    if status in ("exited", "killed", "failed"):
+                        stable_count += 1
+                        if stable_count >= 5:  # ~1s of stability
+                            import json as _json
+                            yield (
+                                "event: end\n"
+                                f"data: {_json.dumps({'status': status})}\n\n"
+                            )
+                            return
+                    # Heartbeat to keep the SSE connection alive.
+                    if stable_count > 0 and stable_count % 25 == 0:
+                        yield ":heartbeat\n\n"
+                await _asyncio.sleep(0.2)
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={
+                "cache-control": "no-cache",
+                "x-accel-buffering": "no",
+            },
+        )
 
     @app.post("/api/shells/{shell_id}/kill")
     async def api_shell_kill(shell_id: str, request: Request):

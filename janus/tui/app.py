@@ -335,14 +335,19 @@ class JanusApp(App[None]):
         cmd, _, rest = line[1:].partition(" ")
         cmd = cmd.lower().strip()
         if cmd in ("help", "?"):
-            log.write(
-                "[bold]commands[/]:\n"
-                "  /mode <name>      — default | acceptEdits | plan | bypassPermissions | auto\n"
-                "  /clear            — clear chat history\n"
-                "  /refresh          — reload sidebar (memory cards / skills)\n"
-                "  /quit             — exit (or Ctrl+Q)\n"
-                "Slash commands beyond these still work via cli_rich; v1.23.x will share the dispatcher."
-            )
+            # v1.24.0: list ALL commands from the shared registry, not
+            # just the few the TUI has migrated. Commands not yet wired
+            # in the TUI surface the existing "unhandled" message.
+            from .. import slash_dispatch as _sd
+            log.write("[bold]all slash commands[/] (TUI handles a subset; rest come in v1.24.x):")
+            for entry in _sd.BUILTIN_COMMANDS:
+                # Mark the TUI-supported commands distinctly.
+                supported = entry.name in (
+                    "/mode", "/clear", "/refresh", "/help", "/quit", "/exit", "/?",
+                )
+                marker = "[green]*[/]" if supported else "[dim] [/]"
+                log.write(f"  {marker} [bold]{entry.name:<14}[/] — {entry.description}")
+            log.write("\n[dim]* = handled in TUI; others fall through to a 'not yet wired' notice.[/]")
         elif cmd == "mode":
             new = (rest or "").strip()
             valid = ("default", "acceptEdits", "plan", "bypassPermissions", "auto")

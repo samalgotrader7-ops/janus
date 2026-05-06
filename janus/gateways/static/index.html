@@ -7,6 +7,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/vendor/xterm.css">
 </head>
 <body>
 <div id="app">
@@ -177,10 +178,11 @@
       <div style="display:grid; grid-template-columns: 320px 1fr; gap:14px;
                   height: calc(100vh - 56px - 28px - 100px);">
         <div id="shells-list" class="item-list" style="overflow-y:auto;"></div>
-        <div id="shells-output" style="background:#fff; border:1px solid #e0e0e0;
-             border-radius:4px; padding:12px; overflow:auto;
-             font-family:ui-monospace,monospace; font-size:0.85em;
-             white-space:pre-wrap;"></div>
+        <!-- v1.24.0: xterm.js terminal viewer with full ANSI / color
+             support. SSE-streamed from /api/shells/{id}/stream. -->
+        <div id="shells-terminal" style="background:#1e1e1e;
+             border:1px solid #e0e0e0; border-radius:4px; padding:8px;
+             height:100%;"></div>
       </div>
     </section>
 
@@ -261,6 +263,8 @@
   </div>
 </div>
 
+<script src="/static/vendor/xterm.min.js"></script>
+<script src="/static/vendor/xterm-addon-fit.min.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

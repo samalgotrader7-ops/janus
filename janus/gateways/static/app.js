@@ -317,7 +317,12 @@
 
   // ---------- files panel ----------
 
-  const filesState = { currentDir: '.', currentFile: null };
+  const filesState = {
+    currentDir: '.',
+    currentFile: null,
+    originalContent: '',
+    editing: false,
+  };
 
   registerPanel('files', {
     async mount() {
@@ -325,16 +330,18 @@
       const viewer = document.getElementById('files-viewer');
       const breadcrumb = document.getElementById('files-breadcrumb');
       if (!tree || !viewer) return;
+
       const renderEmpty = () => {
         clear(viewer);
         viewer.appendChild(
           el(
             'div',
             { class: 'empty' },
-            'select a file from the tree to view its contents (read-only in v1.22.0)'
+            'select a file from the tree to view its contents'
           )
         );
       };
+
       const loadDir = async (path) => {
         clear(tree);
         tree.appendChild(el('div', { class: 'file-entry' }, 'loading...'));
@@ -346,7 +353,6 @@
         }
         filesState.currentDir = r.data.path;
         if (breadcrumb) breadcrumb.textContent = r.data.path;
-        // ".." entry if not at workspace root.
         if (r.data.path !== '.' && r.data.path !== r.data.workspace) {
           const up = el('div', { class: 'file-entry dir' }, '../');
           up.onclick = () => loadDir(r.data.parent || '.');
@@ -365,6 +371,84 @@
         }
         setFooter(`${r.data.entries.length} entries in ${r.data.path}`);
       };
+
+      const renderFileView = (path, content, size) => {
+        clear(viewer);
+        filesState.originalContent = content || '';
+        filesState.editing = false;
+        const meta = el(
+          'div',
+          { class: 'file-actions' },
+          el('span', { class: 'item-meta', style: 'flex:1;' },
+            `${path}  ·  ${size} bytes`),
+          el('button', { type: 'button', id: 'file-edit-btn' }, 'edit'),
+        );
+        viewer.appendChild(meta);
+        viewer.appendChild(el('pre', { id: 'file-pre' }, content || ''));
+        document.getElementById('file-edit-btn').onclick = () =>
+          renderFileEdit(path);
+      };
+
+      const renderFileEdit = (path) => {
+        clear(viewer);
+        filesState.editing = true;
+        const dirty = el('span', { class: 'dirty', id: 'file-dirty' }, '');
+        const saveBtn = el('button',
+          { type: 'button', id: 'file-save-btn', class: 'primary' },
+          'save');
+        const cancelBtn = el('button',
+          { type: 'button', id: 'file-cancel-btn' }, 'cancel');
+        const meta = el(
+          'div', { class: 'file-actions' },
+          el('span', { class: 'item-meta', style: 'flex:1;' }, `editing ${path}`),
+          dirty, saveBtn, cancelBtn,
+        );
+        viewer.appendChild(meta);
+        const ta = el('textarea', { id: 'file-textarea', spellcheck: 'false' },
+          filesState.originalContent);
+        viewer.appendChild(ta);
+        // Focus the textarea so the user can immediately type.
+        setTimeout(() => ta.focus(), 30);
+        ta.oninput = () => {
+          const isDirty = ta.value !== filesState.originalContent;
+          dirty.textContent = isDirty ? '● modified' : '';
+          saveBtn.disabled = !isDirty;
+        };
+        ta.onkeydown = (e) => {
+          // Ctrl+S / Cmd+S → save.
+          if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+            e.preventDefault();
+            saveBtn.click();
+          }
+        };
+        cancelBtn.onclick = () => {
+          if (ta.value !== filesState.originalContent) {
+            if (!confirm('discard your edits?')) return;
+          }
+          renderFileView(path, filesState.originalContent,
+            filesState.originalContent.length);
+        };
+        saveBtn.onclick = async () => {
+          const content = ta.value;
+          saveBtn.disabled = true;
+          dirty.textContent = 'saving...';
+          const r = await api('/api/files/write', {
+            method: 'POST',
+            body: { path: path, content: content },
+          });
+          if (r.data.error) {
+            dirty.textContent = '';
+            alert('save failed: ' + r.data.error);
+            saveBtn.disabled = false;
+            return;
+          }
+          // Re-render in view mode with the new content.
+          filesState.originalContent = content;
+          renderFileView(r.data.path || path, content, r.data.size || content.length);
+          setFooter('saved ' + (r.data.path || path));
+        };
+      };
+
       const loadFile = async (path, node) => {
         document
           .querySelectorAll('#files-tree .file-entry.active')
@@ -373,18 +457,16 @@
         clear(viewer);
         viewer.appendChild(el('div', { class: 'empty' }, 'loading ' + path + '...'));
         const r = await api('/api/files/read?path=' + encodeURIComponent(path));
-        clear(viewer);
         if (r.data.error) {
+          clear(viewer);
           viewer.appendChild(el('div', { class: 'empty' }, r.data.error));
           return;
         }
         filesState.currentFile = path;
-        viewer.appendChild(
-          el('div', { class: 'item-meta', style: 'margin-bottom:10px;' }, `${path}  ·  ${r.data.size} bytes`)
-        );
-        viewer.appendChild(el('pre', null, r.data.content || ''));
+        renderFileView(r.data.path || path, r.data.content || '', r.data.size || 0);
         setFooter('viewing ' + path);
       };
+
       renderEmpty();
       await loadDir('.');
     },
@@ -576,16 +658,107 @@
     },
   });
 
-  // ---------- v1.22.3: shells panel ----------
+  // ---------- v1.22.3 + v1.24.0: shells panel with xterm.js ----------
+
+  const shellsState = {
+    term: null,        // xterm.js Terminal instance
+    fitAddon: null,
+    eventSource: null, // active SSE stream
+    activeShellId: null,
+  };
+
+  function _ensureTerminal() {
+    const wrap = document.getElementById('shells-terminal');
+    if (!wrap || shellsState.term) return shellsState.term;
+    if (typeof Terminal === 'undefined') {
+      // xterm.js missing — fall back to plain pre.
+      wrap.innerHTML = '<pre style="color:#fff; font-size:0.85em;">'
+        + '(xterm.js missing; terminal unavailable)</pre>';
+      return null;
+    }
+    const term = new Terminal({
+      fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+      fontSize: 13,
+      theme: {
+        background: '#1e1e1e',
+        foreground: '#e0e0e0',
+        cursor: '#a020f0',
+      },
+      cursorBlink: false,
+      convertEol: true,    // \n -> \r\n
+      scrollback: 5000,
+      disableStdin: true,  // v1.24.0 is read-only viewer
+    });
+    let fitAddon = null;
+    try {
+      fitAddon = new FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+    } catch (e) {
+      // Fit addon unavailable — fall back to fixed cols/rows.
+    }
+    term.open(wrap);
+    if (fitAddon) {
+      try { fitAddon.fit(); } catch (e) {}
+      window.addEventListener('resize', () => {
+        try { fitAddon.fit(); } catch (e) {}
+      });
+    }
+    shellsState.term = term;
+    shellsState.fitAddon = fitAddon;
+    return term;
+  }
+
+  function _closeStream() {
+    if (shellsState.eventSource) {
+      try { shellsState.eventSource.close(); } catch (e) {}
+      shellsState.eventSource = null;
+    }
+  }
+
+  function _attachStream(shellId) {
+    _closeStream();
+    const term = _ensureTerminal();
+    if (!term) return;
+    term.clear();
+    term.write(`\x1b[36m[attached to ${shellId}]\x1b[0m\r\n`);
+    shellsState.activeShellId = shellId;
+    let es;
+    try {
+      es = new EventSource(
+        '/api/shells/' + encodeURIComponent(shellId) + '/stream',
+        { withCredentials: true },
+      );
+    } catch (e) {
+      term.write(`\x1b[31m[stream unsupported]\x1b[0m\r\n`);
+      return;
+    }
+    es.addEventListener('chunk', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.text) term.write(data.text);
+      } catch (err) {}
+    });
+    es.addEventListener('end', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        term.write(`\r\n\x1b[33m[shell ended: ${data.status}]\x1b[0m\r\n`);
+      } catch {}
+      _closeStream();
+    });
+    es.onerror = () => {
+      // EventSource auto-reconnects until close(); we don't intervene.
+    };
+    shellsState.eventSource = es;
+  }
 
   registerPanel('shells', {
     async mount() {
       const list = document.getElementById('shells-list');
-      const output = document.getElementById('shells-output');
       const cmd = document.getElementById('shell-cmd');
       const runBtn = document.getElementById('shell-run');
       const refresh = document.getElementById('shells-refresh');
       if (!list) return;
+      _ensureTerminal();
       const loadList = async () => {
         clear(list);
         const r = await api('/api/shells');
@@ -593,8 +766,6 @@
           list.appendChild(el('div', { class: 'item' }, el('div', { class: 'item-meta' }, r.data.error)));
           return;
         }
-        // ShellList tool output is multi-line text. Render as one block
-        // and parse out shell ids on lines that look like 'sh-XXX  status...'.
         const txt = r.data.output || '';
         const lines = txt.split('\n').filter(Boolean);
         if (!lines.length) {
@@ -607,12 +778,11 @@
           if (m) {
             const id = m[1];
             item.style.cursor = 'pointer';
-            item.onclick = async () => {
-              clear(output);
-              output.textContent = 'loading ' + id + '...';
-              const o = await api('/api/shells/' + encodeURIComponent(id) + '/output');
-              output.textContent = (o.data && (o.data.output || o.data.error)) || '(empty)';
-            };
+            if (id === shellsState.activeShellId) {
+              item.classList.add('active');
+              item.style.background = '#f5edff';
+            }
+            item.onclick = () => _attachStream(id);
           }
           list.appendChild(item);
         }
@@ -625,13 +795,15 @@
           method: 'POST', body: { command: c },
         });
         if (cmd) cmd.value = '';
-        output.textContent = (r.data && (r.data.output || r.data.error)) || '(empty)';
+        // The tool output includes the new shell id; auto-attach.
+        const out = (r.data && (r.data.output || r.data.error)) || '';
+        const idMatch = out.match(/(sh-[0-9a-f]{4,})/i);
+        if (idMatch) _attachStream(idMatch[1]);
         loadList();
       };
       if (cmd) cmd.onkeydown = (e) => {
         if (e.key === 'Enter') { e.preventDefault(); runBtn.click(); }
       };
-      output.textContent = 'select a shell from the list to view its output';
       await loadList();
     },
   });

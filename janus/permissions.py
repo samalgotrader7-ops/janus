@@ -28,7 +28,7 @@ session into bypassPermissions.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 # ---------- Mode names ----------
@@ -178,8 +178,15 @@ def risk_from_verb(verb: str) -> str:
 
 @dataclass
 class ModeState:
-    """Holds the active mode for a session. Mutable so /mode can swap it."""
+    """Holds the active mode for a session. Mutable so /mode can swap it.
+
+    v1.24.0 — also stores a per-session approval whitelist for tools the
+    user has approved with "always" / "session" semantics. The approver
+    consults this before showing a prompt; if the (tool_name, risk) pair
+    is in `session_grants`, ALLOW is returned without prompting.
+    """
     current: str = DEFAULT
+    session_grants: set = field(default_factory=set)
 
     def set(self, mode: str) -> str:
         self.current = normalize(mode)
@@ -192,3 +199,17 @@ class ModeState:
     def label(self) -> str:
         """Human-readable label for the statusline."""
         return self.current
+
+    def grant(self, key: tuple) -> None:
+        """v1.24.0: add a session-level approval grant.
+
+        `key` is typically (tool_name, risk). Future approver calls
+        with the same key auto-approve (no prompt).
+        """
+        self.session_grants.add(key)
+
+    def has_grant(self, key: tuple) -> bool:
+        return key in self.session_grants
+
+    def clear_grants(self) -> None:
+        self.session_grants.clear()

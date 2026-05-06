@@ -330,7 +330,48 @@ footer.statusbar #footer-version { color: var(--text-faint); }
   font-size: 0.85em;
   line-height: 1.5;
 }
+#files-viewer textarea {
+  width: 100%;
+  min-height: 60vh;
+  font-family: var(--mono);
+  font-size: 0.85em;
+  line-height: 1.5;
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  resize: vertical;
+}
 #files-viewer .empty { color: var(--text-faint); font-style: italic; }
+#files-viewer .file-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  align-items: center;
+}
+#files-viewer .file-actions button {
+  padding: 4px 10px;
+  font-size: 0.82em;
+  border-radius: 3px;
+  border: 1px solid var(--brand);
+  background: #fff;
+  color: var(--brand);
+  cursor: pointer;
+  font-weight: 600;
+}
+#files-viewer .file-actions button.primary {
+  background: var(--brand);
+  color: #fff;
+}
+#files-viewer .file-actions button:hover { opacity: 0.85; }
+#files-viewer .file-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+#files-viewer .file-actions .dirty {
+  color: var(--warn);
+  font-size: 0.8em;
+  font-weight: 600;
+}
 
 /* ---------- Modal overlays (approval + clarify) ---------- */
 
