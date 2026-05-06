@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>janus &mdash; web</title>
+  <meta name="csrf-token" content="__CSRF_TOKEN__">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      __LOGO_SVG__
+      <span>janus <span style="color:#888; font-weight:400; font-size:0.78em;">v__VERSION__</span>
+        <span style="display:block; font-size:0.62em; color:#999; font-weight:400; margin-top:1px;">__TAGLINE__</span>
+      </span>
+    </div>
+    <div class="status">
+      <span><span class="label">model:</span> __MODEL__</span>
+      <span><span class="label">workspace:</span> __WORKSPACE__</span>
+      <span><span class="label">mode:</span> __MODE__</span>
+    </div>
+    <div class="spacer"></div>
+    <button class="signout" id="btn-signout" type="button">sign out</button>
+  </header>
+
+  <nav class="sidenav">
+    <ul>
+      <li><a href="#chat" data-panel="chat">chat</a></li>
+      <li><a href="#memory" data-panel="memory">memory</a></li>
+      <li><a href="#skills" data-panel="skills">skills</a></li>
+      <li><a href="#files" data-panel="files">files</a></li>
+    </ul>
+    <div style="padding:18px; font-size:0.74em; color:#999; line-height:1.5;">
+      <strong style="display:block; margin-bottom:4px;">v1.22.0</strong>
+      Skeleton + 4 panels.
+      <a href="https://github.com/samalgotrader7-ops/janus" target="_blank"
+         style="display:block; margin-top:6px; color:#888;">source &rarr;</a>
+    </div>
+  </nav>
+
+  <main class="content">
+
+    <!-- ---------- Chat panel ---------- -->
+    <section id="panel-chat" class="panel">
+      <div id="chat-history">
+        <div class="turn system">
+          <div class="who">system</div>
+          <div class="body">__GREETING__</div>
+        </div>
+      </div>
+      <div id="chat-input-wrap">
+        <textarea id="chat-input" placeholder="message janus... (ctrl+enter to send)"
+                  autofocus></textarea>
+        <button id="chat-send" type="button">send</button>
+      </div>
+    </section>
+
+    <!-- ---------- Memory panel ---------- -->
+    <section id="panel-memory" class="panel">
+      <h2>memory cards</h2>
+      <div class="panel-toolbar">
+        <select id="memory-filter">
+          <option value="">all types</option>
+          <option value="identity">identity</option>
+          <option value="preference">preference</option>
+          <option value="goal">goal</option>
+          <option value="project">project</option>
+          <option value="habit">habit</option>
+          <option value="decision">decision</option>
+          <option value="constraint">constraint</option>
+          <option value="relationship">relationship</option>
+        </select>
+        <button id="memory-refresh" class="secondary" type="button">refresh</button>
+        <span style="color:#999; font-size:0.85em;">
+          v1.22.0 is read-only &mdash; edit via cli or chat.
+        </span>
+      </div>
+      <div id="memory-list" class="item-list"></div>
+    </section>
+
+    <!-- ---------- Skills panel ---------- -->
+    <section id="panel-skills" class="panel">
+      <h2>skills</h2>
+      <div class="panel-toolbar">
+        <button id="skills-refresh" class="secondary" type="button">refresh</button>
+        <span style="color:#999; font-size:0.85em;">
+          install/promote via cli &mdash; UI controls in v1.22.1.
+        </span>
+      </div>
+      <div id="skills-list" class="item-list"></div>
+    </section>
+
+    <!-- ---------- Files panel ---------- -->
+    <section id="panel-files" class="panel">
+      <h2>workspace files <span id="files-breadcrumb"
+        style="font-weight:400; color:#888; font-family:ui-monospace,monospace;
+        font-size:0.85em; margin-left:8px;"></span></h2>
+      <div id="files-layout">
+        <div id="files-tree"></div>
+        <div id="files-viewer"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="statusbar">
+    <span id="footer-msg"></span>
+    <span id="footer-version">janus v__VERSION__</span>
+  </footer>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

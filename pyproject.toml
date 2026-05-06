@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "janus-agent"
-version = "1.21.0"
+version = "1.22.0"
 description = "Claude Code's UX, on any model, with plain-text state and a learning loop."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -76,9 +76,11 @@ include = ["janus*"]
 # v1.2.0: bundled skill catalog — 58 .md files copied to ~/.janus/skills/
 # on first run. Listed explicitly here because they're not Python source.
 # v1.19.0: same pattern for the bundled interview question library.
+# v1.22.0: web frontend (HTML/CSS/JS) shipped in the wheel.
 [tool.setuptools.package-data]
 "janus.skills_bundled" = ["*.md", "*/SKILL.md", "*/scripts/*", "*/references/*"]
 "janus.interviews_bundled" = ["*.md"]
+"janus.gateways" = ["static/*.html", "static/*.css", "static/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

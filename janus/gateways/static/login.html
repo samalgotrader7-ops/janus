@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>janus &mdash; sign in</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="auth-wrap">
+  <header class="brand">
+    __LOGO_SVG__
+    <h1>janus &mdash; sign in</h1>
+  </header>
+  __ERROR_BLOCK__
+  <form method="post" action="/login">
+    <label for="token">Bootstrap token</label>
+    <input type="password" id="token" name="token" autofocus required
+           autocomplete="current-password"
+           placeholder="paste from ~/.janus/web_token">
+    <button type="submit">sign in</button>
+  </form>
+  <div class="help">
+    The bootstrap token is in <code>~/.janus/web_token</code> on the server.
+    The first time <code>janus web</code> starts it prints the token to the
+    console; you can also <code>cat</code> the file directly.
+    Rotate with <code>janus web rotate-token</code>.
+  </div>
+</div>
+</body>
+</html>

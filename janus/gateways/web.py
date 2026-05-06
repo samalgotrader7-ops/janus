@@ -35,6 +35,7 @@ import html
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from .. import config, executor, logger, memory, skills, hooks, permissions
@@ -42,6 +43,24 @@ from .. import branding, cost
 from ..tools import default_registry, make_protected, CapabilitySet
 from . import _common as gw
 from . import web_auth, web_audit
+
+
+# v1.22: static frontend files. Located alongside this module so they
+# ship inside the wheel via package_data declaration in pyproject.toml.
+STATIC_DIR: Path = Path(__file__).resolve().parent / "static"
+
+
+def _read_template(name: str) -> str:
+    """Read a static template (HTML with __PLACEHOLDER__ tokens).
+
+    Returns empty string if the file is missing — caller decides
+    whether that's fatal or a fall-back path.
+    """
+    p = STATIC_DIR / name
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 # v1.21: FastAPI types must be visible at module-level so route function
 # annotations resolve under `from __future__ import annotations`. When
@@ -89,6 +108,17 @@ def _try_import_fastapi():
         from fastapi.responses import HTMLResponse, JSONResponse
         import uvicorn
         return FastAPI, Body, HTMLResponse, JSONResponse, uvicorn
+    except ImportError:
+        return None
+
+
+def _try_import_static_files():
+    """v1.22: StaticFiles lives in fastapi.staticfiles. Separate import
+    helper so legacy test stubs that mock _try_import_fastapi don't
+    have to know about it."""
+    try:
+        from fastapi.staticfiles import StaticFiles
+        return StaticFiles
     except ImportError:
         return None
 
@@ -233,193 +263,20 @@ def _make_web_approver(mode: str):
     return approver
 
 
-_LOGIN_HTML = """<!doctype html>
-<html><head>
-<meta charset="utf-8" />
-<title>janus &mdash; sign in</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<style>
-body { font-family: system-ui, sans-serif; max-width: 460px;
-       margin: 8vh auto; padding: 24px; color: #222; }
-.brand { display: flex; align-items: center; gap: 14px;
-         color: __BRAND__; margin-bottom: 32px; }
-.brand svg { width: 40px; height: 40px; flex: none; }
-.brand h1 { margin: 0; font-size: 1.3em; font-weight: 600;
-            color: __BRAND__; }
-form { display: flex; flex-direction: column; gap: 12px; }
-label { font-size: 0.92em; color: #555; }
-input[type="password"] { font-family: ui-monospace, monospace;
-                         padding: 10px; border: 1px solid #ccc;
-                         border-radius: 4px; font-size: 0.92em; }
-button { padding: 10px 18px; border-radius: 4px; cursor: pointer;
-         border: 1px solid __BRAND__; background: __BRAND__;
-         color: #fff; font-weight: 600; font-size: 0.95em; }
-button:hover { opacity: 0.9; }
-.muted { color: #888; font-size: 0.85em; line-height: 1.5; }
-.err { color: #a00; padding: 8px 12px; background: #fee;
-       border: 1px solid #fcc; border-radius: 4px;
-       margin-bottom: 12px; font-size: 0.9em; }
-.help { margin-top: 24px; font-size: 0.85em; color: #666;
-        line-height: 1.6; }
-code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px;
-       font-family: ui-monospace, monospace; }
-</style>
-</head><body>
-<header class="brand">
-  __LOGO_SVG__
-  <h1>janus &mdash; sign in</h1>
-</header>
-__ERROR_BLOCK__
-<form method="post" action="/login">
-  <label>Bootstrap token</label>
-  <input type="password" name="token" autofocus required
-         placeholder="paste from ~/.janus/web_token" />
-  <button type="submit">sign in</button>
-</form>
-<div class="help">
-The bootstrap token is in <code>~/.janus/web_token</code> on the
-server. The first time <code>janus web</code> starts it prints the
-token to the console; you can also <code>cat</code> the file directly.
-Rotate with <code>janus web rotate-token</code>.
-</div>
-</body></html>
-"""
+# v1.22.0: inline _LOGIN_HTML and _INDEX_HTML strings were removed.
+# The frontend lives in janus/gateways/static/ as plain HTML/CSS/JS
+# files served by FastAPI. Templates with __PLACEHOLDER__ tokens go
+# through _read_template() + .replace() at request time.
 
-
-_INDEX_HTML = """<!doctype html>
-<html><head>
-<meta charset="utf-8" />
-<title>janus &mdash; local web UI</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<style>
-body { font-family: system-ui, sans-serif; max-width: 820px;
-       margin: 24px auto; padding: 16px; color: #222; }
-.brand { display: flex; align-items: center; gap: 18px; color: __BRAND__; }
-.brand svg { width: 56px; height: 56px; flex: none; }
-.brand h1 { margin: 0; font-size: 1.6em; font-weight: 600;
-            color: __BRAND__; line-height: 1.05; }
-.brand h1 .ver { font-size: 0.55em; font-weight: 400;
-                 color: #888; margin-left: 6px; }
-.brand h1 small { display: block; font-size: 0.45em; font-weight: 400;
-                  color: #888; margin-top: 4px; letter-spacing: 0.02em; }
-.status { color: #666; font-size: 0.85em; margin: 16px 0 4px 0;
-          font-family: ui-monospace, monospace; }
-.status span { margin-right: 18px; }
-#chat { margin: 16px 0; max-height: 60vh; overflow-y: auto;
-        border: 1px solid #e0e0e0; border-radius: 6px; padding: 12px;
-        background: #fafafa; }
-.turn { margin-bottom: 14px; }
-.turn .who { font-size: 0.78em; font-weight: 600; color: #666;
-             margin-bottom: 4px; text-transform: uppercase;
-             letter-spacing: 0.05em; }
-.turn.user .who { color: __BRAND__; }
-.turn .body { white-space: pre-wrap; font-family: ui-monospace, monospace;
-              font-size: 0.92em; line-height: 1.45; }
-.turn.assistant .body { color: #222; }
-form { display: flex; gap: 8px; }
-textarea { flex: 1; height: 5em; font-family: ui-monospace, monospace;
-           font-size: 0.95em; padding: 8px;
-           border: 1px solid #ccc; border-radius: 4px; }
-button { padding: 8px 18px; border-radius: 4px; cursor: pointer;
-         border: 1px solid __BRAND__; background: __BRAND__; color: #fff;
-         font-weight: 600; }
-button:hover { opacity: 0.9; }
-.muted { color: #888; font-size: 0.85em; }
-.err { color: #a00; }
-</style>
-</head><body>
-<meta name="csrf-token" content="__CSRF_TOKEN__">
-<header class="brand">
-  __LOGO_SVG__
-  <h1>janus<span class="ver">v__VERSION__</span>
-    <small>__TAGLINE__</small></h1>
-  <button id="logout" type="button"
-          style="margin-left:auto; background:#fff; color:__BRAND__;
-                 border:1px solid __BRAND__; padding:6px 12px;
-                 font-size:0.8em; font-weight:600; border-radius:4px;
-                 cursor:pointer;">sign out</button>
-</header>
-<p class="status">
-  <span>model &middot; __MODEL__</span>
-  <span>workspace &middot; __WORKSPACE__</span>
-  <span>mode &middot; __MODE__</span>
-</p>
-<div id="chat"></div>
-<form id="form" method="post" action="/chat">
-  <textarea name="request" placeholder="message janus..." autofocus></textarea>
-  <button type="submit">send</button>
-</form>
-<script>
-const CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]').content;
-document.getElementById('logout').addEventListener('click', async () => {
-  await fetch('/logout', {method: 'POST', credentials: 'same-origin'});
-  window.location = '/login';
-});
-const SESSION_ID = (function() {
-  let id = sessionStorage.getItem('janus_session');
-  if (!id) {
-    id = (crypto.randomUUID && crypto.randomUUID()) || Math.random().toString(36).slice(2);
-    sessionStorage.setItem('janus_session', id);
-  }
-  return id;
-})();
-const chat = document.getElementById('chat');
-const form = document.getElementById('form');
-
-function escapeHTML(s) {
-  return String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
-}
-function appendTurn(role, body, isError) {
-  const div = document.createElement('div');
-  div.className = 'turn ' + role;
-  div.innerHTML = '<div class="who">' + role + '</div>' +
-                  '<div class="body' + (isError ? ' err' : '') + '">' +
-                  escapeHTML(body) + '</div>';
-  chat.appendChild(div);
-  chat.scrollTop = chat.scrollHeight;
-  return div;
-}
-
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const fd = new FormData(form);
-  const req = (fd.get('request') || '').toString().trim();
-  if (!req) return;
-  appendTurn('user', req);
-  form.querySelector('textarea').value = '';
-  const pending = appendTurn('assistant', '...');
-
-  try {
-    const resp = await fetch('/chat', {
-      method: 'POST',
-      body: JSON.stringify({request: req, session_id: SESSION_ID}),
-      headers: {
-        'content-type': 'application/json',
-        'x-csrf-token': CSRF_TOKEN
-      },
-      credentials: 'same-origin'
-    });
-    const data = await resp.json();
-    if (data.error) {
-      pending.querySelector('.body').textContent = data.error;
-      pending.querySelector('.body').classList.add('err');
-    } else {
-      pending.querySelector('.body').textContent = data.output || '(no output)';
-    }
-  } catch (e) {
-    pending.querySelector('.body').textContent = 'request failed: ' + e;
-    pending.querySelector('.body').classList.add('err');
-  }
-});
-</script>
-</body></html>
-"""
 
 
 def _index_page(csrf_token: str = "") -> str:
     mode = permissions.normalize(config.APPROVAL_MODE)
+    template = _read_template("index.html")
+    if not template:
+        return "<h1>janus</h1><p>static/index.html missing — reinstall janus</p>"
     return (
-        _INDEX_HTML
+        template
         .replace("__LOGO_SVG__", branding.svg_logo("currentColor"))
         .replace("__BRAND__", branding.BRAND_COLOR)
         .replace("__VERSION__", branding.VERSION)
@@ -427,6 +284,7 @@ def _index_page(csrf_token: str = "") -> str:
         .replace("__MODEL__", html.escape(config.MODEL))
         .replace("__WORKSPACE__", html.escape(str(config.WORKSPACE)))
         .replace("__MODE__", html.escape(mode))
+        .replace("__GREETING__", html.escape(gw.greeting()))
         .replace("__CSRF_TOKEN__", html.escape(csrf_token))
     )
 
@@ -435,8 +293,18 @@ def _login_page(error: str = "") -> str:
     err_block = ""
     if error:
         err_block = f'<div class="err">{html.escape(error)}</div>'
+    template = _read_template("login.html")
+    if not template:
+        # Hard fallback — we lost the template but still need to let
+        # the user log in. Bare-minimum form, no CSS.
+        return (
+            "<form method='post' action='/login'>"
+            f"{err_block}"
+            "<input type='password' name='token' placeholder='token' autofocus>"
+            "<button type='submit'>sign in</button></form>"
+        )
     return (
-        _LOGIN_HTML
+        template
         .replace("__LOGO_SVG__", branding.svg_logo("currentColor"))
         .replace("__BRAND__", branding.BRAND_COLOR)
         .replace("__ERROR_BLOCK__", err_block)
@@ -493,6 +361,18 @@ def _build_app():
     # function annotations resolve under `from __future__ import annotations`.
 
     app = FastAPI(title="janus", version=branding.VERSION)
+
+    # v1.22: mount static assets at /static (CSS, JS, vendor libraries
+    # later). The HTML templates with placeholders go through dedicated
+    # routes that substitute __VERSION__ / __MODEL__ / __CSRF_TOKEN__
+    # at request time. Static-only assets are served raw.
+    StaticFiles = _try_import_static_files()
+    if StaticFiles is not None and STATIC_DIR.is_dir():
+        app.mount(
+            "/static",
+            StaticFiles(directory=str(STATIC_DIR), html=False),
+            name="static",
+        )
 
     # ---------- v1.21: unauthenticated routes (login + healthz + assets) ----------
 
@@ -912,6 +792,211 @@ def _build_app():
             "configured": list(config.MEMORY_CATEGORIES),
             "all": {c: memory.read(c) for c in cats},
         })
+
+    # ---------- v1.22.0: API endpoints for the SPA panels ----------
+
+    def _gate_get(request):
+        """Common GET-route gate: returns (auth_sid, error_response_or_None).
+
+        v1.22 panels consume these — auth + rate-limit only. CSRF is
+        skipped because GETs don't change state.
+        """
+        auth_sid, err = _check_auth(request)
+        if err:
+            return None, JSONResponse({"error": err}, status_code=401)
+        ip = _client_ip(request)
+        ok, ra = web_auth.rate_limit_take(auth_sid, "read")
+        if not ok:
+            web_audit.rate_limited(auth_sid, ip, "read", ra)
+            return None, JSONResponse(
+                {"error": "rate limited"}, status_code=429,
+                headers={"Retry-After": str(int(ra) + 1)},
+            )
+        return auth_sid, None
+
+    @app.get("/api/cards")
+    async def api_cards(
+        request: Request,
+        type: str = "",
+        scope: str = "",
+        limit: int = 200,
+    ):
+        """v1.22: list v1.18 typed memory cards with optional filters.
+
+        Filters are applied in pure Python; no DB query change. Returns
+        each card with metadata + a body preview (first 400 chars).
+        """
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            from .. import memory_index, memory_cards
+            try:
+                memory_index.reconcile()
+            except Exception:
+                pass
+            rows = memory_index.list_all() or []
+            cards: list[dict] = []
+            for r in rows:
+                if type and r.get("type") != type:
+                    continue
+                if scope and r.get("scope") != scope:
+                    continue
+                body_preview = ""
+                try:
+                    card = memory_cards.read_card(Path(r["path"]))
+                    body_preview = (card.content or "")[:400]
+                except Exception:
+                    pass
+                cards.append({
+                    "id": r.get("id", ""),
+                    "type": r.get("type", ""),
+                    "subject": r.get("subject", ""),
+                    "scope": r.get("scope", ""),
+                    "confidence": r.get("confidence", 0.0),
+                    "importance": r.get("importance", 0.0),
+                    "durability": r.get("durability", 0.0),
+                    "body": body_preview,
+                })
+                if len(cards) >= limit:
+                    break
+            return JSONResponse({"cards": cards, "total": len(cards)})
+        except Exception as e:
+            return JSONResponse({"error": f"cards listing failed: {e}"})
+
+    @app.get("/api/skills")
+    async def api_skills(request: Request):
+        """v1.22: list installed skills with state + version + description."""
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            installed = skills.list_skills() or []
+            out = []
+            for s in installed:
+                # list_skills returns dicts with keys we surface 1:1.
+                # Be defensive about shape since skill metadata varies.
+                out.append({
+                    "name": s.get("name", "") if isinstance(s, dict) else getattr(s, "name", ""),
+                    "version": s.get("version", "") if isinstance(s, dict) else getattr(s, "version", ""),
+                    "description": (
+                        s.get("description", "") if isinstance(s, dict)
+                        else getattr(s, "description", "")
+                    )[:200],
+                    "state": s.get("state", "") if isinstance(s, dict) else getattr(s, "state", ""),
+                })
+            return JSONResponse({"skills": out, "total": len(out)})
+        except Exception as e:
+            return JSONResponse({"error": f"skills listing failed: {e}"})
+
+    @app.get("/api/files")
+    async def api_files(request: Request, path: str = "."):
+        """v1.22: workspace file tree listing.
+
+        `path` is relative to config.WORKSPACE; resolved via
+        security.resolve_within so callers can't escape the workspace.
+        Returns entries sorted (dirs first, then files alpha).
+        """
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            from .. import security
+            ws = Path(config.WORKSPACE).resolve()
+            target = security.resolve_within(ws, path)
+            if not target.is_dir():
+                return JSONResponse(
+                    {"error": "not a directory"}, status_code=400,
+                )
+            entries = []
+            for child in sorted(
+                target.iterdir(),
+                key=lambda p: (not p.is_dir(), p.name.lower()),
+            ):
+                # Hide dotfiles by default — mirrors the CLI ergonomic.
+                if child.name.startswith("."):
+                    continue
+                rel = str(child.relative_to(ws)).replace("\\", "/")
+                entries.append({
+                    "name": child.name,
+                    "path": rel,
+                    "is_dir": child.is_dir(),
+                    "size": child.stat().st_size if child.is_file() else 0,
+                })
+            current_rel = (
+                str(target.relative_to(ws)).replace("\\", "/")
+                if target != ws else "."
+            )
+            parent_rel = ""
+            if target != ws:
+                parent_rel = str(target.parent.relative_to(ws)).replace("\\", "/") or "."
+            return JSONResponse({
+                "path": current_rel,
+                "parent": parent_rel,
+                "workspace": str(ws),
+                "entries": entries,
+            })
+        except ValueError as e:
+            # security.resolve_within raises ValueError on escape.
+            return JSONResponse(
+                {"error": f"path outside workspace: {e}"}, status_code=400,
+            )
+        except FileNotFoundError:
+            return JSONResponse(
+                {"error": "path not found"}, status_code=404,
+            )
+        except Exception as e:
+            return JSONResponse({"error": f"listing failed: {e}"})
+
+    @app.get("/api/files/read")
+    async def api_files_read(request: Request, path: str = ""):
+        """v1.22: read a workspace file. Returns content as text (UTF-8).
+
+        Refuses files >1MB for now — Monaco editor + huge file handling
+        comes in v1.22.0a along with edits. Binary files are detected
+        and refused (don't dump bytes into a JSON string).
+        """
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        if not path:
+            return JSONResponse({"error": "path required"}, status_code=400)
+        try:
+            from .. import security
+            ws = Path(config.WORKSPACE).resolve()
+            target = security.resolve_within(ws, path)
+            if not target.is_file():
+                return JSONResponse(
+                    {"error": "not a file"}, status_code=400,
+                )
+            size = target.stat().st_size
+            if size > 1_000_000:
+                return JSONResponse(
+                    {"error": f"file too large ({size} bytes); v1.22.0 caps at 1MB"},
+                    status_code=413,
+                )
+            try:
+                content = target.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                return JSONResponse(
+                    {"error": "binary file (not UTF-8)"}, status_code=415,
+                )
+            return JSONResponse({
+                "path": str(target.relative_to(ws)).replace("\\", "/"),
+                "size": size,
+                "content": content,
+            })
+        except ValueError as e:
+            # security.resolve_within raises ValueError on escape.
+            return JSONResponse(
+                {"error": f"path outside workspace: {e}"}, status_code=400,
+            )
+        except FileNotFoundError:
+            return JSONResponse(
+                {"error": "file not found"}, status_code=404,
+            )
+        except Exception as e:
+            return JSONResponse({"error": f"read failed: {e}"})
 
     return app
 
