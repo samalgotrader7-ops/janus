@@ -74,6 +74,19 @@ _BOT_COMMANDS = [
 MAX_MSG = 3500  # leave headroom under Telegram's 4096
 GATEWAY_NAME = "telegram"
 
+# v1.18.1: how long an approval prompt stays "live" before timing out.
+# Pre-v1.18.1 was 180s — way too short for real Telegram UX (notification
+# delays, phone unlocks, multitasking). Late clicks hit a cancelled
+# future and on_callback returned silently with NO visible feedback,
+# making buttons appear to "do nothing".
+APPROVAL_TIMEOUT_S = int(__import__("os").environ.get(
+    "JANUS_TELEGRAM_APPROVAL_TIMEOUT", "1800"
+))
+# Same constant for clarify (model asks user a question via inline KB).
+CLARIFY_TIMEOUT_S = int(__import__("os").environ.get(
+    "JANUS_TELEGRAM_CLARIFY_TIMEOUT", "1800"
+))
+
 
 # ---------- Per-chat session ----------
 
@@ -257,13 +270,49 @@ def _make_approver(chat_id: int, app, sess: Session, loop: asyncio.AbstractEvent
         # operation). Schedule the future on the gateway loop and
         # block this thread on the concurrent.futures.Future returned
         # by run_coroutine_threadsafe.
-        wait_coro = asyncio.wait_for(fut, timeout=180)
+        #
+        # v1.18.1: timeout bumped 180s → 1800s (30 min). 3 minutes was
+        # too short for real Telegram UX (notification delays, phone
+        # unlocks, multi-tasking). Pre-fix bug: user clicks AFTER the
+        # 180s timeout fired, wait_for cancels the future, on_callback
+        # finds fut.done() and returns SILENTLY with no UI feedback.
+        # User sees buttons "do nothing".
+        wait_coro = asyncio.wait_for(fut, timeout=APPROVAL_TIMEOUT_S)
         wait_fut = asyncio.run_coroutine_threadsafe(wait_coro, approver_loop)
         try:
-            return bool(wait_fut.result(timeout=185))
+            return bool(wait_fut.result(timeout=APPROVAL_TIMEOUT_S + 5))
         except (asyncio.TimeoutError, concurrent.futures.TimeoutError):
+            # On timeout, edit the keyboard message so the user knows
+            # the prompt is dead — otherwise a late click hits the
+            # done() future and returns silently.
+            async def _mark_expired() -> None:
+                try:
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"⏱ approval prompt for *{action_label}* expired "
+                            f"after {APPROVAL_TIMEOUT_S // 60} min — "
+                            f"action denied. Re-issue the request to retry."
+                        ),
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _mark_expired(), approver_loop,
+                )
+            except Exception:
+                pass
+            # Drop the future from the dict — late callbacks now see
+            # missing-token rather than done-future. Both paths now
+            # produce visible feedback in on_callback.
+            sess.approval_futures.pop(token, None)
+            sess.approval_futures.pop(token + ".key", None)
             return False
         except Exception:
+            sess.approval_futures.pop(token, None)
+            sess.approval_futures.pop(token + ".key", None)
             return False
     return approver
 
@@ -317,17 +366,40 @@ def _make_telegram_clarify_cb(chat_id: int, app, sess: Session, loop: asyncio.Ab
             sess.clarify_futures["__awaiting_text__"] = fut  # type: ignore
 
         asyncio.run_coroutine_threadsafe(coro, loop)
-        wait_coro = asyncio.wait_for(fut, timeout=300)
+        # v1.18.1: bumped 300s → CLARIFY_TIMEOUT_S (default 1800s).
+        # Same root cause as approval timeout — humans need time.
+        wait_coro = asyncio.wait_for(fut, timeout=CLARIFY_TIMEOUT_S)
         wait_fut = asyncio.run_coroutine_threadsafe(wait_coro, loop)
         try:
-            answer = wait_fut.result(timeout=305)
+            answer = wait_fut.result(timeout=CLARIFY_TIMEOUT_S + 5)
         except (asyncio.TimeoutError, concurrent.futures.TimeoutError):
-            return None
+            answer = None
         except Exception:
-            return None
+            answer = None
         finally:
             sess.clarify_futures.pop(token, None)
             sess.clarify_futures.pop("__awaiting_text__", None)
+        if answer is None:
+            # Send a follow-up so the user knows the prompt is dead.
+            async def _mark_clarify_expired() -> None:
+                try:
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"⏱ clarify prompt expired after "
+                            f"{CLARIFY_TIMEOUT_S // 60} min — "
+                            f"agent proceeded without an answer."
+                        ),
+                    )
+                except Exception:
+                    pass
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _mark_clarify_expired(), loop,
+                )
+            except Exception:
+                pass
+            return None
         if answer is None or not str(answer).strip():
             return None
         # If a numeric/index resolution came back, map to the choice text.
@@ -938,10 +1010,23 @@ async def _run_chat_turn(
 
 
 async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Inline-keyboard taps: approval (`appr:`) and clarify (`clr:`)."""
+    """Inline-keyboard taps: approval (`appr:`) and clarify (`clr:`).
+
+    v1.18.1: when the future is missing OR done (timed out / process
+    restarted / already clicked), give VISIBLE feedback via
+    ``q.answer(text=..., show_alert=True)`` instead of returning
+    silently. Pre-fix bug: clicks after the 180s timeout did nothing
+    visible — user thought buttons were broken (Sam's screenshot
+    2026-05-06).
+    """
     q = update.callback_query
-    await q.answer()
+    # q.answer() may carry a popup. We DON'T answer yet — we want to
+    # potentially answer with text/alert for stale clicks.
     if not _is_authorized(update.effective_chat.id):
+        try:
+            await q.answer(text="not authorized", show_alert=True)
+        except Exception:
+            pass
         return
     data = q.data or ""
 
@@ -952,17 +1037,33 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             _, token, choice = data.split(":", 2)
         except ValueError:
+            try:
+                await q.answer()
+            except Exception:
+                pass
             return
         fut = sess.clarify_futures.pop(token, None)
         if fut is None or fut.done():
+            try:
+                await q.answer(
+                    text="this question expired — re-ask if needed",
+                    show_alert=True,
+                )
+            except Exception:
+                pass
             return
         if choice == "other":
             # User wants to type a free-text answer instead. Re-mark
             # the future as awaiting text and tell them so.
             sess.clarify_futures["__awaiting_text__"] = fut
             try:
+                await q.answer(text="type your answer in chat")
+            except Exception:
+                pass
+            try:
                 await q.edit_message_text(
-                    q.message.text + "\n\n→ type your answer in the chat."
+                    (q.message.text or "")
+                    + "\n\n→ type your answer in the chat."
                 )
             except Exception:
                 pass
@@ -970,18 +1071,53 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Numeric index → resolve immediately (callback maps to choice text).
         fut.set_result(choice)
         try:
-            await q.edit_message_text(q.message.text + f"\n\n→ chose option {int(choice) + 1}")
+            await q.answer(text=f"chose option {int(choice) + 1}")
+        except Exception:
+            pass
+        try:
+            await q.edit_message_text(
+                (q.message.text or "")
+                + f"\n\n→ chose option {int(choice) + 1}"
+            )
         except Exception:
             pass
         return
 
     if not data.startswith("appr:"):
+        try:
+            await q.answer()
+        except Exception:
+            pass
         return
-    _, token, choice = data.split(":", 2)
+    try:
+        _, token, choice = data.split(":", 2)
+    except ValueError:
+        try:
+            await q.answer()
+        except Exception:
+            pass
+        return
     fut = sess.approval_futures.pop(token, None)
     cap_key = sess.approval_futures.pop(token + ".key", None)
 
     if fut is None or fut.done():
+        # Stale click — prompt expired (timeout fired or process
+        # restarted). Show the user a popup so they know the click
+        # registered but the request is gone.
+        try:
+            await q.answer(
+                text="this approval prompt expired — re-issue the request",
+                show_alert=True,
+            )
+        except Exception:
+            pass
+        # Best-effort: edit the message so it's clear the buttons are dead.
+        try:
+            await q.edit_message_text(
+                (q.message.text or "(approval prompt)") + "\n\n→ (expired)"
+            )
+        except Exception:
+            pass
         return
 
     granted = choice in ("once", "sess", "always")
@@ -997,8 +1133,15 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "always": "approved (always)",
         "deny": "denied",
     }.get(choice, "")
+    # Popup feedback first — this works even if edit_message_text fails.
     try:
-        await q.edit_message_text(q.message.text + f"\n\n→ {label}")
+        await q.answer(text=label or choice)
+    except Exception:
+        pass
+    try:
+        await q.edit_message_text(
+            (q.message.text or "(approval prompt)") + f"\n\n→ {label}"
+        )
     except Exception:
         pass
 
