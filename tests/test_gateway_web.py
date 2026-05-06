@@ -74,11 +74,31 @@ class _FakeUvicorn:
 _HAS_FASTAPI = web_mod._try_import_fastapi() is not None
 
 
-@pytest.mark.skipif(not _HAS_FASTAPI, reason="fastapi not installed")
-def test_index_page_renders(janus_home):
+def _authed_client(janus_home_path=None):
+    """v1.21: TestClient with a logged-in session cookie + CSRF token.
+
+    Each test that hits authenticated routes uses this helper. The
+    `csrf_token` attribute on the returned client is what callers must
+    send as `X-CSRF-Token` on POSTs.
+    """
     from fastapi.testclient import TestClient
+    from janus.gateways import web_auth, web_audit
+    # Reset rate limiter + login throttle state so tests don't poison
+    # each other.
+    web_auth.rate_limit_reset()
+    web_auth.reset_login_throttle()
     app = web_mod._build_app()
     c = TestClient(app)
+    token = web_auth.get_or_create_bootstrap_token()
+    r = c.post("/login", json={"token": token})
+    assert r.status_code == 200, f"login failed: {r.status_code} {r.text}"
+    c.csrf_token = r.json()["csrf_token"]  # type: ignore[attr-defined]
+    return c
+
+
+@pytest.mark.skipif(not _HAS_FASTAPI, reason="fastapi not installed")
+def test_index_page_renders(janus_home):
+    c = _authed_client(janus_home)
     r = c.get("/")
     assert r.status_code == 200
     body = r.text
@@ -89,10 +109,13 @@ def test_index_page_renders(janus_home):
     # Tagline reaches the page.
     from janus import branding
     assert branding.TAGLINE in body
+    # v1.21: CSRF token embedded as <meta>.
+    assert 'name="csrf-token"' in body
 
 
 @pytest.mark.skipif(not _HAS_FASTAPI, reason="fastapi not installed")
 def test_favicon_route_serves_svg(janus_home):
+    # Favicon doesn't require auth (assets are public).
     from fastapi.testclient import TestClient
     app = web_mod._build_app()
     c = TestClient(app)
@@ -112,12 +135,13 @@ def test_chat_endpoint_returns_output(janus_home, fake_llm):
     """v1.3: POST /chat drives executor.chat() against a session-scoped
     messages list. First turn prepends a self-intro from soul.md + user.md;
     the assistant's text follows after a blank line."""
-    from fastapi.testclient import TestClient
     fake_llm.append({"role": "assistant", "content": "hi back"})
     web_mod._SESSIONS.clear()
-    app = web_mod._build_app()
-    c = TestClient(app)
-    r = c.post("/chat", json={"request": "hi", "session_id": "s1"})
+    c = _authed_client(janus_home)
+    r = c.post(
+        "/chat", json={"request": "hi", "session_id": "s1"},
+        headers={"x-csrf-token": c.csrf_token},
+    )
     assert r.status_code == 200
     data = r.json()
     # v1.3 self-intro is prepended on the first turn — "hi back" still in there.
@@ -127,10 +151,11 @@ def test_chat_endpoint_returns_output(janus_home, fake_llm):
 
 @pytest.mark.skipif(not _HAS_FASTAPI, reason="fastapi not installed")
 def test_chat_endpoint_rejects_empty_request(janus_home):
-    from fastapi.testclient import TestClient
-    app = web_mod._build_app()
-    c = TestClient(app)
-    r = c.post("/chat", json={"request": ""})
+    c = _authed_client(janus_home)
+    r = c.post(
+        "/chat", json={"request": ""},
+        headers={"x-csrf-token": c.csrf_token},
+    )
     assert r.status_code == 200
     assert "error" in r.json()
 
@@ -139,16 +164,20 @@ def test_chat_endpoint_rejects_empty_request(janus_home):
 def test_chat_endpoint_keeps_session_history(janus_home, fake_llm):
     """Two requests with the same session_id should accumulate messages
     in the per-session list — second turn's context includes the first."""
-    from fastapi.testclient import TestClient
     fake_llm.append({"role": "assistant", "content": "first"})
     fake_llm.append({"role": "assistant", "content": "second"})
     # Reset session store so prior tests don't pollute.
     web_mod._SESSIONS.clear()
 
-    app = web_mod._build_app()
-    c = TestClient(app)
-    c.post("/chat", json={"request": "one", "session_id": "abc"})
-    c.post("/chat", json={"request": "two", "session_id": "abc"})
+    c = _authed_client(janus_home)
+    c.post(
+        "/chat", json={"request": "one", "session_id": "abc"},
+        headers={"x-csrf-token": c.csrf_token},
+    )
+    c.post(
+        "/chat", json={"request": "two", "session_id": "abc"},
+        headers={"x-csrf-token": c.csrf_token},
+    )
 
     msgs = web_mod._SESSIONS["abc"]
     # system + user1 + assistant1 + user2 + assistant2

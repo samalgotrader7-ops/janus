@@ -203,6 +203,11 @@ def _run_telegram():
 
 
 def _run_web(args):
+    # v1.21: subcommands. `janus web` (no args) starts the server.
+    # `janus web rotate-token` regenerates the bootstrap token.
+    if args and args[0] == "rotate-token":
+        from .gateways.web import rotate_token_cmd
+        sys.exit(rotate_token_cmd())
     from .gateways.web import serve
     host = None
     port = None

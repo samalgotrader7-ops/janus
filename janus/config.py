@@ -58,7 +58,36 @@ HISTORY_FILE: Path = HOME / "cli_history"
 WORKSPACE: Path = Path(os.getenv("JANUS_WORKSPACE", str(Path.cwd()))).resolve()
 
 # --- Loop limits ---
-MAX_STEPS: int = int(os.getenv("JANUS_MAX_STEPS", "25"))
+# v1.20: step-budget redesign. Single hard counter (MAX_STEPS=25) was
+# tripping mid-task on multi-stage workflows. Replaced with soft/hard
+# caps + progress-aware extension. Behavior:
+#   0..STEP_SOFT_CAP   : normal operation
+#   STEP_SOFT_CAP      : inject "wrap up" reminder once
+#   ..STEP_HARD_CAP    : each successful write/exec tool extends runway
+#                        by STEP_PROGRESS_GRACE (capped at hard cap)
+#   STEP_HARD_CAP      : in default mode, prompt user to continue;
+#                        in auto/bypass, auto-extend ONCE on progress
+#                        then truly terminate; in plan, terminate.
+# Backward compat: JANUS_MAX_STEPS still accepted as alias for
+# STEP_HARD_CAP (legacy single-knob), and if only that is set the soft
+# cap defaults to MAX_STEPS // 2.
+_LEGACY_MAX_STEPS_ENV = os.getenv("JANUS_MAX_STEPS")
+STEP_HARD_CAP: int = int(
+    os.getenv("JANUS_STEP_HARD_CAP", _LEGACY_MAX_STEPS_ENV or "200")
+)
+STEP_SOFT_CAP: int = int(
+    os.getenv(
+        "JANUS_STEP_SOFT_CAP",
+        str(int(_LEGACY_MAX_STEPS_ENV) // 2)
+        if _LEGACY_MAX_STEPS_ENV
+        else "50",
+    )
+)
+STEP_PROGRESS_GRACE: int = int(os.getenv("JANUS_STEP_PROGRESS_GRACE", "20"))
+# MAX_STEPS retained as backward-compat alias. Old code reading it gets
+# the hard cap, which preserves the "absolute ceiling" semantics it
+# always had (just at a higher default).
+MAX_STEPS: int = STEP_HARD_CAP
 LLM_TIMEOUT: int = int(os.getenv("JANUS_LLM_TIMEOUT", "180"))
 # Hard cap on shell tool timeout so the model can't hang the agent for
 # hours by passing timeout=600000 (a v1.1 incident: model thought the

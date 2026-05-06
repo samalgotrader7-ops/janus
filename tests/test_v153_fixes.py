@@ -16,16 +16,25 @@ from janus import executor
 
 def test_executor_emits_model_start_at_each_step():
     """Source-level pin: chat() emits a model_start step BEFORE the
-    LLM call inside the for-loop. This fires every iteration, so step 1+
-    get an indicator (step 0 is covered by the CLI's pre-call ⚡ thinking)."""
+    LLM call inside the per-step loop. This fires every iteration, so
+    step 1+ get an indicator (step 0 is covered by the CLI's pre-call
+    ⚡ thinking).
+
+    v1.20: the loop changed from `for step in range(config.MAX_STEPS)`
+    to `for step in itertools.count()` because the budget became
+    dynamic (soft cap + progress extension + user continuation gate).
+    Match either shape for forward compatibility.
+    """
     src = inspect.getsource(executor.chat)
     # The model_start emit
     assert "model_start" in src
-    # Must be inside the for-step loop AND before llm.chat_stream
-    loop_idx = src.find("for step in range(config.MAX_STEPS):")
+    # Must be inside a for-step loop AND before llm.chat_stream.
+    loop_idx = src.find("for step in itertools.count()")
+    if loop_idx < 0:
+        loop_idx = src.find("for step in range(config.MAX_STEPS):")
     model_start_idx = src.find('"model_start"')
     chat_stream_idx = src.find("llm.chat_stream(")
-    assert loop_idx >= 0
+    assert loop_idx >= 0, "expected a per-step loop in chat()"
     assert model_start_idx >= 0
     assert chat_stream_idx >= 0
     assert loop_idx < model_start_idx < chat_stream_idx, (

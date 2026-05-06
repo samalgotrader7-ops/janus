@@ -41,6 +41,20 @@ from .. import config, executor, logger, memory, skills, hooks, permissions
 from .. import branding, cost
 from ..tools import default_registry, make_protected, CapabilitySet
 from . import _common as gw
+from . import web_auth, web_audit
+
+# v1.21: FastAPI types must be visible at module-level so route function
+# annotations resolve under `from __future__ import annotations`. When
+# FastAPI isn't installed we set placeholders — `_try_import_fastapi`
+# is the runtime gate that prevents anyone calling _build_app().
+try:
+    from fastapi import Request as _FastAPIRequest
+    from fastapi.responses import RedirectResponse as _FastAPIRedirectResponse
+    Request = _FastAPIRequest
+    RedirectResponse = _FastAPIRedirectResponse
+except ImportError:
+    Request = Any  # type: ignore[assignment,misc]
+    RedirectResponse = None  # type: ignore[assignment]
 
 GATEWAY_NAME = "web"
 
@@ -48,6 +62,20 @@ GATEWAY_NAME = "web"
 def _pairing_required() -> bool:
     """When binding non-localhost, require pairing unless explicitly off."""
     return os.environ.get("JANUS_WEB_PAIRING", "").lower() in ("1", "true", "yes")
+
+
+def _localhost_no_auth() -> bool:
+    """v1.21: opt-in escape hatch for localhost-only deployments where
+    the operator has decided HTTP auth is unnecessary (e.g., dev VM
+    bound to 127.0.0.1, single-user laptop). OFF by default — even
+    localhost requires auth in v1.21+ unless this is set."""
+    return os.environ.get("JANUS_WEB_LOCALHOST_NO_AUTH", "").lower() in (
+        "1", "true", "yes",
+    )
+
+
+def _is_localhost_request(client_host: str) -> bool:
+    return client_host in ("127.0.0.1", "::1", "localhost", "testclient")
 
 
 _FASTAPI_HINT = (
@@ -205,6 +233,59 @@ def _make_web_approver(mode: str):
     return approver
 
 
+_LOGIN_HTML = """<!doctype html>
+<html><head>
+<meta charset="utf-8" />
+<title>janus &mdash; sign in</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+body { font-family: system-ui, sans-serif; max-width: 460px;
+       margin: 8vh auto; padding: 24px; color: #222; }
+.brand { display: flex; align-items: center; gap: 14px;
+         color: __BRAND__; margin-bottom: 32px; }
+.brand svg { width: 40px; height: 40px; flex: none; }
+.brand h1 { margin: 0; font-size: 1.3em; font-weight: 600;
+            color: __BRAND__; }
+form { display: flex; flex-direction: column; gap: 12px; }
+label { font-size: 0.92em; color: #555; }
+input[type="password"] { font-family: ui-monospace, monospace;
+                         padding: 10px; border: 1px solid #ccc;
+                         border-radius: 4px; font-size: 0.92em; }
+button { padding: 10px 18px; border-radius: 4px; cursor: pointer;
+         border: 1px solid __BRAND__; background: __BRAND__;
+         color: #fff; font-weight: 600; font-size: 0.95em; }
+button:hover { opacity: 0.9; }
+.muted { color: #888; font-size: 0.85em; line-height: 1.5; }
+.err { color: #a00; padding: 8px 12px; background: #fee;
+       border: 1px solid #fcc; border-radius: 4px;
+       margin-bottom: 12px; font-size: 0.9em; }
+.help { margin-top: 24px; font-size: 0.85em; color: #666;
+        line-height: 1.6; }
+code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px;
+       font-family: ui-monospace, monospace; }
+</style>
+</head><body>
+<header class="brand">
+  __LOGO_SVG__
+  <h1>janus &mdash; sign in</h1>
+</header>
+__ERROR_BLOCK__
+<form method="post" action="/login">
+  <label>Bootstrap token</label>
+  <input type="password" name="token" autofocus required
+         placeholder="paste from ~/.janus/web_token" />
+  <button type="submit">sign in</button>
+</form>
+<div class="help">
+The bootstrap token is in <code>~/.janus/web_token</code> on the
+server. The first time <code>janus web</code> starts it prints the
+token to the console; you can also <code>cat</code> the file directly.
+Rotate with <code>janus web rotate-token</code>.
+</div>
+</body></html>
+"""
+
+
 _INDEX_HTML = """<!doctype html>
 <html><head>
 <meta charset="utf-8" />
@@ -247,10 +328,16 @@ button:hover { opacity: 0.9; }
 .err { color: #a00; }
 </style>
 </head><body>
+<meta name="csrf-token" content="__CSRF_TOKEN__">
 <header class="brand">
   __LOGO_SVG__
   <h1>janus<span class="ver">v__VERSION__</span>
     <small>__TAGLINE__</small></h1>
+  <button id="logout" type="button"
+          style="margin-left:auto; background:#fff; color:__BRAND__;
+                 border:1px solid __BRAND__; padding:6px 12px;
+                 font-size:0.8em; font-weight:600; border-radius:4px;
+                 cursor:pointer;">sign out</button>
 </header>
 <p class="status">
   <span>model &middot; __MODEL__</span>
@@ -263,6 +350,11 @@ button:hover { opacity: 0.9; }
   <button type="submit">send</button>
 </form>
 <script>
+const CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]').content;
+document.getElementById('logout').addEventListener('click', async () => {
+  await fetch('/logout', {method: 'POST', credentials: 'same-origin'});
+  window.location = '/login';
+});
 const SESSION_ID = (function() {
   let id = sessionStorage.getItem('janus_session');
   if (!id) {
@@ -301,7 +393,11 @@ form.addEventListener('submit', async (e) => {
     const resp = await fetch('/chat', {
       method: 'POST',
       body: JSON.stringify({request: req, session_id: SESSION_ID}),
-      headers: {'content-type': 'application/json'}
+      headers: {
+        'content-type': 'application/json',
+        'x-csrf-token': CSRF_TOKEN
+      },
+      credentials: 'same-origin'
     });
     const data = await resp.json();
     if (data.error) {
@@ -320,7 +416,7 @@ form.addEventListener('submit', async (e) => {
 """
 
 
-def _index_page() -> str:
+def _index_page(csrf_token: str = "") -> str:
     mode = permissions.normalize(config.APPROVAL_MODE)
     return (
         _INDEX_HTML
@@ -331,7 +427,61 @@ def _index_page() -> str:
         .replace("__MODEL__", html.escape(config.MODEL))
         .replace("__WORKSPACE__", html.escape(str(config.WORKSPACE)))
         .replace("__MODE__", html.escape(mode))
+        .replace("__CSRF_TOKEN__", html.escape(csrf_token))
     )
+
+
+def _login_page(error: str = "") -> str:
+    err_block = ""
+    if error:
+        err_block = f'<div class="err">{html.escape(error)}</div>'
+    return (
+        _LOGIN_HTML
+        .replace("__LOGO_SVG__", branding.svg_logo("currentColor"))
+        .replace("__BRAND__", branding.BRAND_COLOR)
+        .replace("__ERROR_BLOCK__", err_block)
+    )
+
+
+# v1.21: helper to extract the client IP. FastAPI's request.client may
+# be None in some contexts; we coerce to a stable string.
+def _client_ip(request) -> str:
+    try:
+        if request.client and request.client.host:
+            return request.client.host
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _check_auth(request) -> tuple[str | None, str | None]:
+    """v1.21 auth gate. Returns (sid, error). If sid is non-None the
+    request is authenticated; if error is non-None the caller must
+    respond 401 with that message.
+
+    Localhost-only deployments can opt out via JANUS_WEB_LOCALHOST_NO_AUTH=1.
+    Other binds always require a signed session cookie.
+    """
+    client_host = _client_ip(request)
+    if _is_localhost_request(client_host) and _localhost_no_auth():
+        return ("__localhost_no_auth__", None)
+    cookie = request.cookies.get(web_auth.cookie_name())
+    sid = web_auth.verify_session(cookie or "")
+    if not sid:
+        return (None, "authentication required")
+    return (sid, None)
+
+
+def _check_csrf(request, sid: str) -> bool:
+    """v1.21: validate the X-CSRF-Token header against the session.
+
+    For non-mutating GETs we don't bother checking. Localhost-no-auth
+    sessions skip CSRF too (the bypass implies operator trust).
+    """
+    if sid == "__localhost_no_auth__":
+        return True
+    token = request.headers.get("x-csrf-token", "")
+    return web_auth.verify_csrf(sid, token)
 
 
 def _build_app():
@@ -339,12 +489,19 @@ def _build_app():
     if deps is None:
         raise ImportError(_FASTAPI_HINT)
     FastAPI, Body, HTMLResponse, JSONResponse, _uvicorn = deps
+    # Request / RedirectResponse are imported at module-level so route
+    # function annotations resolve under `from __future__ import annotations`.
 
     app = FastAPI(title="janus", version=branding.VERSION)
 
-    @app.get("/")
-    async def index():
-        return HTMLResponse(_index_page())
+    # ---------- v1.21: unauthenticated routes (login + healthz + assets) ----------
+
+    @app.get("/healthz")
+    async def healthz():
+        # Cheap liveness probe. Intentionally returns no version /
+        # workspace info — that would leak deployment metadata to
+        # unauthenticated callers.
+        return JSONResponse({"status": "ok"})
 
     @app.get("/favicon.svg")
     async def favicon():
@@ -353,14 +510,162 @@ def _build_app():
             media_type="image/svg+xml",
         )
 
+    @app.get("/login")
+    async def login_page(request: Request, error: str = ""):
+        # If already authenticated, send the user to the index instead
+        # of re-prompting.
+        sid, _err = _check_auth(request)
+        if sid is not None:
+            return RedirectResponse(url="/", status_code=303)
+        return HTMLResponse(_login_page(error=error))
+
+    @app.post("/login")
+    async def login_post(request: Request):
+        # Body type is determined by content-type header. JSON for the
+        # JS fetch() flow; form-urlencoded for the no-JS HTML form.
+        # Read both manually so neither path 422s.
+        ip = _client_ip(request)
+        ua = request.headers.get("user-agent", "")[:200]
+
+        # Login throttle — block hammering even before checking the token.
+        blocked, retry_after = web_auth.is_ip_blocked(ip)
+        if blocked:
+            web_audit.login_failure(
+                ip, reason=f"blocked_ip ({retry_after}s remaining)", ua=ua,
+            )
+            return JSONResponse(
+                {"error": f"too many failed attempts; try again in {retry_after}s"},
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        # Rate-limit "auth" route class to prevent brute-force at high
+        # concurrency from one IP.
+        ok, ra = web_auth.rate_limit_take(ip, "auth")
+        if not ok:
+            return JSONResponse(
+                {"error": "rate limited"},
+                status_code=429,
+                headers={"Retry-After": str(int(ra) + 1)},
+            )
+
+        token = ""
+        is_form = False
+        # Try JSON body first (the JS fetch() flow). If that fails, fall
+        # back to form-urlencoded (the no-JS HTML form fallback).
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                token = (body.get("token") or "").strip()
+        except Exception:
+            body = None
+        if not token:
+            try:
+                form = await request.form()
+                token = (form.get("token") or "").strip()
+                if token:
+                    is_form = True
+            except Exception:
+                pass
+
+        if not web_auth.verify_bootstrap_token(token):
+            web_auth.record_login_attempt(ip, success=False)
+            web_audit.login_failure(ip, reason="bad_token", ua=ua)
+            if is_form:
+                # Render login page with error so the user sees feedback.
+                return HTMLResponse(
+                    _login_page(error="invalid token"),
+                    status_code=401,
+                )
+            return JSONResponse(
+                {"error": "invalid token"}, status_code=401,
+            )
+
+        # Success — issue a signed session cookie.
+        web_auth.record_login_attempt(ip, success=True)
+        sid = uuid.uuid4().hex
+        cookie_value = web_auth.sign_session(sid)
+        web_audit.login_success(ip, ua=ua)
+        web_audit.session_create(sid, ip)
+
+        # Form POST → 303 redirect to /. JSON POST → JSON response with
+        # csrf_token (caller stashes it for subsequent fetch() requests).
+        if is_form:
+            resp = RedirectResponse(url="/", status_code=303)
+        else:
+            csrf = web_auth.make_csrf_token(sid)
+            resp = JSONResponse({"ok": True, "csrf_token": csrf})
+        resp.set_cookie(
+            web_auth.cookie_name(),
+            cookie_value,
+            max_age=web_auth.session_ttl_seconds(),
+            httponly=True,
+            samesite="strict",
+            # Secure flag set when the request looks TLS-terminated
+            # (common reverse-proxy header). Localhost dev keeps it off.
+            secure=request.headers.get("x-forwarded-proto") == "https",
+        )
+        return resp
+
+    @app.post("/logout")
+    async def logout(request: Request):
+        sid, err = _check_auth(request)
+        ip = _client_ip(request)
+        if sid and sid != "__localhost_no_auth__":
+            web_audit.session_destroy(sid, ip, reason="logout")
+        resp = JSONResponse({"ok": True})
+        resp.delete_cookie(web_auth.cookie_name())
+        return resp
+
+    # ---------- v1.21: auth-gated routes ----------
+
+    @app.get("/")
+    async def index(request: Request):
+        sid, err = _check_auth(request)
+        if err:
+            return RedirectResponse(url="/login", status_code=303)
+        # v1.21: mint a CSRF token bound to this session and embed it
+        # in the page. Frontend reads from <meta name="csrf-token"> and
+        # sends as X-CSRF-Token on POSTs.
+        csrf = web_auth.make_csrf_token(sid)
+        return HTMLResponse(_index_page(csrf_token=csrf))
+
     @app.post("/chat")
-    async def chat(body: dict = Body(default={})):
+    async def chat(request: Request, body: dict = Body(default={})):
+        # v1.21: auth gate. The auth_sid (signed cookie) is independent
+        # of the conversation-session_id below — auth gates access while
+        # body.session_id keys conversation history.
+        auth_sid, err = _check_auth(request)
+        if err:
+            return JSONResponse({"error": err}, status_code=401)
+        ip = _client_ip(request)
+
+        # v1.21: rate limit before doing real work.
+        ok, retry_after = web_auth.rate_limit_take(auth_sid, "chat")
+        if not ok:
+            web_audit.rate_limited(auth_sid, ip, "chat", retry_after)
+            return JSONResponse(
+                {"error": "rate limited"}, status_code=429,
+                headers={"Retry-After": str(int(retry_after) + 1)},
+            )
+
+        # v1.21: CSRF check for state-changing POSTs.
+        if not _check_csrf(request, auth_sid):
+            web_audit.csrf_failure(auth_sid, ip, "/chat")
+            return JSONResponse(
+                {"error": "missing or invalid CSRF token"},
+                status_code=403,
+            )
+
         if not isinstance(body, dict):
             body = {}
         req = (body.get("request") or "").strip()
         sid = (body.get("session_id") or "").strip() or uuid.uuid4().hex
         if not req:
             return JSONResponse({"error": "empty request"})
+
+        # Audit log the chat call (just length, not content).
+        web_audit.chat(auth_sid, ip, len(req))
 
         # v1.3 pairing — only enforced when the operator opts in.
         if _pairing_required() and not gw.is_authorized(GATEWAY_NAME, sid):
@@ -516,16 +821,36 @@ def _build_app():
         return JSONResponse({"output": final_output, "session_id": sid})
 
     @app.post("/home")
-    async def set_home(body: dict = Body(default={})):
+    async def set_home(request: Request, body: dict = Body(default={})):
         """v1.3: designate this browser session as the web home channel.
 
         Cron output and cross-platform messages route here when this
         session is online.
+
+        v1.21: auth + CSRF required.
         """
+        auth_sid, err = _check_auth(request)
+        if err:
+            return JSONResponse({"error": err}, status_code=401)
+        ip = _client_ip(request)
+        ok, ra = web_auth.rate_limit_take(auth_sid, "read")
+        if not ok:
+            web_audit.rate_limited(auth_sid, ip, "read", ra)
+            return JSONResponse(
+                {"error": "rate limited"}, status_code=429,
+                headers={"Retry-After": str(int(ra) + 1)},
+            )
+        if not _check_csrf(request, auth_sid):
+            web_audit.csrf_failure(auth_sid, ip, "/home")
+            return JSONResponse(
+                {"error": "missing or invalid CSRF token"},
+                status_code=403,
+            )
         sid = (body.get("session_id") or "").strip()
         if not sid:
             return JSONResponse({"error": "session_id required"})
         gw.set_home(GATEWAY_NAME, sid)
+        web_audit.mutate(auth_sid, ip, "/home", ["session_id"])
         logger.write({
             "ts": logger.now_iso(), "type": "sethome",
             "gateway": GATEWAY_NAME, "session_id": sid,
@@ -533,8 +858,19 @@ def _build_app():
         return JSONResponse({"ok": True, "home": sid})
 
     @app.get("/cost")
-    async def get_cost(session_id: str = ""):
-        """v1.3 L3 #2 — per-chat cost summary."""
+    async def get_cost(request: Request, session_id: str = ""):
+        """v1.3 L3 #2 — per-chat cost summary. v1.21: auth required."""
+        auth_sid, err = _check_auth(request)
+        if err:
+            return JSONResponse({"error": err}, status_code=401)
+        ip = _client_ip(request)
+        ok, ra = web_auth.rate_limit_take(auth_sid, "read")
+        if not ok:
+            web_audit.rate_limited(auth_sid, ip, "read", ra)
+            return JSONResponse(
+                {"error": "rate limited"}, status_code=429,
+                headers={"Retry-After": str(int(ra) + 1)},
+            )
         if not session_id:
             return JSONResponse({
                 "summary": "session_id required (per-chat ledger)",
@@ -547,8 +883,24 @@ def _build_app():
         })
 
     @app.get("/memory")
-    async def get_memory(category: str = ""):
-        """v1.3: list memory categories or fetch one."""
+    async def get_memory(request: Request, category: str = ""):
+        """v1.3: list memory categories or fetch one. v1.21: auth required.
+
+        Pre-v1.21 this was UNAUTHENTICATED — anyone on the network could
+        read the user's full memory dump including identity, soul, and
+        relationship cards. Hardened in v1.21.
+        """
+        auth_sid, err = _check_auth(request)
+        if err:
+            return JSONResponse({"error": err}, status_code=401)
+        ip = _client_ip(request)
+        ok, ra = web_auth.rate_limit_take(auth_sid, "read")
+        if not ok:
+            web_audit.rate_limited(auth_sid, ip, "read", ra)
+            return JSONResponse(
+                {"error": "rate limited"}, status_code=429,
+                headers={"Retry-After": str(int(ra) + 1)},
+            )
         if category:
             return JSONResponse({
                 "category": category,
@@ -594,7 +946,58 @@ def serve(host: str | None = None, port: int | None = None) -> int:
         return 2
 
     chosen_port = port if port is not None else config.WEB_PORT
+
+    # v1.21: bootstrap-token visibility. Read or create the token; on
+    # first start it's freshly generated, so print it. Subsequent starts
+    # find it on disk and stay quiet (the user already saw it once or
+    # has `cat ~/.janus/web_token`).
+    token_path = config.HOME / "web_token"
+    is_fresh = not token_path.exists()
+    token = web_auth.get_or_create_bootstrap_token()
+
     print(f"janus web UI on http://{chosen_host}:{chosen_port}")
+    print(f"login at http://{chosen_host}:{chosen_port}/login")
+
+    is_local = chosen_host in ("127.0.0.1", "localhost", "::1")
+    if is_fresh:
+        print()
+        print("  bootstrap token (paste at /login):")
+        print(f"    {token}")
+        print(f"  (saved to {token_path}, mode 0600)")
+        print("  rotate with: janus web rotate-token")
+        print()
+    if not is_local:
+        print(
+            "  WARNING: binding non-localhost. Put a TLS-terminating "
+            "reverse proxy (Caddy/nginx) in front of this — Janus "
+            "speaks HTTP only by design.\n"
+            "  Example Caddyfile:\n"
+            "    janus.example.com {\n"
+            f"        reverse_proxy {chosen_host}:{chosen_port}\n"
+            "    }\n"
+        )
+    if _localhost_no_auth():
+        print(
+            "  WARNING: JANUS_WEB_LOCALHOST_NO_AUTH=1 — auth bypassed "
+            "for localhost requests. Only set this if you trust every "
+            "process on this machine."
+        )
+
     app = _build_app()
     uvicorn.run(app, host=chosen_host, port=chosen_port, log_level="info")
+    return 0
+
+
+def rotate_token_cmd() -> int:
+    """`janus web rotate-token` — generate a fresh bootstrap token.
+
+    Existing signed sessions remain valid until expiry. Anyone holding
+    the OLD token can no longer create new sessions.
+    """
+    config.ensure_home()
+    new_token = web_auth.rotate_bootstrap_token()
+    web_audit.token_rotate(ip="local-cli")
+    print(f"new bootstrap token: {new_token}")
+    print(f"  saved to {config.HOME / 'web_token'} (mode 0600)")
+    print("  existing logged-in sessions remain valid until they expire")
     return 0

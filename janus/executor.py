@@ -22,6 +22,7 @@ Bounded by config.MAX_STEPS to prevent runaway loops.
 """
 
 from __future__ import annotations
+import itertools
 import json
 from typing import Callable
 
@@ -136,6 +137,90 @@ def _build_nudge(reason: str, user_input: str, attempt: int) -> str:
     return head
 
 
+# v1.20 — step-budget redesign. The pre-v1.20 loop was a hard ceiling
+# at MAX_STEPS=25 that tripped mid-task on multi-stage workflows. The
+# new design has three knobs (config.STEP_SOFT_CAP / STEP_HARD_CAP /
+# STEP_PROGRESS_GRACE) and four behaviors:
+#   * 0..soft_cap        : normal operation
+#   * crossing soft_cap  : inject "wrap up" reminder once
+#   * each productive    : extend current_cap by progress_grace
+#     write/exec result    (capped at hard_cap × 2 — user extension is
+#                          the only path past that)
+#   * hitting current_cap: in default mode, prompt user via approver;
+#                          in auto/bypass, auto-extend ONCE if any
+#                          productive step happened; in plan, terminate.
+
+def _is_productive(tool_name: str, result: str, tools: Registry) -> bool:
+    """A tool call is a 'productive milestone' if it actually changed
+    state and didn't error. Read-only tools (fs_read, fs_list, grep)
+    don't count — endless browsing shouldn't extend the runway. Used
+    by chat() and execute() for v1.20 progress-aware budget extension.
+    """
+    # Registry stores tools in _tools dict keyed by name. No public
+    # .get() yet; reach in directly. If the tool isn't found (e.g., a
+    # recovered/synthetic call), treat as non-productive — safe default.
+    tool = getattr(tools, "_tools", {}).get(tool_name)
+    if tool is None:
+        return False
+    risk = getattr(tool, "risk", "read")
+    if risk not in ("write", "exec"):
+        return False
+    head = (result or "").lstrip()[:80].lower()
+    if head.startswith("[error") or head.startswith("refused"):
+        return False
+    if head.startswith("error:") or head.startswith("error "):
+        return False
+    return True
+
+
+def _build_soft_cap_reminder(step: int, hard_cap: int) -> str:
+    return (
+        f"[system] You've used {step} steps already. The hard cap is "
+        f"{hard_cap}. Start wrapping up — finish the most important "
+        "remaining sub-tasks, then give the user a concise final "
+        "answer. Don't start new exploratory work."
+    )
+
+
+def _try_extend_budget(
+    *,
+    mode: str,
+    approver: Callable[..., bool] | None,
+    step: int,
+    hard_cap: int,
+    productive_count: int,
+    already_auto_extended: bool,
+) -> tuple[bool, str]:
+    """Hit the hard cap. Try to extend; return (granted, reason).
+
+    default     → ask the user via approver (blocks)
+    auto/bypass → auto-extend ONCE if any productive step happened
+    plan        → never extend (mode forbids side effects)
+    """
+    if mode == "plan":
+        return (False, "plan_mode")
+    if mode in ("auto", "bypassPermissions"):
+        if already_auto_extended:
+            return (False, "auto_already_extended")
+        if productive_count == 0:
+            return (False, "no_progress")
+        return (True, "auto_extended")
+    if approver is None:
+        return (False, "no_approver")
+    try:
+        granted = bool(approver(
+            "extend step budget",
+            (
+                f"Reached step {step} without a final answer. "
+                f"Continue with another {hard_cap}-step budget?"
+            ),
+            risk="ask",
+        ))
+    except Exception:
+        return (False, "approver_error")
+    return (granted, "user_granted" if granted else "user_denied")
+
+
 def execute(
     original_request: str,
     chosen_label: str,
@@ -199,7 +284,67 @@ def execute(
     # fake_llm test stubs that don't accept the kwarg).
     model_kw = {"model": model} if model is not None else {}
 
-    for step in range(config.MAX_STEPS):
+    # v1.20: step-budget redesign — same shape as chat() for parity.
+    # See module-level _is_productive / _try_extend_budget helpers.
+    soft_cap = config.STEP_SOFT_CAP
+    hard_cap = config.STEP_HARD_CAP
+    progress_grace = config.STEP_PROGRESS_GRACE
+    current_cap = hard_cap
+    soft_warned = False
+    productive_count = 0
+    auto_extended_once = False
+
+    for step in itertools.count():
+        # v1.20: budget gate.
+        if step >= current_cap:
+            granted, reason = _try_extend_budget(
+                mode=mode,
+                approver=approver,
+                step=step,
+                hard_cap=hard_cap,
+                productive_count=productive_count,
+                already_auto_extended=auto_extended_once,
+            )
+            if granted:
+                current_cap += hard_cap
+                if reason == "auto_extended":
+                    auto_extended_once = True
+                trace.append({
+                    "step": step,
+                    "type": "budget_extended",
+                    "reason": reason,
+                    "new_cap": current_cap,
+                })
+                if on_step:
+                    on_step(trace[-1])
+            else:
+                trace.append({
+                    "step": step,
+                    "type": "step_limit_reached",
+                    "max_steps": step,
+                    "reason": reason,
+                    "extended": auto_extended_once,
+                })
+                if on_step:
+                    on_step(trace[-1])
+                break
+
+        # v1.20: soft-cap reminder, once.
+        if step >= soft_cap and not soft_warned:
+            messages.append({
+                "role": "system",
+                "content": _build_soft_cap_reminder(step, hard_cap),
+            })
+            trace.append({
+                "step": step,
+                "type": "soft_cap_warning",
+                "soft_cap": soft_cap,
+                "hard_cap": hard_cap,
+            })
+            if on_step:
+                on_step(trace[-1])
+            soft_warned = True
+
         # v1.4: cooperative cancellation. Polled at the top of each step
         # so the in-flight LLM call (if any) completes; the next step
         # never starts.
@@ -320,9 +465,28 @@ def execute(
                 "content": content_for_model,
             })
 
-    # Hit step limit without producing a final answer.
+            # v1.20: productive milestone tracking — same as chat().
+            if _is_productive(name, result, tools):
+                productive_count += 1
+                grace_ceiling = hard_cap * 2
+                if current_cap < grace_ceiling:
+                    new_cap = min(current_cap + progress_grace, grace_ceiling)
+                    if new_cap > current_cap:
+                        current_cap = new_cap
+                        trace.append({
+                            "step": step,
+                            "type": "progress_extension",
+                            "tool": name,
+                            "new_cap": current_cap,
+                        })
+                        if on_step:
+                            on_step(trace[-1])
+
+    # v1.20: loop exited via budget gate (step_limit_reached recorded
+    # in trace before break). Surface the actual step count.
+    final_step = step  # noqa: F821 — set by the for-itertools.count() loop
     return (
-        f"[stopped: reached {config.MAX_STEPS} step limit without final answer]",
+        f"[stopped: reached {final_step} step limit without final answer]",
         trace,
     )
 
@@ -772,7 +936,69 @@ def chat(
     # See module-level comment on _looks_like_stall.
     nudge_count = 0
 
-    for step in range(config.MAX_STEPS):
+    # v1.20: step-budget redesign. Replaced single hard counter
+    # (MAX_STEPS=25) with soft/hard caps + progress extension + user
+    # continuation gate. See module-level _is_productive helper.
+    soft_cap = config.STEP_SOFT_CAP
+    hard_cap = config.STEP_HARD_CAP
+    progress_grace = config.STEP_PROGRESS_GRACE
+    current_cap = hard_cap
+    soft_warned = False
+    productive_count = 0
+    auto_extended_once = False
+
+    for step in itertools.count():
+        # v1.20: budget gate. At current_cap, try to extend; if denied
+        # for the current mode, terminate cleanly with step_limit_reached.
+        if step >= current_cap:
+            granted, reason = _try_extend_budget(
+                mode=mode,
+                approver=approver,
+                step=step,
+                hard_cap=hard_cap,
+                productive_count=productive_count,
+                already_auto_extended=auto_extended_once,
+            )
+            if granted:
+                current_cap += hard_cap
+                if reason == "auto_extended":
+                    auto_extended_once = True
+                trace.append({
+                    "step": step,
+                    "type": "budget_extended",
+                    "reason": reason,
+                    "new_cap": current_cap,
+                })
+                if on_step:
+                    on_step(trace[-1])
+            else:
+                trace.append({
+                    "step": step,
+                    "type": "step_limit_reached",
+                    "max_steps": step,
+                    "reason": reason,
+                    "extended": auto_extended_once,
+                })
+                if on_step:
+                    on_step(trace[-1])
+                break
+
+        # v1.20: soft-cap reminder, once when we cross the threshold.
+        if step >= soft_cap and not soft_warned:
+            messages.append({
+                "role": "system",
+                "content": _build_soft_cap_reminder(step, hard_cap),
+            })
+            trace.append({
+                "step": step,
+                "type": "soft_cap_warning",
+                "soft_cap": soft_cap,
+                "hard_cap": hard_cap,
+            })
+            if on_step:
+                on_step(trace[-1])
+            soft_warned = True
+
         # v1.4: cooperative cancellation between steps.
         if cancel_event is not None and cancel_event.is_set():
             trace.append({"step": step, "type": "cancelled"})
@@ -985,19 +1211,41 @@ def chat(
                 except Exception:
                     pass
 
-    # Step-limit fallback: also close the trajectory writer here.
+            # v1.20: productive milestone — successful write/exec extends
+            # current_cap by progress_grace. Capped at hard_cap × 2; the
+            # only path past that is user/auto extension at the cap.
+            if _is_productive(name, result, tools):
+                productive_count += 1
+                grace_ceiling = hard_cap * 2
+                if current_cap < grace_ceiling:
+                    new_cap = min(current_cap + progress_grace, grace_ceiling)
+                    if new_cap > current_cap:
+                        current_cap = new_cap
+                        trace.append({
+                            "step": step,
+                            "type": "progress_extension",
+                            "tool": name,
+                            "new_cap": current_cap,
+                        })
+                        if on_step:
+                            on_step(trace[-1])
+
+    # v1.20: loop exited via budget gate (step_limit_reached recorded
+    # in trace before break). Compute the actual step count and surface
+    # it in the user-facing message + trajectory.
+    final_step = step  # noqa: F821 — set by the for-itertools.count() loop
     if _trajectory_writer is not None:
         try:
             from . import trajectory as _traj
             _traj.record({
                 "type": "step_limit_reached",
-                "max_steps": config.MAX_STEPS,
+                "max_steps": final_step,
             })
             _traj._LOCAL.writer = None
             _trajectory_writer.close()
         except Exception:
             pass
     return (
-        f"[stopped: reached {config.MAX_STEPS} step limit without final answer]",
+        f"[stopped: reached {final_step} step limit without final answer]",
         trace,
     )
