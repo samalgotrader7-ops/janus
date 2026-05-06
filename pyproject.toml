@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "janus-agent"
-version = "1.22.0"
+version = "1.23.0"
 description = "Claude Code's UX, on any model, with plain-text state and a learning loop."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,10 +28,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Polished TUI (Phase 5).
+# Polished single-pane streaming chat (cli_rich.py — Rich + prompt_toolkit).
 rich = [
     "prompt_toolkit>=3.0",
     "rich>=13.0",
+]
+# v1.23 multi-pane TUI (janus tui — Textual app).
+tui = [
+    "textual>=0.50",
 ]
 # Local web UI (Phase 11).
 web = [
@@ -60,6 +64,7 @@ all = [
     "uvicorn>=0.27",
     "playwright>=1.40",
     "python-telegram-bot>=20",
+    "textual>=0.50",
 ]
 
 [project.scripts]

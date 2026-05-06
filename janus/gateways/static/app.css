@@ -332,6 +332,111 @@ footer.statusbar #footer-version { color: var(--text-faint); }
 }
 #files-viewer .empty { color: var(--text-faint); font-style: italic; }
 
+/* ---------- Modal overlays (approval + clarify) ---------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal {
+  background: var(--bg-panel);
+  border-radius: 6px;
+  padding: 24px;
+  max-width: 600px;
+  width: 90%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+.modal-title {
+  font-weight: 600;
+  font-size: 1.05em;
+  margin-bottom: 12px;
+  color: var(--brand);
+}
+.modal-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+.modal-meta .tag {
+  font-size: 0.78em;
+}
+.modal pre {
+  background: var(--code-bg);
+  padding: 10px 12px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 0.85em;
+  margin: 0 0 16px 0;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.modal-question {
+  font-size: 0.95em;
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+.modal-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.modal-choices button {
+  padding: 8px 12px;
+  background: #fff;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  text-align: left;
+  font-size: 0.9em;
+}
+.modal-choices button:hover { background: #f5edff; border-color: var(--brand); }
+.modal #clarify-text {
+  padding: 8px 12px;
+  font-family: var(--mono);
+  font-size: 0.9em;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  margin-bottom: 12px;
+  width: 100%;
+}
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+.modal-actions button {
+  padding: 8px 18px;
+  border-radius: 4px;
+  font-weight: 600;
+  border: 1px solid var(--brand);
+  font-size: 0.9em;
+}
+.modal-btn-approve {
+  background: var(--brand);
+  color: #fff;
+}
+.modal-btn-approve:hover { background: var(--brand-dark); }
+.modal-btn-deny {
+  background: #fff;
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.modal-btn-deny:hover { background: #f5f5f5; }
+.tag.risk-write { background: #fff3e0; color: var(--warn); }
+.tag.risk-exec { background: #ffe9e9; color: #b00; }
+.tag.risk-ask { background: #fafad2; color: #663; }
+.tag.risk-read { background: var(--ok-bg); color: var(--ok); }
+
 /* ---------- Login page ---------- */
 
 .auth-wrap {

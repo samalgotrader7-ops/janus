@@ -33,6 +33,14 @@
       <li><a href="#memory" data-panel="memory">memory</a></li>
       <li><a href="#skills" data-panel="skills">skills</a></li>
       <li><a href="#files" data-panel="files">files</a></li>
+      <li><a href="#interview" data-panel="interview">interview</a></li>
+      <li><a href="#agents" data-panel="agents">agents</a></li>
+      <li><a href="#swarms" data-panel="swarms">swarms</a></li>
+      <li><a href="#triggers" data-panel="triggers">triggers</a></li>
+      <li><a href="#shells" data-panel="shells">shells</a></li>
+      <li><a href="#logs" data-panel="logs">logs</a></li>
+      <li><a href="#cost" data-panel="cost">cost</a></li>
+      <li><a href="#settings" data-panel="settings">settings</a></li>
     </ul>
     <div style="padding:18px; font-size:0.74em; color:#999; line-height:1.5;">
       <strong style="display:block; margin-bottom:4px;">v1.22.0</strong>
@@ -105,13 +113,152 @@
       </div>
     </section>
 
+    <!-- ---------- Interview panel ---------- -->
+    <section id="panel-interview" class="panel">
+      <h2>memory interview</h2>
+      <div class="panel-toolbar">
+        <button id="interview-start-drip" type="button">start drip (2/day)</button>
+        <button id="interview-pause" class="secondary" type="button">pause</button>
+        <button id="interview-aboutme" class="secondary" type="button">about me</button>
+        <button id="interview-refresh" class="secondary" type="button">refresh</button>
+      </div>
+      <div id="interview-state" class="item-list" style="margin-bottom:14px;"></div>
+      <div id="interview-meter" style="background:#fff; border:1px solid #e0e0e0;
+           border-radius:4px; padding:14px;"></div>
+    </section>
+
+    <!-- ---------- Agents panel ---------- -->
+    <section id="panel-agents" class="panel">
+      <h2>scheduled agents</h2>
+      <div class="panel-toolbar">
+        <button id="agents-refresh" class="secondary" type="button">refresh</button>
+        <span style="color:#999; font-size:0.85em;">
+          create / edit via chat &mdash; UI add/edit forms in v1.22.2.
+        </span>
+      </div>
+      <div id="agents-list" class="item-list"></div>
+    </section>
+
+    <!-- ---------- Swarms panel ---------- -->
+    <section id="panel-swarms" class="panel">
+      <h2>swarms</h2>
+      <div class="panel-toolbar">
+        <button id="swarms-refresh" class="secondary" type="button">refresh</button>
+      </div>
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:14px;">
+        <div>
+          <h3 style="font-size:0.95em; margin:8px 0;">specs</h3>
+          <div id="swarms-specs" class="item-list"></div>
+        </div>
+        <div>
+          <h3 style="font-size:0.95em; margin:8px 0;">runs</h3>
+          <div id="swarms-runs" class="item-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- Triggers panel ---------- -->
+    <section id="panel-triggers" class="panel">
+      <h2>triggers (cron + hooks)</h2>
+      <div class="panel-toolbar">
+        <button id="triggers-refresh" class="secondary" type="button">refresh</button>
+      </div>
+      <div id="triggers-list" class="item-list"></div>
+    </section>
+
+    <!-- ---------- Shells panel ---------- -->
+    <section id="panel-shells" class="panel">
+      <h2>background shells</h2>
+      <div class="panel-toolbar">
+        <input id="shell-cmd" placeholder="command... (e.g. python -m pytest -q)">
+        <button id="shell-run" type="button">run bg</button>
+        <button id="shells-refresh" class="secondary" type="button">refresh</button>
+      </div>
+      <div style="display:grid; grid-template-columns: 320px 1fr; gap:14px;
+                  height: calc(100vh - 56px - 28px - 100px);">
+        <div id="shells-list" class="item-list" style="overflow-y:auto;"></div>
+        <div id="shells-output" style="background:#fff; border:1px solid #e0e0e0;
+             border-radius:4px; padding:12px; overflow:auto;
+             font-family:ui-monospace,monospace; font-size:0.85em;
+             white-space:pre-wrap;"></div>
+      </div>
+    </section>
+
+    <!-- ---------- Logs panel ---------- -->
+    <section id="panel-logs" class="panel">
+      <h2>activity log</h2>
+      <div class="panel-toolbar">
+        <button id="logs-refresh" class="secondary" type="button">refresh</button>
+        <span style="color:#999; font-size:0.85em;">
+          tail of ~/.janus/log.jsonl &mdash; live streaming in v1.22.3+.
+        </span>
+      </div>
+      <div id="logs-list" class="item-list"
+           style="overflow-y:auto; max-height: calc(100vh - 200px);"></div>
+    </section>
+
+    <!-- ---------- Cost panel ---------- -->
+    <section id="panel-cost" class="panel">
+      <h2>cost &amp; usage</h2>
+      <div class="panel-toolbar">
+        <button id="cost-refresh" class="secondary" type="button">refresh</button>
+      </div>
+      <div id="cost-summary" style="background:#fff; border:1px solid #e0e0e0;
+           border-radius:4px; padding:14px; font-family:ui-monospace,monospace;
+           font-size:0.9em; white-space:pre-wrap;"></div>
+    </section>
+
+    <!-- ---------- Settings panel ---------- -->
+    <section id="panel-settings" class="panel">
+      <h2>settings</h2>
+      <div class="panel-toolbar">
+        <button id="settings-refresh" class="secondary" type="button">refresh</button>
+        <span style="color:#999; font-size:0.85em;">
+          v1.22.3 &mdash; read-only env / mode view.
+        </span>
+      </div>
+      <div id="settings-view" style="background:#fff; border:1px solid #e0e0e0;
+           border-radius:4px; padding:14px; font-family:ui-monospace,monospace;
+           font-size:0.88em; white-space:pre-wrap;"></div>
+    </section>
+
   </main>
 
   <footer class="statusbar">
     <span id="footer-msg"></span>
+    <span id="footer-events" style="margin-right:10px; color:#999;">events: connecting...</span>
     <span id="footer-version">janus v__VERSION__</span>
   </footer>
 
+</div>
+
+<!-- v1.22.0a: approval + clarify modal overlays. Hidden by default;
+     SSE handler shows them when the executor blocks on a tool risk
+     decision or clarify(). -->
+<div id="modal-backdrop" class="modal-backdrop" style="display:none;">
+  <div id="modal-approval" class="modal" style="display:none;">
+    <div class="modal-title">approve action?</div>
+    <div class="modal-meta">
+      <span id="approval-risk" class="tag"></span>
+      <span id="approval-label"></span>
+    </div>
+    <pre id="approval-details"></pre>
+    <div class="modal-actions">
+      <button id="approval-deny" class="modal-btn-deny" type="button">deny</button>
+      <button id="approval-approve" class="modal-btn-approve" type="button">approve</button>
+    </div>
+  </div>
+  <div id="modal-clarify" class="modal" style="display:none;">
+    <div class="modal-title">janus needs your input</div>
+    <div id="clarify-question" class="modal-question"></div>
+    <div id="clarify-choices" class="modal-choices"></div>
+    <input id="clarify-text" type="text" placeholder="your answer..."
+           autocomplete="off">
+    <div class="modal-actions">
+      <button id="clarify-cancel" class="modal-btn-deny" type="button">cancel</button>
+      <button id="clarify-submit" class="modal-btn-approve" type="button">submit</button>
+    </div>
+  </div>
 </div>
 
 <script src="/static/app.js"></script>

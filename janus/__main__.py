@@ -1137,6 +1137,9 @@ def main():
         _run_chat(); return
     if sub == "telegram":
         _run_telegram(); return
+    if sub == "tui":
+        from . import tui as _tui
+        sys.exit(_tui.serve())
     if sub == "web":
         _run_web(args); return
     if sub == "whatsapp":

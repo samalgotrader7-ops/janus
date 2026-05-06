@@ -390,6 +390,478 @@
     },
   });
 
+  // ---------- v1.22.1: interview panel ----------
+
+  registerPanel('interview', {
+    async mount() {
+      const stateDiv = document.getElementById('interview-state');
+      const meterDiv = document.getElementById('interview-meter');
+      const start = document.getElementById('interview-start-drip');
+      const pause = document.getElementById('interview-pause');
+      const aboutme = document.getElementById('interview-aboutme');
+      const refresh = document.getElementById('interview-refresh');
+      if (!stateDiv) return;
+      const renderMeter = (completion, total) => {
+        clear(meterDiv);
+        const cats = Object.keys(completion || {}).sort();
+        if (!cats.length) {
+          meterDiv.appendChild(el('div', { class: 'item-meta' }, 'no completion data'));
+          return;
+        }
+        let totalPct = 0;
+        for (const cat of cats) {
+          const pct = Math.round((completion[cat] || 0) * 100);
+          totalPct += pct;
+          const bar = el('div', { style: 'display:flex; align-items:center; gap:10px; margin-bottom:6px;' },
+            el('span', { style: 'width:120px; font-family:ui-monospace,monospace; font-size:0.85em;' }, cat),
+            el('div', { style: 'width:240px; height:10px; background:#eee; border-radius:5px; overflow:hidden;' },
+              el('div', { style: `width:${pct}%; height:100%; background:var(--brand);` })
+            ),
+            el('span', { style: 'font-family:ui-monospace,monospace; font-size:0.85em; color:#666;' }, pct + '%')
+          );
+          meterDiv.appendChild(bar);
+        }
+        const overall = cats.length ? Math.round(totalPct / cats.length) : 0;
+        meterDiv.appendChild(el('div', { style: 'margin-top:14px; font-weight:600;' },
+          'overall: ' + overall + '%'));
+      };
+      const load = async () => {
+        clear(stateDiv);
+        const sessionId = chatState.sessionId;
+        const r = await api('/api/interview/state?session_id=' + encodeURIComponent(sessionId));
+        if (r.data.error) {
+          stateDiv.appendChild(el('div', { class: 'item' }, el('div', { class: 'item-meta' }, r.data.error)));
+          return;
+        }
+        stateDiv.appendChild(el('div', { class: 'item' },
+          el('div', { class: 'item-title' },
+            'mode: ', el('span', { class: 'tag' }, r.data.mode || 'idle')
+          ),
+          el('div', { class: 'item-meta' },
+            `answered ${r.data.answered_count} · skipped ${r.data.skipped_count} · ` +
+            `quota ${r.data.drip_quota_remaining} · filter "${r.data.drip_filter_category || 'all'}"`
+          )
+        ));
+        renderMeter(r.data.completion);
+      };
+      if (refresh) refresh.onclick = load;
+      if (start) start.onclick = async () => {
+        const sessionId = chatState.sessionId;
+        await api('/api/interview/start', {
+          method: 'POST',
+          body: { session_id: sessionId, daily_count: 2 },
+        });
+        load();
+      };
+      if (pause) pause.onclick = async () => {
+        const sessionId = chatState.sessionId;
+        await api('/api/interview/pause', {
+          method: 'POST', body: { session_id: sessionId },
+        });
+        load();
+      };
+      if (aboutme) aboutme.onclick = async () => {
+        const r = await api('/api/interview/about-me');
+        clear(stateDiv);
+        stateDiv.appendChild(el('div', { class: 'item' },
+          el('div', { class: 'item-body' }, (r.data && r.data.body) || r.data.error || '(empty)')
+        ));
+      };
+      await load();
+    },
+  });
+
+  // ---------- v1.22.2: agents panel ----------
+
+  registerPanel('agents', {
+    async mount() {
+      const list = document.getElementById('agents-list');
+      const refresh = document.getElementById('agents-refresh');
+      if (!list) return;
+      const load = async () => {
+        clear(list);
+        const r = await api('/api/agents');
+        if (r.data.error) {
+          list.appendChild(el('div', { class: 'item' }, el('div', { class: 'item-meta' }, r.data.error)));
+          return;
+        }
+        // agent_list output is a string; render as preformatted text.
+        list.appendChild(el('div', { class: 'item' },
+          el('div', { class: 'item-body' }, r.data.output || '(no agents)')
+        ));
+      };
+      if (refresh) refresh.onclick = load;
+      await load();
+    },
+  });
+
+  // ---------- v1.22.2: swarms panel ----------
+
+  registerPanel('swarms', {
+    async mount() {
+      const specs = document.getElementById('swarms-specs');
+      const runs = document.getElementById('swarms-runs');
+      const refresh = document.getElementById('swarms-refresh');
+      const load = async () => {
+        clear(specs);
+        clear(runs);
+        const sr = await api('/api/swarms/specs');
+        if (sr.data.specs) {
+          if (!sr.data.specs.length) {
+            specs.appendChild(el('div', { class: 'item' }, el('div', { class: 'item-meta' }, '(no specs)')));
+          } else {
+            for (const s of sr.data.specs) {
+              specs.appendChild(el('div', { class: 'item' },
+                el('div', { class: 'item-title' }, s.name),
+                el('div', { class: 'item-meta' },
+                  `${s.phases} phases · max ${s.max_subagents || '-'} agents · $${s.max_budget_usd || '-'}`),
+                el('div', { class: 'item-body' }, s.description || '')
+              ));
+            }
+          }
+        }
+        const rr = await api('/api/swarms/runs');
+        if (rr.data.runs) {
+          if (!rr.data.runs.length) {
+            runs.appendChild(el('div', { class: 'item' }, el('div', { class: 'item-meta' }, '(no runs)')));
+          } else {
+            for (const id of rr.data.runs) {
+              runs.appendChild(el('div', { class: 'item' },
+                el('div', { class: 'item-title' }, id)
+              ));
+            }
+          }
+        }
+      };
+      if (refresh) refresh.onclick = load;
+      await load();
+    },
+  });
+
+  // ---------- v1.22.2: triggers panel ----------
+
+  registerPanel('triggers', {
+    async mount() {
+      const list = document.getElementById('triggers-list');
+      const refresh = document.getElementById('triggers-refresh');
+      if (!list) return;
+      const load = async () => {
+        clear(list);
+        const r = await api('/api/triggers');
+        if (r.data.error) {
+          list.appendChild(el('div', { class: 'item' }, el('div', { class: 'item-meta' }, r.data.error)));
+          return;
+        }
+        if (!r.data.triggers.length) {
+          list.appendChild(el('div', { class: 'item' },
+            el('div', { class: 'item-meta' }, '(no triggers)')
+          ));
+          return;
+        }
+        for (const t of r.data.triggers) {
+          list.appendChild(el('div', { class: 'item' },
+            el('div', { class: 'item-title' },
+              el('span', { class: 'tag ' + (t.enabled ? 'promoted' : 'quarantined') },
+                t.enabled ? 'on' : 'off'),
+              ' ',
+              t.name
+            ),
+            el('div', { class: 'item-meta' },
+              `${t.kind || ''} · when: ${t.when || ''} · skill: ${t.skill || ''} · → ${t.deliver_to || ''}`)
+          ));
+        }
+      };
+      if (refresh) refresh.onclick = load;
+      await load();
+    },
+  });
+
+  // ---------- v1.22.3: shells panel ----------
+
+  registerPanel('shells', {
+    async mount() {
+      const list = document.getElementById('shells-list');
+      const output = document.getElementById('shells-output');
+      const cmd = document.getElementById('shell-cmd');
+      const runBtn = document.getElementById('shell-run');
+      const refresh = document.getElementById('shells-refresh');
+      if (!list) return;
+      const loadList = async () => {
+        clear(list);
+        const r = await api('/api/shells');
+        if (r.data.error) {
+          list.appendChild(el('div', { class: 'item' }, el('div', { class: 'item-meta' }, r.data.error)));
+          return;
+        }
+        // ShellList tool output is multi-line text. Render as one block
+        // and parse out shell ids on lines that look like 'sh-XXX  status...'.
+        const txt = r.data.output || '';
+        const lines = txt.split('\n').filter(Boolean);
+        if (!lines.length) {
+          list.appendChild(el('div', { class: 'item' }, el('div', { class: 'item-meta' }, '(no shells)')));
+          return;
+        }
+        for (const line of lines) {
+          const item = el('div', { class: 'item' }, el('div', { class: 'item-meta' }, line));
+          const m = line.match(/(sh-[0-9a-f]{4,})/i);
+          if (m) {
+            const id = m[1];
+            item.style.cursor = 'pointer';
+            item.onclick = async () => {
+              clear(output);
+              output.textContent = 'loading ' + id + '...';
+              const o = await api('/api/shells/' + encodeURIComponent(id) + '/output');
+              output.textContent = (o.data && (o.data.output || o.data.error)) || '(empty)';
+            };
+          }
+          list.appendChild(item);
+        }
+      };
+      if (refresh) refresh.onclick = loadList;
+      if (runBtn) runBtn.onclick = async () => {
+        const c = (cmd ? cmd.value : '').trim();
+        if (!c) return;
+        const r = await api('/api/shells/run', {
+          method: 'POST', body: { command: c },
+        });
+        if (cmd) cmd.value = '';
+        output.textContent = (r.data && (r.data.output || r.data.error)) || '(empty)';
+        loadList();
+      };
+      if (cmd) cmd.onkeydown = (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); runBtn.click(); }
+      };
+      output.textContent = 'select a shell from the list to view its output';
+      await loadList();
+    },
+  });
+
+  // ---------- v1.22.3: logs panel ----------
+
+  registerPanel('logs', {
+    async mount() {
+      const list = document.getElementById('logs-list');
+      const refresh = document.getElementById('logs-refresh');
+      if (!list) return;
+      const load = async () => {
+        clear(list);
+        const r = await api('/api/logs?limit=100');
+        if (r.data.error) {
+          list.appendChild(el('div', { class: 'item' }, el('div', { class: 'item-meta' }, r.data.error)));
+          return;
+        }
+        if (!r.data.entries.length) {
+          list.appendChild(el('div', { class: 'item' }, el('div', { class: 'item-meta' }, '(empty log)')));
+          return;
+        }
+        for (const e of r.data.entries) {
+          const ts = e.ts || '';
+          const gw_ = e.gateway || '';
+          const mode = e.mode || '';
+          const tool = e.tool || '';
+          const summary = (e.request || e.error || e.output || e.type || '');
+          list.appendChild(el('div', { class: 'item' },
+            el('div', { class: 'item-meta' }, `${ts}  ${gw_}  ${mode}  ${tool}`),
+            el('div', { class: 'item-body' }, String(summary).slice(0, 400))
+          ));
+        }
+      };
+      if (refresh) refresh.onclick = load;
+      await load();
+    },
+  });
+
+  // ---------- v1.22.3: cost panel ----------
+
+  registerPanel('cost', {
+    async mount() {
+      const summary = document.getElementById('cost-summary');
+      const refresh = document.getElementById('cost-refresh');
+      if (!summary) return;
+      const load = async () => {
+        summary.textContent = 'loading...';
+        const r = await api('/api/cost-summary');
+        summary.textContent = (r.data && (r.data.summary || r.data.error)) || '(empty)';
+      };
+      if (refresh) refresh.onclick = load;
+      await load();
+    },
+  });
+
+  // ---------- v1.22.3: settings panel ----------
+
+  registerPanel('settings', {
+    async mount() {
+      const view = document.getElementById('settings-view');
+      const refresh = document.getElementById('settings-refresh');
+      if (!view) return;
+      const load = async () => {
+        view.textContent = 'loading...';
+        const r = await api('/api/settings');
+        if (r.data.error) {
+          view.textContent = r.data.error;
+          return;
+        }
+        const lines = [];
+        for (const [k, v] of Object.entries(r.data)) {
+          lines.push(`${k.padEnd(24)} ${v}`);
+        }
+        view.textContent = lines.join('\n');
+      };
+      if (refresh) refresh.onclick = load;
+      await load();
+    },
+  });
+
+  // ---------- v1.22.0a: SSE event stream + approval/clarify modals ----------
+
+  const modalState = {
+    backdrop: null,
+    approval: null,
+    clarify: null,
+    activeRequestId: null,
+    activeKind: null, // 'approval' | 'clarify'
+  };
+
+  function showApprovalModal(evt) {
+    if (!modalState.backdrop) return;
+    modalState.activeRequestId = evt.request_id;
+    modalState.activeKind = 'approval';
+    document.getElementById('approval-label').textContent = evt.label || '';
+    document.getElementById('approval-details').textContent = evt.details || '';
+    const riskTag = document.getElementById('approval-risk');
+    riskTag.textContent = evt.risk || '';
+    riskTag.className = 'tag risk-' + (evt.risk || 'ask');
+    modalState.clarify.style.display = 'none';
+    modalState.approval.style.display = 'block';
+    modalState.backdrop.style.display = 'flex';
+  }
+
+  function showClarifyModal(evt) {
+    if (!modalState.backdrop) return;
+    modalState.activeRequestId = evt.request_id;
+    modalState.activeKind = 'clarify';
+    document.getElementById('clarify-question').textContent = evt.question || '';
+    const choicesDiv = document.getElementById('clarify-choices');
+    clear(choicesDiv);
+    if (evt.choices && evt.choices.length) {
+      for (const choice of evt.choices) {
+        const btn = el('button', { type: 'button' }, choice);
+        btn.onclick = () => submitClarify(choice);
+        choicesDiv.appendChild(btn);
+      }
+    }
+    const text = document.getElementById('clarify-text');
+    if (text) {
+      text.value = '';
+      // Focus shortly after display so the input is ready.
+      setTimeout(() => text.focus(), 30);
+    }
+    modalState.approval.style.display = 'none';
+    modalState.clarify.style.display = 'block';
+    modalState.backdrop.style.display = 'flex';
+  }
+
+  function hideModal() {
+    if (modalState.backdrop) modalState.backdrop.style.display = 'none';
+    modalState.activeRequestId = null;
+    modalState.activeKind = null;
+  }
+
+  async function submitApproval(decision) {
+    if (!modalState.activeRequestId || modalState.activeKind !== 'approval') return;
+    const id = modalState.activeRequestId;
+    hideModal();
+    try {
+      await api('/api/approve/' + encodeURIComponent(id), {
+        method: 'POST',
+        body: { approve: decision },
+      });
+    } catch (e) {
+      setFooter('approval send failed: ' + e.message);
+    }
+  }
+
+  async function submitClarify(answer) {
+    if (!modalState.activeRequestId || modalState.activeKind !== 'clarify') return;
+    const id = modalState.activeRequestId;
+    hideModal();
+    try {
+      await api('/api/clarify/' + encodeURIComponent(id), {
+        method: 'POST',
+        body: { answer: String(answer || '') },
+      });
+    } catch (e) {
+      setFooter('clarify send failed: ' + e.message);
+    }
+  }
+
+  function handleSSEEvent(evt, data) {
+    const sw = document.getElementById('footer-events');
+    if (evt === 'approval_pending') {
+      showApprovalModal(data);
+    } else if (evt === 'clarify_pending') {
+      showClarifyModal(data);
+    } else if (evt === 'approval_resolved' || evt === 'clarify_resolved') {
+      // Another tab resolved this request — dismiss our modal.
+      if (modalState.activeRequestId === data.request_id) hideModal();
+    }
+    if (sw) sw.textContent = 'events: live';
+  }
+
+  function startEventStream() {
+    const sw = document.getElementById('footer-events');
+    let es;
+    try {
+      es = new EventSource('/api/events', { withCredentials: true });
+    } catch (e) {
+      if (sw) sw.textContent = 'events: unsupported';
+      return;
+    }
+    es.addEventListener('approval_pending', (e) => {
+      try { handleSSEEvent('approval_pending', JSON.parse(e.data)); } catch {}
+    });
+    es.addEventListener('clarify_pending', (e) => {
+      try { handleSSEEvent('clarify_pending', JSON.parse(e.data)); } catch {}
+    });
+    es.addEventListener('approval_resolved', (e) => {
+      try { handleSSEEvent('approval_resolved', JSON.parse(e.data)); } catch {}
+    });
+    es.addEventListener('clarify_resolved', (e) => {
+      try { handleSSEEvent('clarify_resolved', JSON.parse(e.data)); } catch {}
+    });
+    es.onopen = () => { if (sw) sw.textContent = 'events: connected'; };
+    es.onerror = () => {
+      if (sw) sw.textContent = 'events: reconnecting...';
+      // EventSource auto-reconnects; nothing else to do.
+    };
+  }
+
+  function setupModals() {
+    modalState.backdrop = document.getElementById('modal-backdrop');
+    modalState.approval = document.getElementById('modal-approval');
+    modalState.clarify = document.getElementById('modal-clarify');
+    if (!modalState.backdrop) return;
+    document.getElementById('approval-approve').onclick = () => submitApproval(true);
+    document.getElementById('approval-deny').onclick = () => submitApproval(false);
+    document.getElementById('clarify-submit').onclick = () => {
+      const text = document.getElementById('clarify-text');
+      submitClarify(text ? text.value : '');
+    };
+    document.getElementById('clarify-cancel').onclick = () => submitClarify('');
+    const text = document.getElementById('clarify-text');
+    if (text) {
+      text.onkeydown = (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          submitClarify(text.value);
+        } else if (e.key === 'Escape') {
+          submitClarify('');
+        }
+      };
+    }
+  }
+
   // ---------- bootstrap ----------
 
   function setupSignout() {
@@ -416,6 +888,8 @@
   window.addEventListener('DOMContentLoaded', () => {
     setupSignout();
     setupNav();
+    setupModals();
+    startEventStream();
     onHashChange();
   });
 })();

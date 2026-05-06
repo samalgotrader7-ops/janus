@@ -243,14 +243,18 @@ def _web_render_about_me() -> str:
     return "\n".join(parts)
 
 
-def _make_web_approver(mode: str):
-    """Mode-aware approver for the web gateway.
+def _make_web_approver(mode: str, auth_sid: str = "", loop=None):
+    """v1.22.0a: mode-aware approver that bridges ASK decisions to the
+    browser via SSE + modal.
 
-    v1.3: ASK still falls through to DENY because the page has no inline
-    approval UI. The Layer 3 'approval routed to home channel' feature
-    will let you approve from Telegram when chatting via web. Until then,
-    use acceptEdits / bypassPermissions, or attach a skill with capability
-    tokens.
+    Pre-v1.22.0a, ASK decisions returned False (deny) because the page
+    had no inline approval UI. v1.22.0a uses web_bridge.request_approval
+    to block the worker thread until the user clicks approve/deny in a
+    modal delivered via Server-Sent Events.
+
+    `auth_sid` and `loop` are required for the bridge to work; older
+    callers (no auth_sid) get the legacy ASK→DENY behavior so the
+    function stays back-compat for callers that haven't migrated.
     """
     def approver(action_label: str, details: str, **kw) -> bool:
         risk = kw.get("risk") or permissions.risk_from_verb(
@@ -259,8 +263,38 @@ def _make_web_approver(mode: str):
         decision = permissions.decide(risk, mode)
         if decision == permissions.ALLOW:
             return True
-        return False  # ASK and DENY both fall to deny (L3 will bridge).
+        if decision == permissions.DENY:
+            return False
+        # ASK — defer to the user via SSE modal. Falls through to deny
+        # if we don't have the bridge wired (auth_sid/loop missing,
+        # e.g., legacy callers that didn't pass them through).
+        if not auth_sid or loop is None:
+            return False
+        from . import web_bridge
+        return web_bridge.request_approval(
+            auth_sid=auth_sid, loop=loop,
+            label=action_label, details=details, risk=str(risk),
+        )
     return approver
+
+
+def _make_web_clarify_callback(auth_sid: str, loop):
+    """v1.22.0a: clarify callback for the web gateway.
+
+    Returns a callable matching tools.clarify.Clarify's signature:
+    (question: str, choices: list[str] | None) -> str. Blocks the
+    worker thread until the user types or clicks an answer in the
+    browser modal.
+    """
+    def callback(question: str, choices):
+        if not auth_sid or loop is None:
+            return "[clarify unavailable: web bridge not wired]"
+        from . import web_bridge
+        return web_bridge.request_clarify(
+            auth_sid=auth_sid, loop=loop,
+            question=question, choices=list(choices or []),
+        )
+    return callback
 
 
 # v1.22.0: inline _LOGIN_HTML and _INDEX_HTML strings were removed.
@@ -614,9 +648,24 @@ def _build_app():
             pass
 
         mode = permissions.normalize(config.APPROVAL_MODE)
-        base_approver = _make_web_approver(mode)
+        # v1.22.0a: pass auth_sid + running loop into the approver so it
+        # can bridge ASK decisions to a browser modal via SSE.
+        import asyncio as _asyncio
+        loop = _asyncio.get_running_loop()
+        base_approver = _make_web_approver(mode, auth_sid=auth_sid, loop=loop)
         caps = CapabilitySet()
         tools = default_registry(capabilities=caps)
+        # v1.22.0a: replace the bundled callback-less Clarify with one
+        # bound to this auth session so clarify(question) prompts the
+        # user via the SSE modal instead of returning [clarify unavailable].
+        try:
+            from ..tools.clarify import Clarify as _Clarify
+            tools.remove_tool("clarify")
+            tools.add_tool(_Clarify(
+                callback=_make_web_clarify_callback(auth_sid, loop),
+            ))
+        except Exception:
+            pass
         approver = make_protected(base_approver, caps, mode)
         preamble = memory.prepend_for_prompt()
 
@@ -632,18 +681,24 @@ def _build_app():
 
         try:
             t0 = time.time()
-            output, trace = executor.chat(
-                messages=messages,
-                user_input=req,
-                tools=tools,
-                approver=approver,
-                memory_preamble=preamble,
-                mode=mode,
-                workspace=str(config.WORKSPACE),
-                tool_count=len(tools.names()),
-                skill_count=len(skills.list_skills()),
-                stream=False,
-            )
+            # v1.22.0a: run the (synchronous) executor in a thread so
+            # its blocking approver wait doesn't freeze the FastAPI
+            # event loop. The bridge schedules SSE notifications onto
+            # the loop via run_coroutine_threadsafe.
+            def _run_executor():
+                return executor.chat(
+                    messages=messages,
+                    user_input=req,
+                    tools=tools,
+                    approver=approver,
+                    memory_preamble=preamble,
+                    mode=mode,
+                    workspace=str(config.WORKSPACE),
+                    tool_count=len(tools.names()),
+                    skill_count=len(skills.list_skills()),
+                    stream=False,
+                )
+            output, trace = await _asyncio.to_thread(_run_executor)
             record["execute_ms"] = int((time.time() - t0) * 1000)
             record["output"] = output
             record["trace"] = trace
@@ -997,6 +1052,633 @@ def _build_app():
             )
         except Exception as e:
             return JSONResponse({"error": f"read failed: {e}"})
+
+    # ---------- v1.22.1: mutations (cards, skills, interview) ----------
+
+    def _gate_post(request, route: str):
+        """Common POST gate: auth + rate-limit + CSRF."""
+        auth_sid, err = _check_auth(request)
+        if err:
+            return None, JSONResponse({"error": err}, status_code=401), None
+        ip = _client_ip(request)
+        ok, ra = web_auth.rate_limit_take(auth_sid, "read")
+        if not ok:
+            web_audit.rate_limited(auth_sid, ip, "read", ra)
+            return None, JSONResponse(
+                {"error": "rate limited"}, status_code=429,
+                headers={"Retry-After": str(int(ra) + 1)},
+            ), None
+        if not _check_csrf(request, auth_sid):
+            web_audit.csrf_failure(auth_sid, ip, route)
+            return None, JSONResponse(
+                {"error": "missing or invalid CSRF token"}, status_code=403,
+            ), None
+        return auth_sid, None, ip
+
+    @app.post("/api/cards/{card_id}/delete")
+    async def api_card_delete(card_id: str, request: Request):
+        """v1.22.1: supersede (soft-delete) a memory card.
+
+        The card moves to ~/.janus/memory/_superseded/ and stays there
+        for MEMORY_PRUNE_SUPERSEDED_DAYS before final unlink. P5 holds —
+        nothing is shredded; the user can recover by `mv` if needed.
+        """
+        auth_sid, err_resp, ip = _gate_post(
+            request, f"/api/cards/{card_id}/delete",
+        )
+        if err_resp is not None:
+            return err_resp
+        try:
+            from .. import memory_cards, memory_index
+            moved = memory_cards.supersede(card_id)
+            if moved is None:
+                return JSONResponse(
+                    {"error": "card not found"}, status_code=404,
+                )
+            try:
+                memory_index.reconcile()
+            except Exception:
+                pass
+            web_audit.mutate(auth_sid, ip, "/api/cards/delete", [card_id])
+            return JSONResponse({"ok": True, "moved_to": str(moved)})
+        except Exception as e:
+            return JSONResponse({"error": f"delete failed: {e}"})
+
+    @app.post("/api/skills/{name}/promote")
+    async def api_skill_promote(name: str, request: Request):
+        """v1.22.1: change a skill's state (quarantined / promoted / disabled).
+
+        Body: {"state": "promoted"} (or any valid state). Wraps
+        skills.promote(name, state).
+        """
+        auth_sid, err_resp, ip = _gate_post(
+            request, f"/api/skills/{name}/promote",
+        )
+        if err_resp is not None:
+            return err_resp
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        new_state = (
+            (body.get("state") or "promoted") if isinstance(body, dict) else "promoted"
+        )
+        try:
+            updated = skills.promote(name, new_state)
+            web_audit.mutate(
+                auth_sid, ip, f"/api/skills/{name}/promote", [new_state],
+            )
+            return JSONResponse({
+                "ok": True,
+                "name": getattr(updated, "name", name),
+                "state": getattr(updated, "state", new_state),
+            })
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"promote failed: {e}"}, status_code=400,
+            )
+
+    @app.post("/api/skills/install-bundled")
+    async def api_skills_install_bundled(request: Request):
+        """v1.22.1: install bundled skill catalog into ~/.janus/skills/.
+
+        Body: {"force": bool} optional. Returns counts.
+        """
+        auth_sid, err_resp, ip = _gate_post(
+            request, "/api/skills/install-bundled",
+        )
+        if err_resp is not None:
+            return err_resp
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        force = bool(body.get("force")) if isinstance(body, dict) else False
+        try:
+            from .. import skill_catalog
+            result = skill_catalog.install_bundled(force=force)
+            web_audit.mutate(
+                auth_sid, ip, "/api/skills/install-bundled",
+                ["force"] if force else [],
+            )
+            return JSONResponse({"ok": True, "result": result})
+        except Exception as e:
+            return JSONResponse({"error": f"install failed: {e}"})
+
+    # ---------- v1.22.1: interview panel API ----------
+
+    @app.get("/api/interview/state")
+    async def api_interview_state(request: Request, session_id: str = ""):
+        """v1.22.1: per-(gateway, browser-session) interview state.
+
+        `session_id` is the conversation session id (from the chat
+        panel). Defaults to "default" when not supplied.
+        """
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        sid = session_id or "default"
+        try:
+            from .. import interviews as _iv
+            _iv.maybe_install_bundled()
+            state = _iv.load_state("web", sid)
+            library = _iv.load_all()
+            completion = _iv.compute_completion(state, library)
+            return JSONResponse({
+                "session_id": sid,
+                "mode": state.mode,
+                "started_at": state.started_at,
+                "current_category": state.current_category,
+                "current_question_id": state.current_question_id,
+                "drip_filter_category": state.drip_filter_category,
+                "drip_quota_remaining": state.drip_quota_remaining,
+                "drip_quota_resets_at": state.drip_quota_resets_at,
+                "answered_count": len(state.answered),
+                "skipped_count": len(state.skipped),
+                "completion": completion,
+                "categories": list(_iv.SUPPORTED_CATEGORIES),
+            })
+        except Exception as e:
+            return JSONResponse({"error": f"interview state failed: {e}"})
+
+    @app.post("/api/interview/start")
+    async def api_interview_start(request: Request):
+        """v1.22.1: start drip mode (optionally restricted to one category).
+
+        Body: {"session_id": str, "category": str|"", "daily_count": int}
+        Wraps the same logic as /interview slash command.
+        """
+        auth_sid, err_resp, ip = _gate_post(request, "/api/interview/start")
+        if err_resp is not None:
+            return err_resp
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        sid = (body.get("session_id") or "default") if isinstance(body, dict) else "default"
+        category = (body.get("category") or "").strip().lower() if isinstance(body, dict) else ""
+        try:
+            daily = int(body.get("daily_count") or 0) if isinstance(body, dict) else 0
+        except (ValueError, TypeError):
+            daily = 0
+        try:
+            from .. import interviews as _iv
+            if category and category not in _iv.SUPPORTED_CATEGORIES:
+                return JSONResponse(
+                    {"error": f"unknown category: {category}"},
+                    status_code=400,
+                )
+            arg = ""
+            if daily > 0 and category:
+                arg = category  # filter by category at default per_day
+            elif daily > 0:
+                arg = f"daily {daily}"
+            elif category:
+                arg = category
+            output = _web_interview_handle(sid, arg)
+            web_audit.mutate(
+                auth_sid, ip, "/api/interview/start",
+                [k for k in ("category", "daily_count") if body.get(k)],
+            )
+            return JSONResponse({"ok": True, "output": output})
+        except Exception as e:
+            return JSONResponse({"error": f"interview start failed: {e}"})
+
+    @app.post("/api/interview/pause")
+    async def api_interview_pause(request: Request):
+        auth_sid, err_resp, ip = _gate_post(request, "/api/interview/pause")
+        if err_resp is not None:
+            return err_resp
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        sid = (body.get("session_id") or "default") if isinstance(body, dict) else "default"
+        try:
+            output = _web_interview_handle(sid, "pause")
+            return JSONResponse({"ok": True, "output": output})
+        except Exception as e:
+            return JSONResponse({"error": f"pause failed: {e}"})
+
+    @app.get("/api/interview/about-me")
+    async def api_interview_about_me(request: Request):
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            text = _web_render_about_me()
+            return JSONResponse({"ok": True, "body": text})
+        except Exception as e:
+            return JSONResponse({"error": f"about-me failed: {e}"})
+
+    # ---------- v1.22.2: agents / swarms / triggers panels ----------
+
+    def _api_allow():
+        """Approver factory for API tool invocations.
+
+        The HTTP request itself is the approval — auth + CSRF + the
+        user's explicit click in the panel UI. Tools called via the
+        API run with always-allow.
+        """
+        def approver(*a, **kw):
+            return True
+        return approver
+
+    @app.get("/api/agents")
+    async def api_agents(request: Request):
+        """v1.22.2: list scheduled agents (skill+trigger pairs)."""
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            from ..tools.agent import AgentList
+            tool = AgentList()
+            raw = tool.run({}, _api_allow())
+            return JSONResponse({"output": raw})
+        except Exception as e:
+            return JSONResponse({"error": f"agents list failed: {e}"})
+
+    @app.post("/api/agents/{name}/run-now")
+    async def api_agent_run_now(name: str, request: Request):
+        auth_sid, err_resp, ip = _gate_post(
+            request, f"/api/agents/{name}/run-now",
+        )
+        if err_resp is not None:
+            return err_resp
+        try:
+            from ..tools.agent import AgentRunNow
+            tool = AgentRunNow()
+            output = tool.run({"name": name}, _api_allow())
+            web_audit.mutate(auth_sid, ip, "/api/agents/run-now", [name])
+            return JSONResponse({"ok": True, "output": output})
+        except Exception as e:
+            return JSONResponse({"error": f"run-now failed: {e}"})
+
+    @app.post("/api/agents/{name}/set-enabled")
+    async def api_agent_set_enabled(name: str, request: Request):
+        auth_sid, err_resp, ip = _gate_post(
+            request, f"/api/agents/{name}/set-enabled",
+        )
+        if err_resp is not None:
+            return err_resp
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        enabled = bool(body.get("enabled")) if isinstance(body, dict) else True
+        try:
+            from ..tools.agent import AgentSetEnabled
+            tool = AgentSetEnabled()
+            output = tool.run(
+                {"name": name, "enabled": enabled}, _api_allow(),
+            )
+            web_audit.mutate(
+                auth_sid, ip, "/api/agents/set-enabled",
+                [name, "enabled" if enabled else "disabled"],
+            )
+            return JSONResponse({"ok": True, "output": output})
+        except Exception as e:
+            return JSONResponse({"error": f"set-enabled failed: {e}"})
+
+    @app.post("/api/agents/{name}/delete")
+    async def api_agent_delete(name: str, request: Request):
+        auth_sid, err_resp, ip = _gate_post(
+            request, f"/api/agents/{name}/delete",
+        )
+        if err_resp is not None:
+            return err_resp
+        try:
+            from ..tools.agent import AgentDelete
+            tool = AgentDelete()
+            output = tool.run({"name": name}, _api_allow())
+            web_audit.mutate(auth_sid, ip, "/api/agents/delete", [name])
+            return JSONResponse({"ok": True, "output": output})
+        except Exception as e:
+            return JSONResponse({"error": f"delete failed: {e}"})
+
+    @app.get("/api/swarms/specs")
+    async def api_swarm_specs(request: Request):
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            from ..swarms import spec as _spec
+            specs = _spec.list_specs() or []
+            out = []
+            for s in specs:
+                out.append({
+                    "name": getattr(s, "name", ""),
+                    "description": (getattr(s, "description", "") or "")[:200],
+                    "phases": len(getattr(s, "phases", []) or []),
+                    "max_subagents": getattr(s, "max_subagents", None),
+                    "max_budget_usd": getattr(s, "max_budget_usd", None),
+                })
+            return JSONResponse({"specs": out})
+        except Exception as e:
+            return JSONResponse({"error": f"specs list failed: {e}"})
+
+    @app.get("/api/swarms/runs")
+    async def api_swarm_runs(request: Request, limit: int = 50):
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            from ..swarms import state as _swstate
+            run_ids = _swstate.list_runs() or []
+            # Newest first if list_runs returns sorted; otherwise rely on it.
+            run_ids = run_ids[-limit:][::-1]
+            return JSONResponse({"runs": run_ids})
+        except Exception as e:
+            return JSONResponse({"error": f"runs list failed: {e}"})
+
+    @app.get("/api/triggers")
+    async def api_triggers(request: Request):
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            from ..triggers import base as _tb
+            tlist = _tb.list_triggers() or []
+            out = []
+            for t in tlist:
+                out.append({
+                    "name": getattr(t, "name", ""),
+                    "kind": getattr(t, "kind", ""),
+                    "when": getattr(t, "when", ""),
+                    "skill": getattr(t, "skill", ""),
+                    "enabled": getattr(t, "enabled", True),
+                    "deliver_to": getattr(t, "deliver_to", ""),
+                })
+            return JSONResponse({"triggers": out})
+        except Exception as e:
+            return JSONResponse({"error": f"triggers list failed: {e}"})
+
+    # ---------- v1.22.3: shells / logs / cost / settings ----------
+
+    @app.get("/api/shells")
+    async def api_shells(request: Request):
+        """v1.22.3: list background shells via shell_bg state."""
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            from ..tools.shell_bg import ShellList
+            tool = ShellList()
+            raw = tool.run({}, _api_allow())
+            return JSONResponse({"output": raw})
+        except Exception as e:
+            return JSONResponse({"error": f"shells list failed: {e}"})
+
+    @app.post("/api/shells/run")
+    async def api_shells_run(request: Request):
+        auth_sid, err_resp, ip = _gate_post(request, "/api/shells/run")
+        if err_resp is not None:
+            return err_resp
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        cmd = (body.get("command") or "").strip() if isinstance(body, dict) else ""
+        if not cmd:
+            return JSONResponse(
+                {"error": "command required"}, status_code=400,
+            )
+        try:
+            from ..tools.shell_bg import ShellRunBg
+            tool = ShellRunBg()
+            output = tool.run({"command": cmd}, _api_allow())
+            web_audit.mutate(auth_sid, ip, "/api/shells/run", ["command"])
+            return JSONResponse({"ok": True, "output": output})
+        except Exception as e:
+            return JSONResponse({"error": f"shell run failed: {e}"})
+
+    @app.get("/api/shells/{shell_id}/output")
+    async def api_shell_output(shell_id: str, request: Request):
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            from ..tools.shell_bg import ShellOutput
+            tool = ShellOutput()
+            output = tool.run({"shell_id": shell_id}, _api_allow())
+            return JSONResponse({"output": output})
+        except Exception as e:
+            return JSONResponse({"error": f"output read failed: {e}"})
+
+    @app.post("/api/shells/{shell_id}/kill")
+    async def api_shell_kill(shell_id: str, request: Request):
+        auth_sid, err_resp, ip = _gate_post(
+            request, f"/api/shells/{shell_id}/kill",
+        )
+        if err_resp is not None:
+            return err_resp
+        try:
+            from ..tools.shell_bg import ShellKill
+            tool = ShellKill()
+            output = tool.run({"shell_id": shell_id}, _api_allow())
+            web_audit.mutate(auth_sid, ip, "/api/shells/kill", [shell_id])
+            return JSONResponse({"ok": True, "output": output})
+        except Exception as e:
+            return JSONResponse({"error": f"kill failed: {e}"})
+
+    @app.get("/api/logs")
+    async def api_logs(request: Request, limit: int = 100):
+        """v1.22.3: tail of ~/.janus/log.jsonl. Live SSE deferred."""
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            entries: list[dict] = []
+            log_path = config.LOG_FILE
+            if log_path.is_file():
+                try:
+                    lines = log_path.read_text(encoding="utf-8").splitlines()
+                except OSError:
+                    lines = []
+                for raw in lines[-limit:]:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        import json as _json
+                        entries.append(_json.loads(raw))
+                    except Exception:
+                        entries.append({"raw": raw})
+            return JSONResponse({"entries": entries[::-1]})
+        except Exception as e:
+            return JSONResponse({"error": f"logs read failed: {e}"})
+
+    @app.get("/api/cost-summary")
+    async def api_cost_summary(request: Request):
+        """v1.22.3: aggregated cost summary. Reuses cost.render_summary."""
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            try:
+                summary = cost.render_summary() or "(no usage yet)"
+            except Exception:
+                # Older builds may name it differently — fall back to
+                # turn_stats so at least the user sees current model usage.
+                ts = cost.turn_stats()
+                summary = (
+                    f"current turn:\n"
+                    f"  prompt tokens: {ts.prompt_tokens}\n"
+                    f"  completion tokens: {ts.completion_tokens}\n"
+                    f"  cost: ${ts.usd:.4f}\n"
+                )
+            return JSONResponse({"summary": summary})
+        except Exception as e:
+            return JSONResponse({"error": f"cost summary failed: {e}"})
+
+    @app.get("/api/settings")
+    async def api_settings(request: Request):
+        """v1.22.3: read-only view of mode + model + key env vars."""
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            mode = permissions.normalize(config.APPROVAL_MODE)
+            return JSONResponse({
+                "mode": mode,
+                "model": config.MODEL,
+                "api_base": config.API_BASE,
+                "workspace": str(config.WORKSPACE),
+                "home": str(config.HOME),
+                "step_soft_cap": config.STEP_SOFT_CAP,
+                "step_hard_cap": config.STEP_HARD_CAP,
+                "step_progress_grace": config.STEP_PROGRESS_GRACE,
+                "shell_timeout_max": config.SHELL_TIMEOUT_MAX,
+                "session_ttl_seconds": web_auth.session_ttl_seconds(),
+                "version": branding.VERSION,
+            })
+        except Exception as e:
+            return JSONResponse({"error": f"settings read failed: {e}"})
+
+    # ---------- v1.22.0a: SSE stream + approve/clarify endpoints ----------
+
+    @app.get("/api/events")
+    async def api_events(request: Request):
+        """v1.22.0a: Server-Sent Events stream for approval / clarify
+        modal delivery. Browser keeps this connection open; backend
+        pushes events as worker threads request them.
+
+        First payload is a `bootstrap` event that hydrates any modals
+        already pending (e.g., user reconnected mid-flight after a
+        page reload).
+        """
+        auth_sid, err = _check_auth(request)
+        if err:
+            return JSONResponse({"error": err}, status_code=401)
+        from . import web_bridge
+        from fastapi.responses import StreamingResponse
+        import asyncio as _asyncio
+        import json as _json
+
+        queue = web_bridge.add_subscriber(auth_sid)
+
+        async def gen():
+            try:
+                # Bootstrap: send any pending approvals/clarifies that
+                # fired before this SSE connection opened.
+                for entry in web_bridge.list_pending_approvals(auth_sid):
+                    yield (
+                        "event: approval_pending\n"
+                        f"data: {_json.dumps(entry)}\n\n"
+                    )
+                for entry in web_bridge.list_pending_clarifies(auth_sid):
+                    yield (
+                        "event: clarify_pending\n"
+                        f"data: {_json.dumps(entry)}\n\n"
+                    )
+                # Heartbeat every 25s keeps the connection alive
+                # through proxies that drop idle connections.
+                while True:
+                    try:
+                        evt = await _asyncio.wait_for(queue.get(), timeout=25.0)
+                    except _asyncio.TimeoutError:
+                        yield ":heartbeat\n\n"
+                        continue
+                    et = evt.get("type", "message")
+                    yield f"event: {et}\ndata: {_json.dumps(evt)}\n\n"
+            finally:
+                web_bridge.remove_subscriber(auth_sid, queue)
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={
+                "cache-control": "no-cache",
+                "x-accel-buffering": "no",  # Nginx: don't buffer
+            },
+        )
+
+    @app.post("/api/approve/{request_id}")
+    async def api_approve(request_id: str, request: Request):
+        """v1.22.0a: resolve a pending approval. Body: {"approve": bool}."""
+        auth_sid, err = _check_auth(request)
+        if err:
+            return JSONResponse({"error": err}, status_code=401)
+        ip = _client_ip(request)
+        ok, ra = web_auth.rate_limit_take(auth_sid, "read")
+        if not ok:
+            return JSONResponse(
+                {"error": "rate limited"}, status_code=429,
+                headers={"Retry-After": str(int(ra) + 1)},
+            )
+        if not _check_csrf(request, auth_sid):
+            web_audit.csrf_failure(auth_sid, ip, f"/api/approve/{request_id}")
+            return JSONResponse(
+                {"error": "missing or invalid CSRF token"}, status_code=403,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        decision = bool(body.get("approve")) if isinstance(body, dict) else False
+        from . import web_bridge
+        if not web_bridge.resolve_approval(request_id, decision):
+            return JSONResponse(
+                {"error": "no such approval (expired or already resolved)"},
+                status_code=404,
+            )
+        web_audit.mutate(
+            auth_sid, ip, f"/api/approve/{request_id}",
+            ["approve" if decision else "deny"],
+        )
+        return JSONResponse({"ok": True, "decision": decision})
+
+    @app.post("/api/clarify/{request_id}")
+    async def api_clarify(request_id: str, request: Request):
+        """v1.22.0a: resolve a pending clarify. Body: {"answer": str}."""
+        auth_sid, err = _check_auth(request)
+        if err:
+            return JSONResponse({"error": err}, status_code=401)
+        ip = _client_ip(request)
+        ok, ra = web_auth.rate_limit_take(auth_sid, "read")
+        if not ok:
+            return JSONResponse(
+                {"error": "rate limited"}, status_code=429,
+                headers={"Retry-After": str(int(ra) + 1)},
+            )
+        if not _check_csrf(request, auth_sid):
+            web_audit.csrf_failure(auth_sid, ip, f"/api/clarify/{request_id}")
+            return JSONResponse(
+                {"error": "missing or invalid CSRF token"}, status_code=403,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        answer = (body.get("answer") if isinstance(body, dict) else "") or ""
+        from . import web_bridge
+        if not web_bridge.resolve_clarify(request_id, str(answer)):
+            return JSONResponse(
+                {"error": "no such clarify (expired or already resolved)"},
+                status_code=404,
+            )
+        web_audit.mutate(auth_sid, ip, f"/api/clarify/{request_id}", ["answer"])
+        return JSONResponse({"ok": True})
 
     return app
 
