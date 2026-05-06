@@ -74,6 +74,33 @@ _BOT_COMMANDS = [
 MAX_MSG = 3500  # leave headroom under Telegram's 4096
 GATEWAY_NAME = "telegram"
 
+# v1.18.2 — Telegram-specific tone/behavior preamble. Prepended above the
+# memory block when running inside the Telegram chat loop. Sam's
+# 2026-05-06 feedback: "Janus should be more friendly and do reactions
+# on my text". This prompt addresses both — friendliness shape and
+# pointing the model at telegram_react for lightweight acknowledgments.
+TELEGRAM_FRIENDLINESS_PROMPT = """\
+# You are running INSIDE a Telegram chat with the user.
+
+Tone shifts vs the CLI:
+- Be conversational. Greetings get warm short greetings back, not a
+  tool dump.
+- For lightweight acknowledgments ("got it", "sounds good", "cool"),
+  use the `telegram_react` tool to react with an emoji INSTEAD OF
+  sending a separate "✓ noted" message. Saves user attention.
+- Use `telegram_react` proactively when the user shares something
+  notable: 👍 for confirmations, ❤️ / 🥰 for personal info shared,
+  🔥 for an interesting idea, ✅ for "task done", 🤔 for "let me
+  think". One reaction is plenty per message.
+- DON'T over-react. Reactions are seasoning, not the main course.
+  If the user asks a real question or makes a real request, reply
+  with the actual answer/work — not just a reaction.
+- Keep replies tight. Telegram is mobile-first; each message you send
+  is a notification on the user's phone. Two short messages > one
+  paragraph.
+- DON'T narrate tool calls ("I'll search memory now…"). The trace
+  panel already shows tool activity. Just speak human."""
+
 # v1.18.1: how long an approval prompt stays "live" before timing out.
 # Pre-v1.18.1 was 180s — way too short for real Telegram UX (notification
 # delays, phone unlocks, multitasking). Late clicks hit a cancelled
@@ -117,6 +144,9 @@ class Session:
         self.always_grants: set[str] = set(
             self._persistent.extras.get("always_grants") or []
         )
+        # v1.18.2 — most-recent inbound message_id, so telegram_react
+        # can target the user's last message.
+        self.last_user_message_id: int | None = None
 
     @property
     def messages(self) -> list[dict]:
@@ -860,7 +890,20 @@ async def _run_chat_turn(
 ):
     """Shared chat-flow used by on_text / on_photo / on_document.
     Runs executor.chat with full memory + indicators + cost tracking."""
+    # v1.18.2 — stash the user's message_id so telegram_react can target
+    # the message we're replying to. Also stash the chat_id (already
+    # known but easier than threading it through tool closures).
+    try:
+        sess.last_user_message_id = (
+            update.message.message_id if update.message else None
+        )
+    except Exception:
+        sess.last_user_message_id = None
+
     preamble = memory.prepend_for_prompt()
+    # v1.18.2 — Telegram-specific friendliness preamble. Prepended above
+    # the static memory block so it's load-bearing for chat tone.
+    preamble = TELEGRAM_FRIENDLINESS_PROMPT + "\n\n" + (preamble or "")
 
     # Capture the gateway's event loop ONCE on the asyncio thread, then
     # pass it everywhere downstream — the executor will run on a worker
@@ -898,6 +941,18 @@ async def _run_chat_turn(
     tools.add_tool(_Clarify(callback=_make_telegram_clarify_cb(
         chat_id, ctx.application, sess, gateway_loop,
     )))
+
+    # v1.18.2 — Telegram-bound react tool. Closure captures chat_id and
+    # the session's most-recent inbound message_id so the model only
+    # needs to pass an emoji.
+    from ..tools.telegram_react import TelegramReact as _TelegramReact
+    def _msg_id_provider() -> tuple[int, int] | None:
+        mid = sess.last_user_message_id
+        if not mid:
+            return None
+        return (chat_id, int(mid))
+    tools.remove_tool("telegram_react")
+    tools.add_tool(_TelegramReact(msg_id_callback=_msg_id_provider))
 
     approver = make_protected(base_approver, caps, sess.mode_state.current)
 

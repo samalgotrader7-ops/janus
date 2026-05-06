@@ -24,6 +24,7 @@ from .browser import (
 from .vision import ImageDescribe
 from .swarm_run import SwarmRun
 from .telegram_send import TelegramSendFile, TelegramSendMessage
+from .telegram_react import TelegramReact
 from .agent import (
     AgentCreate, AgentList, AgentRunNow, AgentDelete, AgentSetEnabled,
 )
@@ -71,6 +72,10 @@ _BUILTIN_TOOL_FACTORIES = {
     # inside the Telegram gateway). Need JANUS_TELEGRAM_TOKEN set.
     "telegram_send_file": TelegramSendFile,
     "telegram_send_message": TelegramSendMessage,
+    # v1.18.2 — friendliness on Telegram. Model can react to the user's
+    # most-recent message with an emoji. Gateway-bound: outside the
+    # Telegram chat loop, returns "not on Telegram" gracefully.
+    "telegram_react": TelegramReact,
     # v1.6.0 — scheduled-agent lifecycle. THE LIFETIME-SOLUTION TOOLS.
     # Before these, the model would lie about creating agents (just
     # writing to memory) because it had no real machinery. Now it

@@ -33,6 +33,54 @@ def _resolve_within_workspace(rel_path: str) -> Path:
     return security.resolve_within(config.WORKSPACE, rel_path)
 
 
+def _resolve_for_read(rel_path: str) -> Path:
+    """Resolve for READ-ONLY tools (fs_read, fs_list).
+
+    Tries WORKSPACE first (the user's project — primary boundary). If
+    that fails, ALSO accepts paths inside ``~/.janus/`` (the agent's own
+    state dir — memory cards, skills, triggers, conversations, log).
+    Without this carve-out, an agent running with WORKSPACE=/opt/janus
+    can't fs_read its OWN ~/.janus/memory/user.md and falls back to
+    `shell cat ...` — which needs per-call approval and is the v1.18.1
+    Telegram pain point Sam hit on 2026-05-06.
+
+    P3 (workspace boundary) is preserved for WRITE tools — fs_write /
+    fs_edit / fs_multi_edit still go through ``_resolve_within_workspace``.
+    Only reads see the agent's home dir as a second valid root.
+
+    ORDER MATTERS: tilde-prefixed paths must be expanded BEFORE the
+    workspace check, because Path("/ws/") / "~/foo" wrongly produces
+    "/ws/~/foo" (which IS literally under workspace) — the workspace
+    resolver would happily return that bogus path and fs_read would
+    then fail with "not found".
+    """
+    from .. import security
+    # FIRST: tilde-prefixed paths expand against the agent's home.
+    # (Must come before workspace check — see docstring for why.)
+    if rel_path.startswith("~"):
+        expanded = Path(rel_path).expanduser().resolve()
+        try:
+            expanded.relative_to(Path(config.HOME).resolve())
+            return expanded
+        except ValueError:
+            pass
+    # SECOND: workspace (the normal case for code paths).
+    try:
+        return security.resolve_within(config.WORKSPACE, rel_path)
+    except ValueError:
+        pass
+    # THIRD: the agent's own ~/.janus/ tree (read-only carve-out for
+    # absolute paths like /home/sam/.janus/memory/user.md).
+    try:
+        return security.resolve_within(config.HOME, rel_path)
+    except ValueError:
+        pass
+    raise ValueError(
+        f"path '{rel_path}' resolves outside both workspace "
+        f"({config.WORKSPACE}) and agent home ({config.HOME})"
+    )
+
+
 class FsRead(base.Tool):
     name = "fs_read"
     description = (
@@ -53,7 +101,13 @@ class FsRead(base.Tool):
     risk = "read"
 
     def run(self, args: dict, approver: Callable[[str, str], bool]) -> str:
-        p = _resolve_within_workspace(args["path"])
+        # v1.18.2: read-only tools accept paths under ~/.janus/ in
+        # addition to WORKSPACE so the agent can introspect its own
+        # state dir without falling back to `shell cat`.
+        try:
+            p = _resolve_for_read(args["path"])
+        except ValueError as e:
+            return f"error: {e}"
         if not p.exists():
             return f"error: file not found: {args['path']}"
         if not p.is_file():
@@ -145,7 +199,12 @@ class FsList(base.Tool):
     risk = "read"
 
     def run(self, args: dict, approver: Callable[[str, str], bool]) -> str:
-        p = _resolve_within_workspace(args["path"])
+        # v1.18.2: same carve-out as FsRead — agent can list its own
+        # ~/.janus/ state dir without shell-fallback.
+        try:
+            p = _resolve_for_read(args["path"])
+        except ValueError as e:
+            return f"error: {e}"
         if not p.exists():
             return f"error: not found: {args['path']}"
         if not p.is_dir():
