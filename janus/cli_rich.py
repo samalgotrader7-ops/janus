@@ -1465,9 +1465,28 @@ def _dispatch(console, line: str, state: dict) -> bool:
 
 
 def _cmd_mode(console, arg: str, state: dict) -> bool:
-    """`/mode [name]` — show or switch the active permission mode."""
+    """`/mode [name]` — show or switch the active permission mode.
+
+    v1.25.5: ``/mode cycle`` (or Alt+M) advances through the modes in
+    a fixed order: default → acceptEdits → plan → auto →
+    bypassPermissions → default. Useful for the keyboard hotkey path
+    where the user doesn't want to type a specific mode name.
+    """
     mode_state: permissions.ModeState = state["mode_state"]
     target = arg.strip()
+    if target == "cycle":
+        order = [
+            permissions.DEFAULT,
+            permissions.ACCEPT_EDITS,
+            permissions.PLAN,
+            permissions.AUTO,
+            permissions.BYPASS,
+        ]
+        try:
+            idx = order.index(mode_state.current)
+        except ValueError:
+            idx = -1
+        target = order[(idx + 1) % len(order)]
     if not target:
         # Show current + list options.
         rows = [
@@ -1997,7 +2016,84 @@ def main() -> None:
             "[red]every tool will run without asking. /mode default to disable.[/]"
         )
 
+    # v1.25.5: hotkeys. Each binding injects the matching slash command
+    # into the prompt buffer and accepts it, so behavior is identical
+    # to the user typing the slash by hand. Predictable + reuses every
+    # existing slash code path (retry, undo, mode, clear, plan, help).
     bindings = KeyBindings()
+
+    def _inject_and_submit(event, text: str) -> None:
+        """Replace the current buffer with ``text`` and submit it.
+
+        Identical to the user typing the slash and pressing Enter —
+        all subsequent dispatch reuses the existing slash handlers.
+        """
+        try:
+            buf = event.current_buffer
+            buf.text = text
+            buf.cursor_position = len(text)
+            buf.validate_and_handle()
+        except Exception:
+            # If the buffer isn't ready (e.g. completer popup open),
+            # fall through silently — user can press the hotkey again.
+            pass
+
+    @bindings.add("c-r")
+    def _retry(event):
+        """Ctrl+R — retry last user input (re-runs /retry slash)."""
+        _inject_and_submit(event, "/retry")
+
+    @bindings.add("c-z")
+    def _undo(event):
+        """Ctrl+Z — drop the last user+assistant pair (/undo)."""
+        _inject_and_submit(event, "/undo")
+
+    @bindings.add("c-l")
+    def _clear(event):
+        """Ctrl+L — clear screen (/clear)."""
+        _inject_and_submit(event, "/clear")
+
+    # Ctrl+M historically maps to Enter on many terminals, so we use
+    # Esc-m (Alt+M on most keyboards) for mode cycling instead. That's
+    # the prompt_toolkit-canonical way to bind Alt+<key>.
+    @bindings.add("escape", "m")
+    def _mode_cycle(event):
+        """Alt+M — cycle through permission modes."""
+        _inject_and_submit(event, "/mode cycle")
+
+    @bindings.add("escape", "p")
+    def _plan_toggle(event):
+        """Alt+P — toggle plan mode on/off."""
+        # Read current mode out of state so we toggle correctly.
+        cur = mode_state.current
+        target = "default" if cur == "plan" else "plan"
+        _inject_and_submit(event, f"/mode {target}")
+
+    @bindings.add("escape", "h")
+    def _hotkeys_help(event):
+        """Alt+H — print the hotkey cheatsheet inline."""
+        # Run before the buffer accepts so the help text appears
+        # ABOVE the prompt and the buffer stays empty for the next
+        # input the user types.
+        def _show():
+            console.print(
+                "[bold]janus hotkeys[/]\n"
+                "  [cyan]Ctrl+R[/]  retry last input\n"
+                "  [cyan]Ctrl+Z[/]  undo last user+assistant pair\n"
+                "  [cyan]Ctrl+L[/]  clear screen\n"
+                "  [cyan]Alt+M[/]   cycle mode "
+                "(default → acceptEdits → plan → auto → bypassPermissions)\n"
+                "  [cyan]Alt+P[/]   toggle plan mode\n"
+                "  [cyan]Alt+H[/]   show this cheatsheet\n"
+                "  [cyan]Ctrl+C[/]  cancel current turn\n"
+                "  [cyan]Ctrl+D[/]  exit (when prompt is empty)\n"
+                "  [cyan]Esc+Enter[/]  multi-line input"
+            )
+        try:
+            event.app.run_in_terminal(_show)
+        except Exception:
+            _show()
+
     base_approver = _make_mode_approver(console, mode_state)
     state: dict[str, Any] = {
         "quit": False,
@@ -2021,6 +2117,10 @@ def main() -> None:
         completer=SlashCompleter(lambda: state.get("custom_commands") or {}),
         style=JANUS_STYLE,
         reserve_space_for_menu=12,
+        # v1.25.5: hotkeys (defined above as `bindings`). Ctrl+R retry,
+        # Ctrl+Z undo, Ctrl+L clear, Alt+M mode cycle, Alt+P plan
+        # toggle, Alt+H help.
+        key_bindings=bindings,
     )
 
     cache_snap = cache.snapshot()
