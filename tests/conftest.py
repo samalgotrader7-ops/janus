@@ -44,6 +44,13 @@ def pytest_configure(config):
             pass
     importlib.invalidate_caches()
 
+    # v1.27.1: disable auto-verify by default during the test suite.
+    # Without this, every fs_edit/fs_write inside a test would
+    # potentially trigger a real subprocess.run of pytest in the
+    # workspace — recursive, slow, and confusing. Individual tests
+    # that exercise the verification path opt-in via monkeypatch.setenv.
+    os.environ.setdefault("JANUS_AUTO_VERIFY", "0")
+
 
 @pytest.fixture
 def janus_home(tmp_path, monkeypatch):

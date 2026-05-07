@@ -1239,6 +1239,36 @@ def chat(
                 if scan.detected:
                     step_record["injection_detected"] = scan.reasons()
 
+            # v1.27.1 — verification by default. After a code edit
+            # (fs_write/fs_edit/fs_multi_edit on a .py file), run the
+            # targeted pytest file for the changed source and append
+            # the pass/fail block to the tool result. The model reads
+            # it on the next iteration of the loop.
+            # Best-effort: never break the chat loop on verification
+            # failure. JANUS_AUTO_VERIFY=0 disables.
+            try:
+                from . import verification as _verify
+                vresult = _verify.maybe_verify(
+                    name, args, result, workspace=ws,
+                )
+                if vresult is not None:
+                    block = _verify.format_result(vresult)
+                    content_for_model = content_for_model + "\n\n" + block
+                    if on_step:
+                        on_step({
+                            "type": "verification_result",
+                            "step": step,
+                            "tool": name,
+                            **vresult,
+                        })
+                    step_record["verification"] = {
+                        "passed": vresult.get("passed"),
+                        "runner": vresult.get("runner"),
+                        "timed_out": vresult.get("timed_out"),
+                    }
+            except Exception:
+                pass
+
             messages.append({
                 "role": "tool",
                 "tool_call_id": call["id"],

@@ -123,6 +123,11 @@ EVENT_TYPES: frozenset[str] = frozenset({
     "subagent_start",       # subagent invocation begins
     "subagent_step",        # each event from inside the subagent's chat
     "subagent_end",         # subagent invocation finished
+
+    # v1.27.1 — verification by default. After a code edit, executor
+    # runs the targeted pytest and emits this event. Renderers can
+    # show a green check / red x next to the tool result.
+    "verification_result",
 })
 
 
