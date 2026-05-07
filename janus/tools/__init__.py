@@ -31,6 +31,7 @@ from .agent import (
 )
 from .clarify import Clarify
 from .delegate import Delegate
+from .subagent import Subagent
 from .ssh_exec import SshExec
 from .shell_bg import ShellRunBg, ShellOutput, ShellKill, ShellList
 from .plan_mode import ExitPlanMode
@@ -103,7 +104,14 @@ _BUILTIN_TOOL_FACTORIES = {
     # `delegate` spawns a fresh executor.chat for one focused sub-task.
     # Restricted tool surface (read-only by default), bounded steps,
     # recursion blocked at depth 1. Lighter than swarm_run.
+    # DEPRECATED in v1.27.0 — use `subagent` instead. Kept bundled for
+    # back-compat; will be removed in v1.28.x.
     "delegate": Delegate,
+    # v1.27.0 — first-class subagent spawn. Replaces delegate with
+    # structured briefing (description + prompt), subagent_type
+    # presets (general / explore / plan / code-review), live progress
+    # forwarding to the parent's event stream, and audit logging.
+    "subagent": Subagent,
     # v1.11.0 — remote command execution via system ssh. BatchMode=yes
     # (key auth only, no password prompts). Reuses ~/.ssh/config aliases,
     # ProxyJump, agent forwarding. Capability tokens: ssh.exec.

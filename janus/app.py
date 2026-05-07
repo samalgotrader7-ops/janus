@@ -65,6 +65,23 @@ from typing import Any, Callable, Iterable, Iterator
 from . import executor
 
 
+# ---------- Thread-local for sub-tool event forwarding (v1.27.0) ----------
+#
+# When a chat turn runs in a worker thread (chat_events / run_turn),
+# this thread-local exposes the queue-push callback to tools that want
+# to forward events to the parent's progress stream. The Subagent tool
+# (tools/subagent.py) reads ``parent_on_step`` and forwards each
+# subagent event wrapped with ``type='subagent_step'`` so the user
+# sees streaming progress instead of a silent block while the subagent
+# runs.
+#
+# Tools that bypass app.run_turn (direct executor.chat callers, e.g.
+# legacy tests) get graceful no-op behavior — the attribute is unset,
+# the read returns None, the tool just doesn't forward.
+
+_app_thread_local = threading.local()
+
+
 # ---------- Canonical event vocabulary ----------
 #
 # Pinned in tests/test_event_stream_vocabulary.py so a regression
@@ -99,6 +116,13 @@ EVENT_TYPES: frozenset[str] = frozenset({
     "turn_start",           # yielded once before chat() runs
     "turn_end",             # yielded once after chat() returns
     "turn_error",           # raised exception captured as event
+
+    # v1.27.0 — first-class Subagent tool. The parent's chat stream
+    # gets a structured wrapper around each subagent event so renderers
+    # can group / indent / collapse them as one logical sub-turn.
+    "subagent_start",       # subagent invocation begins
+    "subagent_step",        # each event from inside the subagent's chat
+    "subagent_end",         # subagent invocation finished
 })
 
 
@@ -145,6 +169,12 @@ def chat_events(
         q.put(step)
 
     def _runner() -> None:
+        # v1.27.0: expose the queue-push callback to sub-tools (Subagent)
+        # so they can forward their own events to the parent's progress
+        # stream. Cleared in finally so a leaked thread-local doesn't
+        # cross between turns.
+        _orig_parent = getattr(_app_thread_local, "parent_on_step", None)
+        _app_thread_local.parent_on_step = _push
         try:
             executor.chat(
                 messages=messages,
@@ -171,6 +201,11 @@ def chat_events(
             # swallowed — we want it through to the consumer.
             q.put({"type": "turn_error", "error": exc})
             q.put(_END)
+        finally:
+            # v1.27.0: restore the previous thread-local so nested
+            # workers (rare but possible if a surface spawns its own
+            # chat_events on the same thread) see consistent state.
+            _app_thread_local.parent_on_step = _orig_parent
 
     # Caller can supply their own cancel_event for cooperative cancel
     # (Ctrl+C handlers, slash-command interrupts, etc.). If they don't,
