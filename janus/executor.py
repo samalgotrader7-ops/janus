@@ -856,6 +856,19 @@ def _build_chat_system(
         parts.append("\n\n---\n\n")
     if skill_body:
         parts.append(f"# Active skill\n\n{skill_body.rstrip()}\n\n---\n\n")
+    # v1.25.6: read-once context awareness. Surface the list of files
+    # this session has already read so the model stops re-fs_reading
+    # files it already has in context. Rule 22 says don't spelunk;
+    # this gives the model concrete evidence of what's already seen.
+    # Best-effort: never block prompt construction if read_tracker fails.
+    try:
+        from . import read_tracker as _rt
+        ctx_block = _rt.context_summary(workspace=workspace)
+        if ctx_block:
+            parts.append(ctx_block.rstrip())
+            parts.append("\n\n---\n\n")
+    except Exception:
+        pass
     parts.append(JANUS_CHAT_SYSTEM)
 
     inv_bits: list[str] = []

@@ -75,3 +75,76 @@ def reset() -> None:
 def all_read_paths() -> list[str]:
     """Return every path tracked. Used for tests / debugging."""
     return list(_state().keys())
+
+
+# ---------- v1.25.6: read-once context awareness ----------
+#
+# At turn start, surface to the model the list of files it has
+# already read in this session. Goal: discourage the "fs_read the
+# same file 3 times in one turn" anti-pattern that the over-
+# investigation (rule 22) targeted from a different angle. The
+# rule says don't spelunk; this surfaces concrete evidence to back
+# the rule up.
+
+def context_summary(*, workspace: str | None = None, max_paths: int = 25) -> str:
+    """Return a short Markdown block listing files this session has
+    read, with sizes. Empty string when nothing has been read.
+
+    Paths are rendered relative to ``workspace`` when one is supplied
+    AND the path is inside it; otherwise the absolute path is used
+    (defensive — the agent reads ~/.janus/ files too in some flows).
+    """
+    state = _state()
+    if not state:
+        return ""
+    ws_path = None
+    if workspace:
+        try:
+            ws_path = Path(workspace).resolve()
+        except OSError:
+            ws_path = None
+
+    lines: list[str] = []
+    for raw, (_mtime, size) in state.items():
+        try:
+            p = Path(raw)
+        except (TypeError, ValueError):
+            continue
+        # Render relative when possible.
+        if ws_path is not None:
+            try:
+                display = str(p.relative_to(ws_path))
+            except ValueError:
+                display = str(p)
+        else:
+            display = str(p)
+        # Format size compactly: <1k as bytes, >=1k as kilobytes.
+        if size < 1024:
+            size_text = f"{size}B"
+        elif size < 1024 * 1024:
+            size_text = f"{size // 1024}KB"
+        else:
+            size_text = f"{size // (1024 * 1024)}MB"
+        lines.append((display, size_text))
+
+    if not lines:
+        return ""
+
+    # Stable order: alphabetical so the block is reproducible turn-to-turn.
+    lines.sort()
+    if len(lines) > max_paths:
+        lines = lines[:max_paths]
+        truncated = True
+    else:
+        truncated = False
+
+    body = "\n".join(f"- {display} ({size})" for display, size in lines)
+    if truncated:
+        body += f"\n- ... ({len(state) - max_paths} more)"
+
+    return (
+        "## Files already in your session context\n"
+        f"{body}\n\n"
+        "(Do not fs_read these again unless you have a reason to "
+        "believe they changed. Use the existing context.)"
+    )
