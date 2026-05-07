@@ -20,14 +20,9 @@ This file pins:
 """
 from __future__ import annotations
 
-# Pre-warm the memory_cards → skills → tools → interview_ask →
-# interviews chain so memory_extract.parse_cards's lazy import doesn't
-# hit the pre-existing circular at interviews.py:44
-# (`memory_cards.TYPES` accessed mid-init). Three modules cover the
-# full dependency closure.
-import janus.memory     # noqa: F401
-import janus.tools      # noqa: F401
-import janus.interviews # noqa: F401
+# v1.25.3: the pre-existing circular at interviews.py:44 was fixed by
+# hardcoding SUPPORTED_CATEGORIES instead of reading memory_cards.TYPES
+# at module load. The pre-warm imports we needed in v1.25.2 are gone.
 
 
 # ---------- Config knob ----------

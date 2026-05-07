@@ -40,8 +40,21 @@ INTERVIEW_MODES = ("idle", "one_shot", "drip")
 
 
 # Categories must EXACTLY match the v1.18 type set so answers map
-# correctly at apply time.
-SUPPORTED_CATEGORIES: tuple[str, ...] = tuple(memory_cards.TYPES)
+# correctly at apply time. Hardcoded (not ``tuple(memory_cards.TYPES)``)
+# to avoid a circular at module load: memory_cards → skills → tools/__init__
+# → tools/interview_ask → interviews, where the last hop tries to read
+# memory_cards.TYPES while memory_cards is still mid-init. Pinned by
+# tests/test_interviews_categories_match_memory_cards_TYPES.
+SUPPORTED_CATEGORIES: tuple[str, ...] = (
+    "identity",
+    "preference",
+    "goal",
+    "project",
+    "habit",
+    "decision",
+    "constraint",
+    "relationship",
+)
 QUESTION_MODES = ("text", "choices")
 
 

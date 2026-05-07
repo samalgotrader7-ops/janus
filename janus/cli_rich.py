@@ -2394,10 +2394,38 @@ def _render_step_factory(console, state=None):
             )
         elif step["type"] == "tool_result":
             _clear_status_for_print()
+            tool_name = step.get("tool") or step.get("name") or ""
             preview = step.get("result_preview", "")
-            head = preview.splitlines()[0][:80] if preview else ""
-            if head:
-                console.print(f"[dim]    {branding.TOOL_OK} {head}[/]")
+            # v1.25.3: when the model writes/reads the todo list, render
+            # the on-disk state as a checklist panel instead of the bare
+            # one-line preview. Same shape as Claude Code's task panel.
+            if tool_name in ("todo_write", "todo_read"):
+                try:
+                    from . import task_render
+                    todos = task_render.parse_todos_from_disk(
+                        config.TODOS_FILE,
+                    )
+                    panel = task_render.render_rich_panel(todos)
+                    if panel is not None:
+                        console.print(panel)
+                    else:
+                        # Rich missing for some reason; fall through to
+                        # the plain preview below.
+                        head = preview.splitlines()[0][:80] if preview else ""
+                        if head:
+                            console.print(
+                                f"[dim]    {branding.TOOL_OK} {head}[/]"
+                            )
+                except Exception:
+                    head = preview.splitlines()[0][:80] if preview else ""
+                    if head:
+                        console.print(
+                            f"[dim]    {branding.TOOL_OK} {head}[/]"
+                        )
+            else:
+                head = preview.splitlines()[0][:80] if preview else ""
+                if head:
+                    console.print(f"[dim]    {branding.TOOL_OK} {head}[/]")
             # v1.24.4: refresh token count from cost.turn_stats — gives
             # the user a sense of how the model burn is progressing.
             if sl is not None:
