@@ -144,6 +144,7 @@ def test_chat_endpoint_returns_output(janus_home, fake_llm):
     )
     assert r.status_code == 200
     data = r.json()
+    assert "output" in data, f"unexpected response shape: {data!r}"
     # v1.3 self-intro is prepended on the first turn — "hi back" still in there.
     assert "hi back" in data["output"]
     assert data["session_id"] == "s1"

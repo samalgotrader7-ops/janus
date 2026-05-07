@@ -38,6 +38,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .. import app as janus_app  # avoid name collision with FastAPI `app` local
 from .. import config, executor, logger, memory, skills, hooks, permissions
 from .. import branding, cost
 from ..tools import default_registry, make_protected, CapabilitySet
@@ -681,12 +682,18 @@ def _build_app():
 
         try:
             t0 = time.time()
-            # v1.22.0a: run the (synchronous) executor in a thread so
+            # v1.22.0a: run the (synchronous) chat turn in a thread so
             # its blocking approver wait doesn't freeze the FastAPI
             # event loop. The bridge schedules SSE notifications onto
             # the loop via run_coroutine_threadsafe.
+            #
+            # v1.25.0 Phase 0: route through app.run_turn so events
+            # flow through the surface-agnostic substrate. Full async
+            # iteration over app.chat_events (replacing to_thread
+            # entirely) is a follow-up cleanup — Phase 0 only needs
+            # the substrate plumbing.
             def _run_executor():
-                return executor.chat(
+                return janus_app.run_turn(
                     messages=messages,
                     user_input=req,
                     tools=tools,
