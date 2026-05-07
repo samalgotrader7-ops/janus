@@ -34,6 +34,7 @@ import time
 import uuid
 from typing import Any
 
+from .. import app as janus_app  # `app` collides with python-telegram-bot Application
 from .. import config, executor, logger, memory, index, skills, permissions
 from .. import branding, cost
 from ..tools import default_registry, make_protected, CapabilitySet
@@ -1123,7 +1124,9 @@ async def _run_chat_turn(
             chat_name=update.effective_chat.title if update.effective_chat else None,
             user=_user_label(update),
         ):
-            return executor.chat(
+            # v1.25.7 Phase 0e: route through the surface-agnostic
+            # event stream (substrate is in janus/app.py since v1.25.0).
+            return janus_app.run_turn(
                 messages=sess.messages,
                 user_input=req,
                 tools=tools,

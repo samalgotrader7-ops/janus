@@ -22,6 +22,7 @@ import datetime as dt
 import time
 from typing import Callable
 
+from .. import app as janus_app
 from .. import config, interpreter, executor, logger, memory, skills as skills_mod
 from ..tools import default_registry, make_capability_aware, CapabilitySet
 from .base import (
@@ -206,7 +207,10 @@ def fire_once(t: Trigger, *, detail: dict | None = None) -> str:
     from ..tools import make_protected
     approver = make_protected(_auto_approver, caps, "auto")
 
-    output, _trace = executor.chat(
+    # v1.25.7 Phase 0e: route through the substrate so scheduled
+    # agents see the same event-stream features (hook_fired,
+    # memory_recall, etc.) as interactive surfaces.
+    output, _trace = janus_app.run_turn(
         messages=[],
         user_input=t.request,
         tools=tools,

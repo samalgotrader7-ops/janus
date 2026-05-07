@@ -50,11 +50,18 @@ def _isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_fire_once_source_calls_executor_chat():
-    """Architectural invariant: fire_once goes through executor.chat,
-    NOT executor.execute (the legacy path with its own bugs)."""
+    """Architectural invariant: fire_once goes through chat (event-stream
+    substrate as of v1.25.7), NOT executor.execute (the legacy path
+    with its own bugs).
+
+    v1.25.7: accepts both ``executor.chat(`` (legacy direct call) and
+    ``janus_app.run_turn(`` (new substrate, drop-in equivalent that
+    routes through app.chat_events under the hood). Either is fine —
+    both go through executor.chat eventually. The forbidden one is
+    executor.execute (legacy plan-tree dormant code)."""
     src = inspect.getsource(runtime_mod.fire_once)
-    # Must call chat
-    assert "executor.chat(" in src
+    # Must call ONE of the two valid entry points.
+    assert "executor.chat(" in src or "janus_app.run_turn(" in src
     # Must NOT call legacy execute (the v1.6 bug surface)
     assert "executor.execute(" not in src
 
@@ -81,6 +88,13 @@ def test_fire_once_invokes_chat_with_skill_body(tmp_path, monkeypatch):
 
     def _fake_chat(**kw):
         captured.update(kw)
+        # v1.25.7: app.run_turn extracts output from the `final` event,
+        # not the executor return tuple. Stubs must emit a final event
+        # via on_step for the value to flow through. Tuple still
+        # returned for legacy tests that check it.
+        on_step = kw.get("on_step")
+        if on_step:
+            on_step({"type": "final", "text": "agent done", "step": 1})
         return ("agent done", [])
 
     monkeypatch.setattr(runtime_mod.executor, "chat", _fake_chat)

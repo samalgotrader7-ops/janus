@@ -44,6 +44,7 @@ from textual.widgets import (
     TabPane,
 )
 
+from .. import app as janus_app  # JanusApp class shadows `app` import name
 from .. import config, executor, memory, permissions, skills, branding
 from ..tools import default_registry, make_protected, CapabilitySet
 
@@ -475,7 +476,8 @@ class JanusApp(App[None]):
                 approver = make_protected(base_approver, self._caps, self.mode)
                 preamble = memory.prepend_for_prompt()
                 t0 = time.time()
-                output, trace = executor.chat(
+                # v1.25.7 Phase 0e: route through the substrate.
+                output, trace = janus_app.run_turn(
                     messages=self._messages,
                     user_input=user_input,
                     tools=tools,

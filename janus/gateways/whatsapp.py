@@ -40,6 +40,7 @@ from typing import Any
 
 import requests
 
+from .. import app as janus_app
 from .. import config, executor, logger, memory, skills, permissions, cost
 from ..tools import default_registry, make_protected, CapabilitySet
 from . import _common as gw
@@ -223,7 +224,9 @@ def _handle_inbound(msg: dict) -> str | None:
         "mode": mode,
     }
     try:
-        output, trace = executor.chat(
+        # v1.25.7 Phase 0e: route through the surface-agnostic event
+        # stream (janus/app.py from v1.25.0).
+        output, trace = janus_app.run_turn(
             messages=messages,
             user_input=text,
             tools=tools,
