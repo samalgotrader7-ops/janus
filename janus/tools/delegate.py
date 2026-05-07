@@ -172,7 +172,7 @@ class Delegate(Tool):
 
         # Delayed imports to avoid circular: tools/__init__ imports us;
         # we need executor + tools/__init__ resolution at call time only.
-        from .. import executor, logger
+        from .. import app, executor, logger  # noqa: F401  (executor kept for back-compat refs)
         from . import default_registry, make_protected, CapabilitySet
         from ..permissions import (
             decide as _decide, ALLOW as _ALLOW,
@@ -194,7 +194,11 @@ class Delegate(Tool):
         config.MAX_STEPS = max_steps
         _THREAD_LOCAL.delegate_depth = _depth() + 1
         try:
-            output, _trace = executor.chat(
+            # v1.25.0 Phase 0: route through the surface-agnostic event
+            # stream. delegate is a sub-task spawner — leaving it on raw
+            # executor.chat would reintroduce the exact drift Phase 0
+            # exists to prevent (parent on app, child on executor).
+            output, _trace = app.run_turn(
                 messages=[],
                 user_input=task,
                 tools=sub_tools,

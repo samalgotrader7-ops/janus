@@ -149,6 +149,12 @@ def test_delegate_invokes_executor_chat_with_restricted_tools(tmp_path, monkeypa
 
     def _fake_chat(**kw):
         captured.update(kw)
+        # v1.25.0: app.run_turn extracts output from the `final` event
+        # (events are the source of truth, not the executor return).
+        # Stubs must emit a final event for the value to flow through.
+        on_step = kw.get("on_step")
+        if on_step:
+            on_step({"type": "final", "text": "subagent done", "step": 1})
         return ("subagent done", [])
 
     monkeypatch.setattr("janus.executor.chat", _fake_chat)
@@ -221,10 +227,15 @@ def test_delegate_rejects_empty_task(tmp_path, monkeypatch):
 
 def test_delegate_truncates_huge_subagent_output(tmp_path, monkeypatch):
     _isolate_home(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        "janus.executor.chat",
-        lambda **kw: ("X" * 12000, []),
-    )
+
+    def _huge_chat(**kw):
+        # v1.25.0: emit a final event so app.run_turn can read the text.
+        on_step = kw.get("on_step")
+        if on_step:
+            on_step({"type": "final", "text": "X" * 12000, "step": 1})
+        return ("X" * 12000, [])
+
+    monkeypatch.setattr("janus.executor.chat", _huge_chat)
     out = Delegate().run({"task": "x"}, _approve)
     assert "more chars" in out
     assert len(out) < 12000

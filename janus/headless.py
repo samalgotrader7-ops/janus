@@ -40,7 +40,7 @@ import time
 from typing import Any
 
 from . import (
-    config, executor, logger, memory,
+    app, config, executor, logger, memory,
     permissions,
     skills as skills_mod,
     cache, conversation, cost,
@@ -146,7 +146,8 @@ def run(
 
     try:
         t0 = time.time()
-        output, trace = executor.chat(
+        # v1.25.0 Phase 0: route through the surface-agnostic event stream.
+        output, trace = app.run_turn(
             messages=messages,
             user_input=prompt,
             tools=tools,
