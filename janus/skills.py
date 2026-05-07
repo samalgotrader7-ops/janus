@@ -34,6 +34,15 @@ from .tools.capabilities import CapabilitySet
 
 VALID_STATES = ("quarantined", "trusted-supervised", "trusted-auto")
 
+# v1.30.1 — project_types filter. Mirrors project_detect's classification
+# values plus "any" as an explicit alias for the back-compat "no field"
+# behavior. Unknown values in skill frontmatter aren't fatal (skills
+# still load) — they just never match a real project type, which makes
+# the misconfiguration easy to notice.
+KNOWN_PROJECT_TYPES = frozenset(
+    {"python", "node", "rust", "go", "mixed", "unknown", "any"}
+)
+
 
 @dataclass
 class Skill:
@@ -49,9 +58,39 @@ class Skill:
     runs: int = 0
     success: int = 0
     fail: int = 0
+    # v1.30.1 — project_types filter. Empty list = "applies to any
+    # project type" (back-compat with all skills predating v1.30.1).
+    # Non-empty list = only auto-match in those specific project
+    # types. The list can include the special value "any" which
+    # behaves like an empty list.
+    project_types: list[str] = field(default_factory=list)
 
     def grants(self, tool: str, verb: str, target: str) -> bool:
         return self.capabilities.grants(tool, verb, target)
+
+    def matches_project_type(self, current: str | None) -> bool:
+        """v1.30.1: project_types filter check.
+
+        Returns True if this skill is allowed to match in the given
+        project type. Rules:
+          * No ``project_types`` field (or empty list) → match any.
+          * Field present and contains "any" → match any.
+          * Field present, ``current`` is empty/None → no match
+            (the skill explicitly declared types; we have nothing to
+            compare against, so we conservatively exclude).
+          * Field present + ``current`` is in the list → match.
+          * Otherwise → no match.
+
+        This is exact string matching. Skills wanting both the pure
+        type and "mixed" must declare both: ``[python, mixed]``.
+        """
+        if not self.project_types:
+            return True
+        if "any" in self.project_types:
+            return True
+        if not current:
+            return False
+        return current in self.project_types
 
     def evolve_capabilities_enabled(self) -> bool:
         """True if the skill opts in to capability-evolving propose-revisions.
@@ -266,6 +305,18 @@ def load_path(p: Path) -> Skill:
     if state not in VALID_STATES:
         state = "quarantined"
     caps = CapabilitySet.from_dict(fm.get("capabilities") or {})
+    # v1.30.1 — accept project_types as a list or comma-separated
+    # string. Hand-rolled YAML subset emits lists for `- item` blocks;
+    # tolerate scalars in case a user writes `project_types: python`.
+    raw_pt = fm.get("project_types") or fm.get("project-types") or []
+    if isinstance(raw_pt, str):
+        project_types = [
+            t.strip().lower() for t in raw_pt.split(",") if t.strip()
+        ]
+    elif isinstance(raw_pt, list):
+        project_types = [str(t).strip().lower() for t in raw_pt if str(t).strip()]
+    else:
+        project_types = []
     return Skill(
         name=str(fm.get("name") or p.stem),
         description=str(fm.get("description", "")),
@@ -279,6 +330,7 @@ def load_path(p: Path) -> Skill:
         runs=int(fm.get("runs") or 0),
         success=int(fm.get("success") or 0),
         fail=int(fm.get("fail") or 0),
+        project_types=project_types,
     )
 
 
@@ -300,6 +352,14 @@ def save(skill: Skill) -> None:
     fm["runs"] = skill.runs
     fm["success"] = skill.success
     fm["fail"] = skill.fail
+    # v1.30.1 — persist project_types only when set (an empty list
+    # is the back-compat default; writing it explicitly would clutter
+    # every existing skill on the next save).
+    if skill.project_types:
+        fm["project_types"] = list(skill.project_types)
+    else:
+        fm.pop("project_types", None)
+        fm.pop("project-types", None)
 
     text = "---\n" + render_frontmatter(fm) + "\n---\n\n" + skill.body.strip() + "\n"
     _atomic_write(skill.path, text)
@@ -377,14 +437,36 @@ def promote(name: str, new_state: str) -> Skill:
 _WORD_RX = re.compile(r"[a-z0-9]+")
 
 
-def match(request: str, skills: list[Skill] | None = None) -> list[Skill]:
+def match(
+    request: str,
+    skills: list[Skill] | None = None,
+    *,
+    project_type: str | None = None,
+) -> list[Skill]:
     """Return skills whose description shares words with the request, ranked.
 
     Cheap lexical match — Jaccard over normalized word sets. We only need
     to surface "is there a skill that probably applies?". The interpreter
     + user make the final decision.
+
+    v1.30.1 — ``project_type`` filter. When a skill declares
+    ``project_types`` in its frontmatter, only match it if the current
+    project's detected type is in that list. Skills without the field
+    match any project (back-compat). When ``project_type`` is None,
+    auto-detect via ``project_detect.detect_project_type``; pass an
+    explicit value (including ``""``) to suppress detection — useful
+    in tests and in headless contexts where the workspace is irrelevant.
     """
     skills = skills if skills is not None else list_skills()
+    if not skills:
+        return []
+    if project_type is None:
+        try:
+            from . import project_detect as _pd
+            project_type = _pd.detect_project_type().type
+        except Exception:
+            project_type = ""
+    skills = [s for s in skills if s.matches_project_type(project_type)]
     if not skills:
         return []
     req_words = set(_WORD_RX.findall(request.lower()))
