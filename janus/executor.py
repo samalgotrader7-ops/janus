@@ -923,6 +923,12 @@ def chat(
 
     Returns `(final_text, trace)`. The trace is the per-turn tool-call
     audit (same shape as execute()'s trace) for logging.
+
+    NOTE (v1.25.0): for new code, prefer ``janus.app.run_turn`` (drop-in
+    replacement that returns the same tuple) or ``janus.app.chat_events``
+    (generator yielding events as they happen). The app layer is the
+    surface-agnostic event-stream substrate every Janus surface
+    eventually consumes; this function stays public for back-compat.
     """
     ws = workspace or str(config.WORKSPACE)
 

@@ -1486,10 +1486,23 @@ def main():
 
     No more interpretation picker. Same shape as cli_rich's main(), in
     plain ANSI for users without prompt_toolkit/rich.
+
+    DEPRECATED in v1.25.0. cli_rich.py gracefully degrades when
+    prompt_toolkit / rich are missing, so the basic surface no longer
+    serves a unique purpose. Scheduled for deletion in v1.27.0. Users
+    should run plain `janus` (cli_rich) instead.
     """
     config.assert_configured()
     config.ensure_home()
     banner()
+    # v1.25.0 deprecation notice. Single yellow line at startup; users
+    # who really want the basic surface can keep using it through v1.26.x
+    # before the deletion in v1.27.0.
+    print(
+        f"{C.DIM}[deprecated] `janus --basic` is deprecated; cli_rich "
+        f"falls back gracefully when prompt_toolkit/rich are missing. "
+        f"Scheduled for deletion in v1.27.0.{C.R}"
+    )
 
     try:
         ctx = hooks.fire(hooks.SESSION_START, {"workspace": str(config.WORKSPACE)})
