@@ -273,6 +273,183 @@ def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
+# ---------- Budget gauge (v1.28.2) ----------
+#
+# JANUS_BUDGET_USD sets a soft session/day budget. The chat loop
+# checks budget_status() after each turn; when crossing 50/80/100%
+# thresholds, ``budget_alert`` events fire and cli_rich prints a
+# warning. This is observation-only — Janus does NOT block tools when
+# the budget is hit. Hard caps belong at the provider level.
+
+# Default thresholds for budget warnings (fraction of budget).
+BUDGET_ALERT_THRESHOLDS = (0.5, 0.8, 1.0)
+
+# In-session memory of which thresholds we've already alerted on, so
+# we don't re-print "you crossed 50%" on every subsequent turn.
+_ALERTED_THRESHOLDS: set[float] = set()
+
+
+def reset_budget_alerts() -> None:
+    """Drop session-level memory of which thresholds we've alerted on.
+    Called by ``/clear`` along with ``reset_session``."""
+    _ALERTED_THRESHOLDS.clear()
+
+
+def _budget_usd() -> float:
+    """Read ``JANUS_BUDGET_USD`` at call time (so tests can override).
+
+    Returns 0.0 when unset / non-numeric → callers treat 0.0 as
+    "no budget set" and skip alerting.
+    """
+    raw = os.environ.get("JANUS_BUDGET_USD", "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def budget_status() -> dict:
+    """Return the current session's budget gauge.
+
+    Shape::
+        {"budget": float, "spent": float, "remaining": float,
+         "percent": float, "configured": bool}
+
+    ``percent`` is in [0.0, +∞); >1.0 means over budget. ``configured``
+    is False when ``JANUS_BUDGET_USD`` is unset (no gauge to show).
+    """
+    budget = _budget_usd()
+    spent = float(_SESSION.usd)
+    if budget <= 0:
+        return {
+            "budget": 0.0, "spent": spent, "remaining": 0.0,
+            "percent": 0.0, "configured": False,
+        }
+    remaining = max(0.0, budget - spent)
+    percent = spent / budget
+    return {
+        "budget": budget, "spent": spent, "remaining": remaining,
+        "percent": percent, "configured": True,
+    }
+
+
+def check_budget_alerts(
+    *, thresholds: tuple[float, ...] = BUDGET_ALERT_THRESHOLDS,
+) -> list[float]:
+    """Return any thresholds the session JUST crossed (i.e. crossed
+    AND not yet alerted on this session). Side-effect: marks them
+    alerted so the same threshold doesn't fire on every later turn.
+
+    Returns empty list when no budget is configured or no threshold
+    has just been crossed.
+    """
+    status = budget_status()
+    if not status["configured"]:
+        return []
+    pct = status["percent"]
+    just_crossed: list[float] = []
+    for t in thresholds:
+        if pct >= t and t not in _ALERTED_THRESHOLDS:
+            just_crossed.append(t)
+            _ALERTED_THRESHOLDS.add(t)
+    return just_crossed
+
+
+def render_budget_line() -> str:
+    """One-line gauge for ``/cost`` output. Empty string when no
+    budget is configured."""
+    status = budget_status()
+    if not status["configured"]:
+        return ""
+    pct = status["percent"]
+    over = "  [OVER BUDGET]" if pct >= 1.0 else ""
+    return (
+        f"  budget: ${status['spent']:.4f} / ${status['budget']:.2f} "
+        f"({pct * 100:.1f}%) — ${status['remaining']:.4f} remaining"
+        + over
+    )
+
+
+# ---------- Daily totals from the JSONL ledger (v1.28.2) ----------
+
+
+def daily_totals(*, since_days: int = 7) -> list[dict]:
+    """Per-day spend rollup from ~/.janus/cost.jsonl.
+
+    Returns a list of ``{"date": "YYYY-MM-DD", "calls": int,
+    "prompt_tokens": int, "completion_tokens": int, "usd": float}``,
+    newest day first, capped at ``since_days``.
+
+    Best-effort: missing ledger / malformed rows / unparseable
+    timestamps are skipped silently. Rows without a ``usd`` field
+    contribute 0.0.
+    """
+    p = _ledger_path()
+    if not p.exists():
+        return []
+    by_date: dict[str, dict] = {}
+    cutoff_dt = (
+        datetime.datetime.now(datetime.timezone.utc)
+        - datetime.timedelta(days=since_days)
+    )
+    try:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = row.get("ts") or ""
+                try:
+                    dt = datetime.datetime.fromisoformat(ts)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=datetime.timezone.utc)
+                except (TypeError, ValueError):
+                    continue
+                if dt < cutoff_dt:
+                    continue
+                date = dt.date().isoformat()
+                bucket = by_date.setdefault(date, {
+                    "date": date,
+                    "calls": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "usd": 0.0,
+                })
+                bucket["calls"] += 1
+                bucket["prompt_tokens"] += int(row.get("prompt_tokens") or 0)
+                bucket["completion_tokens"] += int(
+                    row.get("completion_tokens") or 0
+                )
+                bucket["usd"] += float(row.get("usd") or 0.0)
+    except OSError:
+        return []
+    rolled = sorted(by_date.values(), key=lambda b: b["date"], reverse=True)
+    return rolled[:since_days]
+
+
+def render_daily(since_days: int = 7) -> str:
+    """ASCII daily-spend table for ``/cost --daily``."""
+    rows = daily_totals(since_days=since_days)
+    if not rows:
+        return "  (no daily spend data — cost.jsonl empty or missing)"
+    lines = [f"  daily (last {since_days} days):"]
+    for r in rows:
+        lines.append(
+            f"    {r['date']}  "
+            f"{r['calls']:>4} calls · "
+            f"{r['prompt_tokens']:>9,} in · "
+            f"{r['completion_tokens']:>9,} out · "
+            f"${r['usd']:.4f}"
+        )
+    return "\n".join(lines)
+
+
 def record_per_chat(
     *,
     gateway: str,

@@ -128,6 +128,11 @@ EVENT_TYPES: frozenset[str] = frozenset({
     # runs the targeted pytest and emits this event. Renderers can
     # show a green check / red x next to the tool result.
     "verification_result",
+
+    # v1.28.2 — budget gauge. Fires after each turn when session
+    # spend just crossed a 50/80/100% threshold of JANUS_BUDGET_USD.
+    # Renderers can show a banner / pause / send a notification.
+    "budget_alert",
 })
 
 

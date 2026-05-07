@@ -1294,8 +1294,30 @@ def _dispatch(console, line: str, state: dict) -> bool:
     if cmd == "/mcp":
         return _cmd_mcp_rich(console, arg)
     if cmd == "/cost":
+        # v1.28.2: extended /cost output —
+        #   /cost            session summary + budget gauge if configured
+        #   /cost --daily    daily spend rollup from cost.jsonl
+        #   /cost --daily 14 last N days (default 7)
+        argl = arg.strip()
+        if argl.startswith("--daily"):
+            rest = argl[len("--daily"):].strip()
+            try:
+                days = int(rest) if rest else 7
+            except ValueError:
+                days = 7
+            for line in cost.render_daily(since_days=days).splitlines():
+                console.print(line)
+            return True
         for line in cost.render_summary().splitlines():
             console.print(line)
+        gauge = cost.render_budget_line()
+        if gauge:
+            console.print(gauge)
+        else:
+            console.print(
+                "  [dim](set JANUS_BUDGET_USD=<n> to enable a "
+                "budget gauge)[/]"
+            )
         return True
     if cmd == "/verbose":
         v = arg.strip().lower()
@@ -1402,6 +1424,7 @@ def _dispatch(console, line: str, state: dict) -> bool:
             except Exception:
                 pass
         cost.reset_session()
+        cost.reset_budget_alerts()  # v1.28.2: re-arm 50/80/100% alerts
         console.print("  [green]cleared conversation turns + cost counters[/]")
         return True
     if cmd in ("/compact", "/compress"):
@@ -2606,6 +2629,28 @@ def main() -> None:
                         f"[dim]/skills decline {top.id}[/] to silence."
                     )
                     _sp.mark_offered(top.id)
+        except Exception:
+            pass
+
+        # v1.28.2: budget alert. When session spend just crossed a
+        # 50/80/100% threshold of JANUS_BUDGET_USD, print a one-line
+        # warning. Each threshold fires AT MOST ONCE per session
+        # (via cost._ALERTED_THRESHOLDS). Re-armed by /clear or
+        # cost.reset_budget_alerts(). Best-effort wrap.
+        try:
+            crossed = cost.check_budget_alerts()
+            if crossed:
+                status = cost.budget_status()
+                # Take the highest threshold crossed for the line
+                top_t = max(crossed)
+                colour = "red" if top_t >= 1.0 else "yellow"
+                pct = status["percent"] * 100
+                console.print(
+                    f"\n[{colour}]{branding.glyph('⚠', '!')} "
+                    f"budget alert:[/] crossed {int(top_t * 100)}% "
+                    f"({pct:.1f}% of ${status['budget']:.2f} — "
+                    f"${status['spent']:.4f} spent)"
+                )
         except Exception:
             pass
 
