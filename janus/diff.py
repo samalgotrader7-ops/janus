@@ -84,6 +84,51 @@ def render(
     return "\n".join(colored)
 
 
+def render_rich(
+    old: str,
+    new: str,
+    *,
+    path: str = "",
+    context: int = 3,
+    max_lines: int = 200,
+):
+    """v1.25.4: return a Rich Syntax object for the unified diff so
+    approval prompts in cli_rich render with proper line numbers and
+    diff syntax highlighting (red for removed, green for added).
+
+    Returns None when:
+      * Rich isn't importable (basic CLI / headless environments)
+      * old == new (no diff to render)
+
+    Callers should fall back to ``render()`` (the ANSI version) when
+    None is returned.
+
+    The plain ANSI version is still used by:
+      - cli.py basic surface
+      - logs that strip color via JANUS_NO_COLOR
+      - any non-Rich consumer
+    """
+    try:
+        from rich.syntax import Syntax
+    except ImportError:
+        return None
+    if old == new:
+        return None
+    plain = render(
+        old, new,
+        path=path, context=context, color=False, max_lines=max_lines,
+    )
+    if not plain:
+        return None
+    return Syntax(
+        plain, "diff",
+        theme="ansi_dark",
+        line_numbers=True,
+        word_wrap=False,
+        background_color="default",  # don't paint a fill — terminal bg
+    )
+
+
 def stat(old: str, new: str) -> str:
     """One-line `+N -M` summary of the change."""
     if old == new:

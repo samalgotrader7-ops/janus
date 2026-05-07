@@ -94,10 +94,15 @@ class FsEdit(base.Tool):
             f"edit {p}  ({diff_mod.stat(text, new_text_preview)}, "
             f"{count} occurrence{'s' if count != 1 else ''})\n\n{diff_block}"
         )
+        # v1.25.4: pass structured diff so cli_rich approver can render
+        # with Rich Syntax. Other surfaces ignore this kwarg.
         if not approver(
             "fs_edit",
             details,
             capability=("fs", "write", args["path"]),
+            diff_data={
+                "old": text, "new": new_text_preview, "path": args["path"],
+            },
         ):
             return f"refused by user: edit {args['path']}"
 

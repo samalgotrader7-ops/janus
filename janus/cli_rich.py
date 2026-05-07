@@ -664,8 +664,33 @@ def _make_mode_approver(console, mode_state: permissions.ModeState):
         )
         if high_risk:
             title_suffix += f" [yellow](high-risk: {hr_reason})[/]"
+        # v1.25.4: when fs_write/fs_edit pass diff_data, render the
+        # diff body with Rich Syntax (line numbers + diff highlighting)
+        # instead of the ANSI-colored text dump. Falls back to the
+        # plain Panel if Syntax rendering returns None.
+        diff_data = kw.get("diff_data")
+        body = details
+        if diff_data and isinstance(diff_data, dict):
+            try:
+                from . import diff as _diff
+                syntax = _diff.render_rich(
+                    diff_data.get("old", ""),
+                    diff_data.get("new", ""),
+                    path=str(diff_data.get("path", "")),
+                )
+                if syntax is not None:
+                    # Keep the header line (action + size summary) above
+                    # the colored diff. Header is the first paragraph
+                    # of `details` (everything before the blank line).
+                    header = details.split("\n\n", 1)[0]
+                    from rich.console import Group as _Group
+                    from rich.text import Text as _Text
+                    body = _Group(_Text.from_markup(header), syntax)
+            except Exception:
+                # Fallback to ANSI details on any rendering hiccup.
+                body = details
         console.print(Panel(
-            details,
+            body,
             title=f"[yellow]⚠ approval needed[/]: {action_label}{title_suffix}",
             border_style="red" if high_risk else "yellow",
         ))

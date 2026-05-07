@@ -168,10 +168,20 @@ class FsWrite(base.Tool):
                 f"--- proposed contents ---\n{preview}"
                 + ("\n... [truncated]" if size > 600 else "")
             )
+        # v1.25.4: pass structured diff data so cli_rich's approver can
+        # render with Rich Syntax (line numbers + diff highlighting)
+        # instead of the ANSI text dump. Surfaces that ignore the
+        # kwarg (basic CLI, web, telegram) keep getting the rendered
+        # details string — backward compatible.
+        diff_data = (
+            {"old": old, "new": args["content"], "path": args["path"]}
+            if action == "overwrite" else None
+        )
         if not approver(
             f"fs_write: {action}",
             details,
             capability=("fs", "write", args["path"]),
+            diff_data=diff_data,
         ):
             return f"refused by user: write to {args['path']}"
         p.parent.mkdir(parents=True, exist_ok=True)
