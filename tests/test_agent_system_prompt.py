@@ -58,9 +58,12 @@ def test_system_prompt_forbids_let_me_preamble():
     s = executor.JANUS_CHAT_SYSTEM
     assert "Let me" in s  # must be MENTIONED to forbid
     assert "I'll" in s
-    # Should be in a forbidding context (look for "do NOT" near them)
-    rules_section = s[s.find("RULES"):s.find("WHEN CHAT")]
-    assert "preface" in rules_section.lower() or "do not" in rules_section.lower()
+    # Should be in a forbidding context. v1.26.0: the rule lives in
+    # section 1 (Tone) of the rewritten prompt, so slice that section
+    # rather than the legacy "RULES"/"WHEN CHAT" markers.
+    sec1 = s[s.find("# 1. Tone"):s.find("# 2. Tool selection")]
+    assert "preface" in sec1.lower() or "do not" in sec1.lower() \
+        or "don't preface" in sec1.lower()
 
 
 # ---------- Gateway / file directives ----------

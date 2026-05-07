@@ -32,14 +32,21 @@ def test_rule_4_hints_at_session_recent_for_chat_id():
 
 
 def test_rule_4_still_forbids_pasting_content():
-    """The original 'do not paste content' directive must survive the split."""
+    """The original 'do not paste content' directive must survive the split.
+    v1.26.0: the gateway-send guidance lives as a bullet in section 2
+    (Tool selection) — slice on the bullet header instead of legacy
+    rule numbering."""
     s = executor.JANUS_CHAT_SYSTEM
-    # Look in the rule 4 body
-    rule4_start = s.find("4. **When the user asks to send a file")
-    rule5_start = s.find("5. **")
-    assert rule4_start >= 0 and rule5_start > rule4_start
-    rule4_body = s[rule4_start:rule5_start]
-    assert "do NOT paste" in rule4_body or "do not paste" in rule4_body.lower()
+    rule_start = s.find("File sends via gateway")
+    assert rule_start >= 0, "expected the gateway-send bullet"
+    # Slice forward to where the next section starts, or 1500 chars
+    # whichever comes first — long enough to span the bullet body.
+    end = s.find("# 3. Memory", rule_start)
+    if end == -1:
+        end = rule_start + 1500
+    body = s[rule_start:end]
+    # Both pasting-forbidden phrasings remain valid.
+    assert "do NOT paste" in body or "do not paste" in body.lower()
 
 
 # ---------- Rule 8: tool fail → adapt fast ----------
@@ -90,12 +97,19 @@ def test_rule_9_says_trim_non_answers():
 # ---------- Rule count check ----------
 
 
-def test_prompt_has_at_least_9_numbered_rules():
-    """Pin the new total — adding new rules later should bump this; rules
-    should never silently shrink."""
+def test_prompt_has_six_grouped_sections():
+    """v1.26.0 replaced numbered rules (1-23) with 6 grouped sections.
+    Pin the section count so future edits don't silently collapse them."""
     s = executor.JANUS_CHAT_SYSTEM
-    # Look for "9. **" — rule 9 marker
-    assert "9. **" in s
+    for header in (
+        "# 1. Tone",
+        "# 2. Tool selection",
+        "# 3. Memory",
+        "# 4. Verification",
+        "# 5. Mode",
+        "# 6. Errors",
+    ):
+        assert header in s, f"missing section header: {header!r}"
 
 
 # ---------- Earlier directives preserved ----------

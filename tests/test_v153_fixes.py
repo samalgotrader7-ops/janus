@@ -91,74 +91,95 @@ def test_rule_1_anti_pattern_uses_concrete_example():
 
 
 def test_rule_1_says_full_content_in_same_turn():
-    """Don't say 'I'll write it' then end turn without fs_write."""
+    """Don't say 'I'll write it' then end turn without fs_write.
+    v1.26.0: the rule lives as a bullet in section 2 (Tool selection)."""
     s = executor.JANUS_CHAT_SYSTEM
-    rule1_idx = s.find("1. **When the user asks you to write")
-    rule2_idx = s.find("2. **")
-    rule1_body = s[rule1_idx:rule2_idx]
-    assert "SAME TURN" in rule1_body or "same turn" in rule1_body.lower()
+    rule_idx = s.find("File-creation requests")
+    assert rule_idx >= 0, "expected the file-creation bullet in section 2"
+    # Span the bullet body up to the next bullet or the next section.
+    end = s.find("Comparison / report / analysis", rule_idx)
+    if end == -1:
+        end = rule_idx + 1500
+    body = s[rule_idx:end]
+    assert "SAME TURN" in body or "same turn" in body.lower()
 
 
-# ---------- Rule 2b: comprehensive/detailed = full document ----------
+# ---------- Comprehensive/detailed = full document ----------
+# (Was rule 2b in pre-v1.26 numbering. v1.26.0 folds this into the
+#  Tone section's last bullet so the contrast with "tight chat
+#  replies" stays visible. Tests below pin the bullet's content
+#  rather than its old "2b" marker.)
 
 
-def test_rule_2b_exists():
-    s = executor.JANUS_CHAT_SYSTEM
-    assert "2b" in s
-
-
-def test_rule_2b_lists_keywords():
+def test_full_document_rule_lists_keywords():
     s = executor.JANUS_CHAT_SYSTEM
     keywords = ("comprehensive", "detailed", "full", "in-depth", "thorough")
     matches = sum(1 for k in keywords if k in s.lower())
     assert matches >= 3
 
 
-def test_rule_2b_says_full_document_not_stub():
+def test_full_document_rule_says_full_document_not_stub():
     s = executor.JANUS_CHAT_SYSTEM
     assert "FULL document" in s or "full document" in s.lower()
     # Anti-pattern wording
     assert "stub" in s.lower() or "5 lines" in s.lower()
 
 
-def test_rule_2b_clarifies_brevity_rules_dont_apply_to_files():
+def test_full_document_rule_clarifies_brevity_dont_apply_to_files():
+    """Brevity is about CHAT REPLY, not file content. v1.26.0 anchors
+    on the bullet that lists the keywords."""
     s = executor.JANUS_CHAT_SYSTEM
-    # Must explicitly say brevity is about CHAT REPLY, not file content
-    rule2b_idx = s.find("2b")
-    assert rule2b_idx >= 0
-    body = s[rule2b_idx:rule2b_idx + 800]
+    idx = s.find("Comprehensive")
+    assert idx >= 0, "expected the comprehensive/detailed bullet"
+    body = s[idx:idx + 800]
     assert "CHAT REPLY" in body or "chat reply" in body.lower()
-    assert "NOT" in body
+    assert "NOT" in body or "not to" in body.lower()
     assert "file content" in body.lower() or "files" in body.lower()
 
 
-def test_rule_2b_gives_size_target():
+def test_full_document_rule_gives_size_target():
     """Concrete number so the model has a target, not a vague 'long'."""
     s = executor.JANUS_CHAT_SYSTEM
-    rule2b_idx = s.find("2b")
-    body = s[rule2b_idx:rule2b_idx + 800]
+    idx = s.find("Comprehensive")
+    body = s[idx:idx + 800]
     # Should mention a KB target (e.g., "5 KB", "5-20 KB")
     assert "KB" in body
 
 
-# ---------- Rule 6 / Rule 9 scope clarification ----------
+# ---------- Brevity scope clarifications (was rules 6 / 9) ----------
+# Both the "tight chat reply" rule and the "answer directly" rule live
+# in section 1 (Tone) of the v1.26.0 prompt. The pin is that BOTH must
+# scope themselves to CHAT REPLIES so the model doesn't apply brevity
+# to file content it writes.
 
 
-def test_rule_6_scoped_to_chat_reply():
+def test_tight_chat_reply_rule_scoped_to_chat_reply():
     s = executor.JANUS_CHAT_SYSTEM
-    rule6_idx = s.find("6. **")
-    rule7_idx = s.find("7. **")
-    rule6_body = s[rule6_idx:rule7_idx]
-    assert "CHAT REPLY" in rule6_body or "chat reply" in rule6_body.lower()
-    assert "not file" in rule6_body.lower() or "not about" in rule6_body.lower() or "not content" in rule6_body.lower()
+    idx = s.find("Chat replies are tight")
+    assert idx >= 0, "expected the tight-chat-reply bullet"
+    body = s[idx:idx + 700]
+    assert "CHAT REPLY" in body or "chat reply" in body.lower()
+    # Scope clarification must be present
+    assert (
+        "not file" in body.lower()
+        or "not about" in body.lower()
+        or "not content" in body.lower()
+        or "NOT TO FILE" in body
+        or "not to file" in body.lower()
+    )
 
 
-def test_rule_9_scoped_to_chat_reply():
+def test_answer_directly_rule_scoped_to_chat_reply():
     s = executor.JANUS_CHAT_SYSTEM
-    rule9_idx = s.find("9. **")
-    # Find rule end (next rule or end of section)
-    rule_end = s.find("# WHEN CHAT IS APPROPRIATE", rule9_idx)
-    if rule_end == -1:
-        rule_end = rule9_idx + 1000
-    rule9_body = s[rule9_idx:rule_end]
-    assert "CHAT REPLY" in rule9_body or "chat replies" in rule9_body.lower() or "chat reply" in rule9_body.lower()
+    idx = s.find("Answer questions DIRECTLY")
+    assert idx >= 0, "expected the answer-directly bullet"
+    # Span the bullet body up to the next bullet header (file:line refs).
+    end = s.find("File:line references", idx)
+    if end == -1:
+        end = idx + 1000
+    body = s[idx:end]
+    assert (
+        "CHAT REPLY" in body
+        or "chat replies" in body.lower()
+        or "chat reply" in body.lower()
+    )

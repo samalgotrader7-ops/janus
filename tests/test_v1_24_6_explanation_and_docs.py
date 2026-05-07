@@ -75,14 +75,31 @@ def test_rule_23_quotes_sams_swarm_explainer_refusal():
     assert "SWARM_EXPLAINER" in JANUS_CHAT_SYSTEM
 
 
-def test_rules_22_and_23_appear_after_rule_21():
-    """Sanity: numbering order is preserved. The interview rules
-    end at 21; explanation + docs rules continue from there."""
+def test_explanation_and_docs_anchors_present_in_correct_sections():
+    """v1.26.0 dropped numbered rules (1-23) in favor of 6 grouped
+    sections. The explanation-questions rule lives in section 3
+    (Memory) — both anti-patterns are about content already in your
+    context. The protected-dirs rule lives in section 5 (Mode)
+    alongside permission-mode behavior. Pin the section placement so
+    future edits don't accidentally relocate them."""
     from janus.executor import JANUS_CHAT_SYSTEM
-    pos21 = JANUS_CHAT_SYSTEM.find("21.")
-    pos22 = JANUS_CHAT_SYSTEM.find("22.")
-    pos23 = JANUS_CHAT_SYSTEM.find("23.")
-    assert -1 < pos21 < pos22 < pos23
+    s = JANUS_CHAT_SYSTEM
+    # Section anchors
+    sec3 = s.find("# 3. Memory")
+    sec4 = s.find("# 4. Verification")
+    sec5 = s.find("# 5. Mode")
+    sec6 = s.find("# 6. Errors")
+    assert -1 < sec3 < sec4 < sec5 < sec6, "section ordering broken"
+    # EXPLANATION QUESTIONS lives between section 3 and section 4
+    expl_pos = s.find("EXPLANATION QUESTIONS")
+    assert sec3 < expl_pos < sec4, (
+        "EXPLANATION QUESTIONS rule must live in section 3 (Memory)"
+    )
+    # docs/ owned-by-user rule lives between section 5 and section 6
+    docs_pos = s.find("owned by the user")
+    assert sec5 < docs_pos < sec6, (
+        "Protected-dirs rule must live in section 5 (Mode)"
+    )
 
 
 # ---------- tool_guardrails: docs/ write warning ----------
