@@ -2587,6 +2587,28 @@ def main() -> None:
         except Exception:
             pass
 
+        # v1.28.1: skill-proposal auto-offer. After the turn completes,
+        # check if any strong recurring patterns are surfacing in the
+        # session + recent log. Show the TOP one only (capped at one
+        # offer per turn so we're not spammy). mark_offered triggers
+        # the 7-day cooldown — re-running the same routine tomorrow
+        # won't re-trigger the offer.
+        try:
+            from . import skill_proposer as _sp
+            patterns = _sp.list_offerable(current_trace=trace)
+            if patterns:
+                top = patterns[0]
+                if top.occurrences >= _sp.AUTO_OFFER_MIN_OCCURRENCES:
+                    console.print(
+                        f"\n[cyan]{branding.glyph('🪄', '+')}[/] "
+                        f"{top.description}. "
+                        f"[dim]/skills propose {top.id}[/] to draft, "
+                        f"[dim]/skills decline {top.id}[/] to silence."
+                    )
+                    _sp.mark_offered(top.id)
+        except Exception:
+            pass
+
         # v1.15.0 — detect ExitPlanMode approval. The trace records
         # tool calls as type='tool_call' with a 'result_preview' field
         # holding the tool's stringified return value. PLAN_APPROVED is

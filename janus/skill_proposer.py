@@ -91,6 +91,14 @@ DEFAULT_HISTORY_DEPTH = 30
 # Cooldown after a user declines or sees a pattern offer.
 COOLDOWN_DAYS = _env_int("JANUS_SKILL_OFFER_COOLDOWN_DAYS", 7)
 
+# v1.28.1 — auto-offer threshold. cli_rich's after-turn offer fires
+# only when the top pattern hit ≥ this many occurrences. Higher than
+# detection thresholds because drafting costs an LLM call — we want a
+# strong signal before nudging.
+AUTO_OFFER_MIN_OCCURRENCES = _env_int(
+    "JANUS_SKILL_AUTO_OFFER_MIN_OCCURRENCES", 4,
+)
+
 
 # ---------- Pattern dataclass ----------
 
@@ -571,4 +579,5 @@ __all__ = [
     "FILE_MIN_OCCURRENCES",
     "SHAPE_MIN_OCCURRENCES",
     "COOLDOWN_DAYS",
+    "AUTO_OFFER_MIN_OCCURRENCES",
 ]
