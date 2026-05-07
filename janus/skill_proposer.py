@@ -248,7 +248,17 @@ def _shape_pattern_id(classes: tuple[str, ...]) -> str:
 
 
 def _detect_repeated_sequences(calls: list[dict]) -> list[Pattern]:
-    """Find length-N tool-name subsequences that repeat ≥SEQ_MIN_OCCURRENCES."""
+    """Find length-N tool-name subsequences that repeat ≥SEQ_MIN_OCCURRENCES.
+
+    v1.31.3 — homogeneous sequences (all-same-tool, e.g.
+    ``[shell, shell, shell, shell]``) are filtered out. They aren't
+    "patterns" in any learnable sense; they're just "the user used
+    the same tool N times in a row", which doesn't generalize to a
+    skill body. Field-validation report from Sam: a single shell-
+    heavy session triggered a "shell → shell → shell → shell × 77"
+    auto-offer that nobody would want as a skill. Mirrors the same
+    filter already in ``_detect_repeated_shapes``.
+    """
     out: list[Pattern] = []
     if len(calls) < SEQ_MIN_LEN * SEQ_MIN_OCCURRENCES:
         return out
@@ -262,6 +272,9 @@ def _detect_repeated_sequences(calls: list[dict]) -> list[Pattern]:
         counts: dict[tuple[str, ...], int] = {}
         for i in range(len(tool_names) - length + 1):
             seq = tuple(tool_names[i:i + length])
+            # v1.31.3: skip degenerate same-tool sequences.
+            if len(set(seq)) < 2:
+                continue
             counts[seq] = counts.get(seq, 0) + 1
         for seq, count in counts.items():
             if count < SEQ_MIN_OCCURRENCES:
