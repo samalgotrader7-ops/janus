@@ -1104,19 +1104,169 @@
     },
   });
 
-  // ---------- v1.22.3: cost panel ----------
+  // ---------- v1.22.3 + v1.31.1: cost panel ----------
+
+  // v1.31.1: render the budget gauge from /api/cost-detail's budget
+  // block. Hides the gauge entirely when JANUS_BUDGET_USD isn't set
+  // (configured=false) — no point showing an empty 0/0 bar.
+  function renderCostBudget(budget) {
+    const block = document.getElementById('cost-budget-block');
+    const fill = document.getElementById('cost-gauge-fill');
+    const label = document.getElementById('cost-budget-label');
+    const state = document.getElementById('cost-budget-state');
+    if (!block || !fill) return;
+    if (!budget || !budget.configured) {
+      block.style.display = 'none';
+      return;
+    }
+    block.style.display = 'block';
+    const pct = Math.max(0, budget.percent || 0);
+    fill.style.width = Math.min(pct, 1.5) * 100 + '%';
+    fill.classList.toggle('over', pct >= 1.0);
+    if (label) {
+      label.textContent =
+        '$' + (budget.spent || 0).toFixed(4) +
+        ' / $' + (budget.budget || 0).toFixed(2) +
+        ' (' + (pct * 100).toFixed(1) + '%)';
+    }
+    if (state) {
+      let tag = 'ok';
+      let text = 'within budget';
+      if (pct >= 1.0) { tag = 'over'; text = 'OVER'; }
+      else if (pct >= 0.8) { tag = 'warn'; text = '≥80%'; }
+      else if (pct >= 0.5) { tag = 'warn'; text = '≥50%'; }
+      state.className = 'tag gauge-' + tag;
+      state.textContent = text;
+    }
+  }
+
+  // v1.31.1: render daily-rollup as inline SVG bar chart. Pure
+  // hand-rolled — no charting lib pulled in. Y-axis: USD; X-axis:
+  // each day with date label every other bar (avoid overlap on
+  // 14/30/90-day windows).
+  function renderCostChart(daily) {
+    const svg = document.getElementById('cost-chart');
+    const empty = document.getElementById('cost-chart-empty');
+    const totals = document.getElementById('cost-chart-totals');
+    const block = document.getElementById('cost-chart-block');
+    if (!svg) return;
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    if (!Array.isArray(daily) || daily.length === 0) {
+      if (empty) empty.style.display = 'block';
+      if (totals) totals.textContent = '';
+      svg.style.display = 'none';
+      return;
+    }
+    if (empty) empty.style.display = 'none';
+    svg.style.display = 'block';
+
+    // daily is newest-first per cost.daily_totals; flip for chart order.
+    const series = daily.slice().reverse();
+    const sumUsd = series.reduce((a, b) => a + (b.usd || 0), 0);
+    const sumCalls = series.reduce((a, b) => a + (b.calls || 0), 0);
+    const maxUsd = Math.max(...series.map((d) => d.usd || 0), 0.0001);
+
+    if (totals) {
+      totals.textContent =
+        series.length + ' day(s) · ' +
+        sumCalls + ' call(s) · $' + sumUsd.toFixed(4);
+    }
+
+    // viewBox 600x160; reserve 24px bottom for date labels and 30px
+    // left for usd axis labels.
+    const W = 600, H = 160, pad_l = 30, pad_b = 24, pad_t = 8, pad_r = 8;
+    const plot_w = W - pad_l - pad_r;
+    const plot_h = H - pad_b - pad_t;
+    const n = series.length;
+    const bar_gap = 2;
+    const bar_w = Math.max(1, plot_w / n - bar_gap);
+
+    const ns = 'http://www.w3.org/2000/svg';
+
+    // Axis line (bottom)
+    const axis = document.createElementNS(ns, 'line');
+    axis.setAttribute('x1', pad_l);
+    axis.setAttribute('y1', pad_t + plot_h);
+    axis.setAttribute('x2', W - pad_r);
+    axis.setAttribute('y2', pad_t + plot_h);
+    axis.setAttribute('class', 'cost-axis-line');
+    svg.appendChild(axis);
+
+    // Y-axis: max + half labels.
+    const yMaxLabel = document.createElementNS(ns, 'text');
+    yMaxLabel.setAttribute('x', pad_l - 4);
+    yMaxLabel.setAttribute('y', pad_t + 4);
+    yMaxLabel.setAttribute('class', 'cost-axis-label');
+    yMaxLabel.setAttribute('text-anchor', 'end');
+    yMaxLabel.textContent = '$' + maxUsd.toFixed(maxUsd < 0.01 ? 4 : 2);
+    svg.appendChild(yMaxLabel);
+
+    const yMidLabel = document.createElementNS(ns, 'text');
+    yMidLabel.setAttribute('x', pad_l - 4);
+    yMidLabel.setAttribute('y', pad_t + plot_h / 2 + 4);
+    yMidLabel.setAttribute('class', 'cost-axis-label');
+    yMidLabel.setAttribute('text-anchor', 'end');
+    yMidLabel.textContent = '$' + (maxUsd / 2).toFixed(maxUsd < 0.01 ? 4 : 2);
+    svg.appendChild(yMidLabel);
+
+    // Bars + date labels.
+    series.forEach((d, i) => {
+      const x = pad_l + i * (plot_w / n) + bar_gap / 2;
+      const usd = d.usd || 0;
+      const h = (usd / maxUsd) * plot_h;
+      const y = pad_t + plot_h - h;
+      const rect = document.createElementNS(ns, 'rect');
+      rect.setAttribute('x', x);
+      rect.setAttribute('y', y);
+      rect.setAttribute('width', bar_w);
+      rect.setAttribute('height', Math.max(0, h));
+      rect.setAttribute('class', 'cost-bar');
+      // Title hover for accessible tooltips
+      const title = document.createElementNS(ns, 'title');
+      title.textContent =
+        d.date + '  ·  $' + usd.toFixed(4) +
+        '  ·  ' + (d.calls || 0) + ' call(s)';
+      rect.appendChild(title);
+      svg.appendChild(rect);
+
+      // Date label every Nth bar to avoid overlap.
+      const stride = Math.ceil(n / 8);
+      if (i % stride === 0 || i === n - 1) {
+        const txt = document.createElementNS(ns, 'text');
+        txt.setAttribute('x', x + bar_w / 2);
+        txt.setAttribute('y', H - 8);
+        txt.setAttribute('class', 'cost-axis-label');
+        txt.setAttribute('text-anchor', 'middle');
+        // Show MM-DD (drop year for compactness)
+        txt.textContent = (d.date || '').slice(5);
+        svg.appendChild(txt);
+      }
+    });
+    if (block) block.style.display = 'block';
+  }
 
   registerPanel('cost', {
     async mount() {
       const summary = document.getElementById('cost-summary');
       const refresh = document.getElementById('cost-refresh');
+      const windowSel = document.getElementById('cost-window');
       if (!summary) return;
       const load = async () => {
         summary.textContent = 'loading...';
-        const r = await api('/api/cost-summary');
-        summary.textContent = (r.data && (r.data.summary || r.data.error)) || '(empty)';
+        const days = parseInt((windowSel && windowSel.value) || '14', 10);
+        const r = await api('/api/cost-detail?days=' + days);
+        if (r.data && r.data.error) {
+          summary.textContent = r.data.error;
+          renderCostBudget(null);
+          renderCostChart([]);
+          return;
+        }
+        summary.textContent = (r.data && r.data.summary) || '(empty)';
+        renderCostBudget(r.data && r.data.budget);
+        renderCostChart((r.data && r.data.daily) || []);
       };
       if (refresh) refresh.onclick = load;
+      if (windowSel) windowSel.onchange = load;
       await load();
     },
   });

@@ -2157,6 +2157,52 @@ def _build_app():
             },
         )
 
+    @app.get("/api/cost-detail")
+    async def api_cost_detail(request: Request, days: int = 14):
+        """v1.31.1: structured cost data for the web panel.
+
+        Returns budget gauge, daily-rollup series, current turn,
+        and the existing text summary in one payload — the panel
+        renders the chart + gauge directly without the old
+        text-only fallback.
+        """
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        days = max(1, min(int(days or 14), 90))
+        try:
+            try:
+                summary = cost.render_summary() or "(no usage yet)"
+            except Exception:
+                summary = ""
+            ts = cost.turn_stats()
+            try:
+                budget = cost.budget_status()
+            except Exception:
+                budget = {
+                    "budget": 0.0, "spent": 0.0, "remaining": 0.0,
+                    "percent": 0.0, "configured": False,
+                }
+            try:
+                daily = cost.daily_totals(since_days=days)
+            except Exception:
+                daily = []
+            return JSONResponse({
+                "summary": summary,
+                "turn": {
+                    "prompt_tokens": int(ts.prompt_tokens),
+                    "completion_tokens": int(ts.completion_tokens),
+                    "usd": float(ts.usd),
+                },
+                "budget": budget,
+                "daily": daily,
+                "days": days,
+            })
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"cost detail failed: {e}"}, status_code=500,
+            )
+
     @app.get("/api/cost-summary")
     async def api_cost_summary(request: Request):
         """v1.22.3: aggregated cost summary. Reuses cost.render_summary."""

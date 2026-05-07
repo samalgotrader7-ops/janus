@@ -478,6 +478,98 @@ footer.statusbar #footer-version { color: var(--text-faint); }
 .tag.risk-ask { background: #fafad2; color: #663; }
 .tag.risk-read { background: var(--ok-bg); color: var(--ok); }
 
+/* v1.31.1: cost panel — budget gauge + daily chart */
+.cost-budget {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.cost-budget-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 0.88em;
+  margin-bottom: 8px;
+}
+.cost-budget-label { color: var(--text); }
+.cost-gauge-track {
+  position: relative;
+  width: 100%;
+  height: 12px;
+  background: #f1f1f1;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.cost-gauge-fill {
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  width: 0;
+  background: linear-gradient(90deg, #4ea84e 0%, #c9a34e 50%, #b04444 100%);
+  transition: width 250ms ease-out;
+}
+.cost-gauge-fill.over {
+  background: #b04444;
+}
+.cost-gauge-marks {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+}
+.cost-gauge-mark {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.15);
+}
+.tag.gauge-ok { background: var(--ok-bg); color: var(--ok); }
+.tag.gauge-warn { background: #fff3e0; color: var(--warn); }
+.tag.gauge-over { background: #ffe9e9; color: #b00; }
+
+.cost-chart-block {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.cost-chart-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
+.cost-chart-title { font-weight: 600; }
+.cost-chart-totals { color: #666; }
+.cost-chart {
+  width: 100%;
+  height: 160px;
+  display: block;
+}
+.cost-chart-empty {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  color: #888;
+  text-align: center;
+  padding: 24px 0;
+}
+.cost-bar { fill: var(--brand); }
+.cost-bar:hover { fill: var(--brand-dark); }
+.cost-axis-line {
+  stroke: #ccc;
+  stroke-width: 1;
+}
+.cost-axis-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  fill: #888;
+}
+
 /* v1.30.0: plan-review modal (ExitPlanMode approvals) */
 .modal-plan-files {
   display: flex;
