@@ -664,6 +664,41 @@ def _make_mode_approver(console, mode_state: permissions.ModeState):
         )
         if high_risk:
             title_suffix += f" [yellow](high-risk: {hr_reason})[/]"
+
+        # v1.27.2 — structured plan-review rendering. When the action
+        # is ExitPlanMode, parse the plan body for steps + file
+        # references + tool-count estimates and render a dedicated
+        # Plan Review panel (cyan border, metrics header, Markdown
+        # body). Falls back to the regular yellow approval panel if
+        # parsing or Rich rendering fails. Returns the same approver
+        # bool either way — the prompt + grant logic below is shared.
+        if action_label and "exit_plan_mode" in action_label.lower():
+            try:
+                from . import plan_render
+                parsed = plan_render.parse_plan(details)
+                panel = plan_render.render_rich_panel(
+                    parsed, details, mode=mode_state.current,
+                )
+                if panel is not None:
+                    console.print(panel)
+                    # Plan-mode prompt is intentionally narrow — no
+                    # session/always grants for "approve this plan".
+                    prompt_text = "[Y]es proceed  [N]o refine  > "
+                    try:
+                        if HAVE_RICH:
+                            from prompt_toolkit import prompt as _pt_prompt
+                            ans = _pt_prompt(prompt_text, default="").strip().lower()
+                        else:
+                            ans = input(prompt_text).strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        return False
+                    if ans in ("y", "yes"):
+                        return True
+                    return False
+            except Exception:
+                # Fall through to the generic approval panel.
+                pass
+
         # v1.25.4: when fs_write/fs_edit pass diff_data, render the
         # diff body with Rich Syntax (line numbers + diff highlighting)
         # instead of the ANSI-colored text dump. Falls back to the
