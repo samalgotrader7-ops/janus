@@ -405,8 +405,16 @@ def run_daemon(*, once: bool = False) -> None:
             pass
     atexit.register(_cleanup_pid)
 
+    # v1.30.2 — built-in memory consolidation cron (opt-in via env).
+    consolidate_hours = config.MEMORY_CONSOLIDATE_HOURS
+    consolidate_label = (
+        f", consolidate every {consolidate_hours}h"
+        if consolidate_hours > 0 else ""
+    )
     print(f"janus daemon: polling every {config.DAEMON_POLL_SECONDS}s "
-          f"({len(list_triggers())} triggers, gateway={config.DAEMON_NOTIFY_GATEWAY})")
+          f"({len(list_triggers())} triggers, "
+          f"gateway={config.DAEMON_NOTIFY_GATEWAY}"
+          f"{consolidate_label})")
 
     while True:
         triggers = [t for t in list_triggers() if t.enabled]
@@ -431,6 +439,27 @@ def run_daemon(*, once: bool = False) -> None:
                 print(f"      → {head[0][:80] if head else '(no output)'}")
             except Exception as e:
                 print(f"      [!] fire failed: {e}")
+        # v1.30.2 — memory consolidation tick. No-op when disabled or
+        # not due. Failures are swallowed inside tick() so a flaky
+        # consolidator can't break the trigger daemon.
+        try:
+            from .. import memory_consolidate_cron
+            ms = memory_consolidate_cron.tick(
+                on_fire=lambda multi: print(
+                    f"  [+] memory consolidate "
+                    f"({'multi-stage' if multi else 'single'})"
+                ),
+            )
+            if ms.get("fired"):
+                if ms.get("error"):
+                    print(f"      [!] consolidate failed: {ms['error']}")
+                else:
+                    print(
+                        f"      → examined={ms.get('examined', 0)} "
+                        f"written={ms.get('written', 0)}"
+                    )
+        except Exception as e:
+            print(f"  [!] memory consolidate tick failed: {e}")
         if once:
             return
         time.sleep(config.DAEMON_POLL_SECONDS)

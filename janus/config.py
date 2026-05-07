@@ -171,6 +171,21 @@ TELEGRAM_ALLOWED_CHATS: str = os.getenv("JANUS_TELEGRAM_CHATS", "")
 DAEMON_POLL_SECONDS: int = int(os.getenv("JANUS_DAEMON_POLL", "30"))
 DAEMON_NOTIFY_GATEWAY: str = os.getenv("JANUS_DAEMON_GATEWAY", "log")
 
+# v1.30.2 — built-in memory consolidation cadence inside the daemon.
+# OFF by default (set to 0 hours = disabled) because consolidation
+# burns LLM tokens; users opt in by setting a positive interval.
+# Recommended: 24 (once per day). The original v1.18 design left
+# this manual; v1.30.2 adds a daemon-managed cadence as an
+# alternative to wiring agent_create() for the same purpose.
+MEMORY_CONSOLIDATE_HOURS: int = int(
+    os.getenv("JANUS_MEMORY_CONSOLIDATE_HOURS", "0")
+)
+# Multi-stage variant flag. Defaults to single-stage (v1.18 path);
+# users wanting the v1.29.0 swarm-shaped pipeline opt in.
+MEMORY_CONSOLIDATE_MULTI_STAGE: bool = (
+    os.getenv("JANUS_MEMORY_CONSOLIDATE_MULTI_STAGE", "0") == "1"
+)
+
 # --- Phase 7: skill evolution ---
 SKILL_REVIEW_EVERY: int = int(os.getenv("JANUS_SKILL_REVIEW_EVERY", "5"))
 DEMO_DIR: Path = HOME / "demo"
