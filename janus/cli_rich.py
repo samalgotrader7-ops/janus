@@ -97,13 +97,18 @@ if HAVE_RICH:
     })
 
     class SlashCompleter(Completer):
-        """Autocomplete slash commands with descriptions + category coloring.
+        """Autocomplete slash commands AND `@path` file mentions.
 
         `customs_provider` is a zero-arg callable returning the current
         custom-commands dict. We keep it as a callable (not a snapshot) so
         the dropdown reflects state changes — e.g. a future /reload that
         re-scans `~/.janus/commands/` mid-session works without rebuilding
         the completer.
+
+        v1.25.1: also handles `@<path>` for inlining workspace files
+        into the next user turn. The completer matches the @-token at
+        the cursor; submission post-processing (in the chat loop) does
+        the actual file inlining via at_mentions.expand_at_mentions.
         """
 
         def __init__(self, customs_provider: Callable[[], dict] | None = None):
@@ -137,6 +142,50 @@ if HAVE_RICH:
                             # visible gutter from the command name.
                             display_meta="  " + cmd.description,
                         )
+                return
+            # v1.25.1: `@path` file mentions. Look back from cursor for
+            # an @-token preceded by start-of-string or whitespace.
+            yield from _at_completions(text)
+
+
+    def _at_completions(text: str):
+        """Yield workspace-file completions when text-before-cursor is
+        a partial @-mention. Matches the same `@<path>` shape as the
+        post-submit expansion in at_mentions.py.
+
+        Cursor must be inside an @-token; otherwise yields nothing.
+        """
+        # Find the last `@` in text. To be a valid mention it must be
+        # at start-of-string or preceded by whitespace, and there must
+        # be no whitespace between it and the cursor.
+        at_pos = text.rfind("@")
+        if at_pos < 0:
+            return
+        # Anything between @ and cursor must be path-shaped (no spaces).
+        partial = text[at_pos + 1:]
+        if any(c.isspace() for c in partial):
+            return
+        # Must be at start or preceded by whitespace.
+        if at_pos > 0 and not text[at_pos - 1].isspace():
+            return
+        from . import at_mentions as _am
+        try:
+            matches = _am.list_workspace_files(prefix=partial, max_results=20)
+        except Exception:
+            return
+        for relpath in matches:
+            is_dir = relpath.endswith("/")
+            display = FormattedText([
+                ("ansiblue" if is_dir else "ansigreen", "📁 " if is_dir else "  "),
+                ("", relpath),
+            ])
+            yield Completion(
+                relpath,
+                start_position=-len(partial),
+                display=display,
+                display_meta="  " + ("directory" if is_dir else "file"),
+            )
+
 else:
     SlashCompleter = None  # type: ignore[assignment]
 
@@ -2018,7 +2067,40 @@ def main() -> None:
         if state.get("_pending_custom"):
             req = state.pop("_pending_custom")
 
+        # v1.25.1: expand `@path` mentions into inlined file contents
+        # before the model sees the message. The original (un-expanded)
+        # text is preserved in `last_user_input` for /retry and the
+        # conversation log so the user's intent stays readable.
         state["last_user_input"] = req
+        if "@" in req:
+            try:
+                from . import at_mentions as _am
+                expanded, _at_log = _am.expand_at_mentions(
+                    req, workspace=config.WORKSPACE,
+                )
+                if _at_log:
+                    # One-line summary of what got injected so the user
+                    # sees what's going to the model.
+                    ok = [e for e in _at_log if e["status"] in ("ok", "truncated")]
+                    skipped = [e for e in _at_log if e not in ok]
+                    if ok:
+                        names = ", ".join(e["path"] for e in ok)
+                        console.print(
+                            f"[dim]   📎 inlined {len(ok)} file(s): {names}[/]"
+                        )
+                    if skipped:
+                        for e in skipped:
+                            console.print(
+                                f"[yellow dim]   ⚠ @{e['path']}: "
+                                f"{e['status']} (left literal)[/]"
+                            )
+                    req = expanded
+            except Exception as _exc:
+                # @-mention failure must never block the turn.
+                console.print(
+                    f"[dim]   @-mention expansion skipped: "
+                    f"{type(_exc).__name__}[/]"
+                )
 
         record: dict[str, Any] = {
             "ts": logger.now_iso(),
