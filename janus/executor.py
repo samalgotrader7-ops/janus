@@ -840,6 +840,18 @@ def _build_chat_system(
             parts.append("\n\n---\n\n")
     except Exception:
         pass
+    # v1.28.4: project-context awareness. Tell the model what kind of
+    # project this is so it picks the right test runner / convention /
+    # idiom without spelunking. Skipped silently when type=unknown.
+    try:
+        from . import project_detect as _pd
+        info = _pd.detect_project_type(workspace=workspace)
+        block = _pd.render_prompt_block(info)
+        if block:
+            parts.append(block.rstrip())
+            parts.append("\n\n---\n\n")
+    except Exception:
+        pass
     parts.append(JANUS_CHAT_SYSTEM)
 
     inv_bits: list[str] = []

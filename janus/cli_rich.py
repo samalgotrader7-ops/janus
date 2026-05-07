@@ -1319,6 +1319,19 @@ def _dispatch(console, line: str, state: dict) -> bool:
                 "budget gauge)[/]"
             )
         return True
+    if cmd == "/project":
+        # v1.28.4: show detected project type + indicators + suggested
+        # test command. ``JANUS_PROJECT_TYPE`` overrides detection.
+        from . import project_detect as _pd
+        info = _pd.detect_project_type()
+        for line in _pd.render_summary(info).splitlines():
+            console.print(line)
+        if info.source == "auto" and not info.is_known:
+            console.print(
+                "  [dim](no project markers found — set JANUS_PROJECT_TYPE "
+                "to override, or this is a non-code workspace)[/]"
+            )
+        return True
     if cmd == "/verbose":
         v = arg.strip().lower()
         if v in ("on", "true", "1"):
