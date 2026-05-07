@@ -128,6 +128,20 @@ MEMORY_PROTECTED_DURABILITY: float = float(
     os.getenv("JANUS_MEMORY_PROTECTED_DURABILITY", "0.7")
 )
 
+# v1.25.2 — single-user mode. When true, ``user_turn`` card extractions
+# default to ``scope=global`` instead of the per-origin scope (telegram:
+# <chat_id>, web:<session>, cli, etc.). The privacy invariant for
+# tool_result extractions is UNCHANGED: those still scope-local because
+# their content can be prompt-injected (web fetch, file reads, shell
+# results). Default on — most Janus installs are one user across many
+# surfaces, and the per-origin default surprised them by making CLI not
+# see what Telegram had been saving for months. Set
+# ``JANUS_SINGLE_USER=0`` for multi-user deployments where users on
+# different chat_ids genuinely want isolated memory.
+MEMORY_SINGLE_USER: bool = os.getenv("JANUS_SINGLE_USER", "1") not in (
+    "0", "false", "no", "off",
+)
+
 # v1.3 — multi-category memory. Each category is a separate .md under
 # MEMORY_DIR; the loader concatenates them in this order into the system
 # prompt (earlier categories weigh more — soul first frames the agent's

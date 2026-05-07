@@ -127,7 +127,13 @@ class TestParseCards:
         }]}
         assert memory_extract.parse_cards(data, current_scope="cli") == []
 
-    def test_default_scope_when_missing(self):
+    def test_default_scope_when_missing(self, monkeypatch):
+        """When the model omits scope: in multi-user mode (single-user
+        OFF) it defaults to current_scope; in single-user mode (default
+        ON since v1.25.2) it defaults to global for user_turn cards.
+        This test pins the multi-user behavior; v1.25.2's
+        test_single_user_mode.py pins the single-user behavior."""
+        monkeypatch.setattr(config, "MEMORY_SINGLE_USER", False)
         data = {"cards": [{
             "type": "preference", "subject": "x", "content": "y",
             "confidence": 0.5, "importance": 0.5, "durability": 0.5,
