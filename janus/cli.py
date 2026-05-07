@@ -1531,7 +1531,7 @@ def main():
     cache_snap = cache.snapshot()
 
     pending = conversation.take_pending()
-    _RUN_STATE["conv"] = pending if pending is not None else conversation.new()
+    _RUN_STATE["conv"] = pending if pending is not None else conversation.new(gateway="cli")
     conv = _RUN_STATE["conv"]
     if pending is not None:
         print(f"{C.DIM}   resumed conversation {conv.id} "

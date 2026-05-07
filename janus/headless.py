@@ -114,7 +114,7 @@ def run(
 
     # Conversation may have been pre-loaded by --continue / --resume.
     pending = conversation.take_pending()
-    conv = pending if pending is not None else conversation.new()
+    conv = pending if pending is not None else conversation.new(gateway="headless")
 
     preamble = cache.snapshot().preamble + conv.recent_context_block()
 

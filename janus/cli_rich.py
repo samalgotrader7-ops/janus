@@ -1449,27 +1449,93 @@ def _dispatch(console, line: str, state: dict) -> bool:
                 console.print(f"  [yellow]{i + 1}.[/] {preview}")
         return True
     if cmd == "/resume":
-        target = arg.strip()
-        if not target:
-            items = conversation.list_all()
-            if not items:
-                console.print("[dim]no saved conversations[/]")
+        # v1.27.3 — upgraded picker. Subcommands:
+        #   /resume                 → numbered list with previews (top 10)
+        #   /resume <N>             → resume by 1-based index
+        #   /resume <id>            → resume by exact / prefix id
+        #   /resume search <query>  → filter by substring
+        #   /resume gateway <name>  → filter by origin (cli_rich, telegram, ...)
+        #   /resume since <date>    → filter by last_updated ≥ ISO date
+        raw = arg.strip()
+        sub_query = ""
+        sub_gateway: str | None = None
+        sub_since: str | None = None
+        target = raw
+
+        # Parse subcommands. Format: ``<sub> <value>`` where sub is
+        # ``search`` / ``gateway`` / ``since``. We accept a single sub
+        # at a time; chaining could come in a follow-up.
+        parts = raw.split(None, 1) if raw else []
+        if parts and parts[0].lower() in ("search", "gateway", "since"):
+            sub = parts[0].lower()
+            value = parts[1] if len(parts) > 1 else ""
+            if sub == "search":
+                sub_query = value
+            elif sub == "gateway":
+                sub_gateway = value
+            elif sub == "since":
+                sub_since = value
+            target = ""  # filter mode renders the picker, doesn't resolve
+
+        if target:
+            conv = conversation.resolve_target(target)
+            if conv is None:
+                console.print(f"[red]no conversation matching[/] [bold]{target}[/]")
                 return True
-            t = Table(show_header=True, header_style="bold")
-            t.add_column("id"); t.add_column("turns"); t.add_column("last update")
-            for item in items[:10]:
-                t.add_row(item["id"], str(item["turns"]),
-                          item["last_updated"][:19])
-            console.print(t)
-            console.print("[dim]usage: /resume <id>[/]")
+            state["conv"] = conv
+            console.print(
+                f"  [green]resumed[/] {conv.id} "
+                f"({len(conv.turns)} turns, started {conv.started[:19]})"
+            )
             return True
-        conv = conversation.load(target)
-        if conv is None:
-            console.print(f"[red]no conversation '{target}'[/]")
+
+        # Picker mode. Apply filters if any sub was given.
+        if sub_query or sub_gateway or sub_since:
+            items = conversation.search(
+                query=sub_query, gateway=sub_gateway, since=sub_since,
+            )
+        else:
+            items = conversation.list_all()
+
+        if not items:
+            console.print("[dim]no saved conversations[/]")
+            if sub_query:
+                console.print(f"[dim](search: {sub_query!r} returned 0 hits)[/]")
             return True
-        state["conv"] = conv
-        console.print(f"  [green]resumed[/] {conv.id} "
-                      f"({len(conv.turns)} turns, started {conv.started[:19]})")
+
+        # Render the picker. Show #, title-or-first-msg, turns,
+        # last_updated, gateway, last assistant snippet. Cap at 10 to
+        # keep the panel readable; user can search to narrow further.
+        t = Table(show_header=True, header_style="bold cyan")
+        t.add_column("#", style="dim", width=3)
+        t.add_column("title / preview", overflow="fold")
+        t.add_column("turns", justify="right", width=5)
+        t.add_column("last update", width=19)
+        t.add_column("gateway", width=10)
+        for i, item in enumerate(items[:10], start=1):
+            preview = item.get("title") or item.get("first_user_msg") or "—"
+            preview = preview[:60].rstrip()
+            last_a = (item.get("last_assistant_msg") or "")[:60].strip()
+            cell = preview
+            if last_a and last_a != preview:
+                cell = f"{preview}\n[dim]→ {last_a}[/]"
+            t.add_row(
+                str(i),
+                cell,
+                str(item.get("turns", 0)),
+                str(item.get("last_updated", ""))[:19],
+                str(item.get("gateway", "")) or "-",
+            )
+        console.print(t)
+        if len(items) > 10:
+            console.print(
+                f"[dim](+{len(items) - 10} more — narrow with "
+                f"`/resume search <query>` or `/resume gateway <name>`)[/]"
+            )
+        console.print(
+            "[dim]usage: /resume <N> | <id> | search <query> | "
+            "gateway <name> | since <date>[/]"
+        )
         return True
     if cmd == "/continue":
         latest = conversation.latest()
@@ -2160,7 +2226,7 @@ def main() -> None:
 
     cache_snap = cache.snapshot()
     pending = conversation.take_pending()
-    state["conv"] = pending if pending is not None else conversation.new()
+    state["conv"] = pending if pending is not None else conversation.new(gateway="cli_rich")
     if pending is not None:
         console.print(
             f"[dim]   resumed conversation {state['conv'].id} "
