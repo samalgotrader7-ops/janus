@@ -157,6 +157,25 @@ def _tool_class(name: str) -> str:
     return _TOOL_CLASS.get(name, "other")
 
 
+# v1.31.4 — tools whose ``path``-shaped arg is GENUINELY a filesystem
+# path. Used by ``_detect_repeated_files`` to skip shell / search /
+# query / URL entries that would otherwise inflate the file counter
+# via ``_extract_tool_calls``'s fallback chain (path → command →
+# query → url). New file-touching tools added in future releases
+# should be added here too.
+FILE_PATH_TOOLS = frozenset({
+    "fs_read",
+    "fs_write",
+    "fs_edit",
+    "fs_multi_edit",
+    "fs_list",
+    "fs_grep",
+    "fs_glob",
+    "vision",
+    "notebook",
+})
+
+
 # ---------- Trace extraction ----------
 
 
@@ -300,11 +319,31 @@ def _detect_repeated_sequences(calls: list[dict]) -> list[Pattern]:
 
 
 def _detect_repeated_files(calls: list[dict]) -> list[Pattern]:
+    """Find files that appeared in tool calls ≥FILE_MIN_OCCURRENCES.
+
+    v1.31.4 — primary filter is now a tool-name allow-list. The
+    pre-v1.31.4 implementation only filtered by string heuristics
+    (URL prefix, spaces) on the path field. ``_extract_tool_calls``
+    falls back from ``args.path`` to ``args.command`` for shell
+    tools, so a bare command like ``ls`` (no space) would slip
+    through and surface as a "File 'ls' touched N times" pattern.
+    Companion fix to v1.31.3's homogeneous-sequence filter — same
+    field-validation context (Sam's shell-heavy VPS session). The
+    string heuristics are preserved as defense-in-depth.
+    """
     counts: dict[str, int] = {}
     for c in calls:
+        # Tool-name allow-list: only count entries from tools whose
+        # ``path``-shaped arg is GENUINELY a file path (not a shell
+        # command, query, or URL falling through the extractor's
+        # fallback chain).
+        if c.get("tool") not in FILE_PATH_TOOLS:
+            continue
         path = c.get("path") or ""
-        # Filter out non-file paths — shell commands, URLs, queries
-        # would inflate the counter.
+        # Defense-in-depth: keep the heuristic filters even after
+        # the allow-list, so an FILE_PATH_TOOLS member with an
+        # unexpected URL-shaped or whitespace-shaped path doesn't
+        # leak through.
         if not path:
             continue
         if "://" in path:  # URL
