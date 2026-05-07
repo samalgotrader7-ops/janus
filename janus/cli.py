@@ -1378,8 +1378,16 @@ def maybe_propose_memory(req, output, cache_snap=None):
                 f"scope={c.scope}{tag}"
             )
             print(f"    {c.content[:120]}")
+    # v1.24.2: try prompt_toolkit if available so arrow keys / readline
+    # editing work in tmux. Raw input() echoes ^[[A / ^[[B sequences
+    # into the buffer, breaking the y/yes match silently. Falls back
+    # to input() if prompt_toolkit isn't installed.
     try:
-        ans = input("\napply? [y/N]: ").strip().lower()
+        try:
+            from prompt_toolkit import prompt as _pt_prompt
+            ans = _pt_prompt("\napply? [y/N]: ", default="").strip().lower()
+        except ImportError:
+            ans = input("\napply? [y/N]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return
     if ans in ("y", "yes"):

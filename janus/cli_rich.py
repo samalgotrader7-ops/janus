@@ -1629,8 +1629,18 @@ def _maybe_propose_memory(console, req: str, output: str,
             title=f"proposed memory cards ({len(cards)})",
             border_style="magenta",
         ))
+    # v1.24.2: prompt_toolkit-based prompt so arrow keys + line editing
+    # behave correctly under tmux/raw terminals. Pre-v1.24.2 this used
+    # raw input() which echoed arrow-key escape sequences (^[[A, ^[[B)
+    # into the buffer — when the user pressed Enter, the answer didn't
+    # match "y"/"yes" and was silently denied, leaving the CLI in a
+    # confusing "stuck" state.
     try:
-        ans = input("apply? [y/N]: ").strip().lower()
+        if HAVE_RICH:
+            from prompt_toolkit import prompt as _pt_prompt
+            ans = _pt_prompt("apply? [y/N]: ", default="").strip().lower()
+        else:
+            ans = input("apply? [y/N]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return
     if ans in ("y", "yes"):

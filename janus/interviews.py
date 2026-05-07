@@ -562,6 +562,8 @@ def next_question(
 def compute_completion(
     state: InterviewState,
     library: Optional[dict[str, Category]] = None,
+    *,
+    include_cards_layer: bool = True,
 ) -> dict[str, float]:
     """Per-category answered_count / total_questions ratio.
 
@@ -569,31 +571,67 @@ def compute_completion(
     user-added questions don't inflate the meter (the meter measures
     DEFAULT coverage). Re-saved into ``state.completion_pct`` by callers
     that want it persisted.
+
+    v1.24.2 — `include_cards_layer` (default True) extends the count
+    to include questions whose subject already has a memory card
+    (cross-gateway answers). Pre-v1.24.2 the meter counted ONLY
+    questions answered through THIS gateway's state file; if you
+    answered via Telegram and looked at the web meter, it was
+    misleadingly empty. Now both gateways see the same coverage.
+    Tests that need pure state-only counting pass include_cards_layer=False.
     """
     if library is None:
         library = load_all()
     out: dict[str, float] = {}
     now = _dt.datetime.now(_dt.timezone.utc)
+
+    # v1.24.2: pre-fetch all cards per category once, not per question.
+    cards_by_subject: dict[str, set[str]] = {}
+    if include_cards_layer:
+        try:
+            from . import memory_index
+            try:
+                memory_index.reconcile()
+            except Exception:
+                pass
+            for r in (memory_index.list_all() or []):
+                t = r.get("type", "")
+                s = r.get("subject", "")
+                if t and s:
+                    cards_by_subject.setdefault(t, set()).add(s)
+        except Exception:
+            cards_by_subject = {}
+
     for cat_name in SUPPORTED_CATEGORIES:
         cat = library.get(cat_name)
         if cat is None or not cat.questions:
             out[cat_name] = 0.0
             continue
+        cat_cards = cards_by_subject.get(cat_name, set())
         # Count "currently answered AND still fresh" against total.
         answered_fresh = 0
         for q in cat.questions:
             fqid = q.fqid(cat_name)
-            if fqid not in state.answered:
-                continue
-            if q.recheck_days is None:
-                answered_fresh += 1
-                continue
-            last = _parse_iso(state.answered[fqid].get("answered_at"))
-            if last is None:
-                answered_fresh += 1
-                continue
-            elapsed_days = (now - last).total_seconds() / 86400
-            if elapsed_days < q.recheck_days:
+            counted = False
+            if fqid in state.answered:
+                if q.recheck_days is None:
+                    counted = True
+                else:
+                    last = _parse_iso(
+                        state.answered[fqid].get("answered_at"),
+                    )
+                    if last is None:
+                        counted = True
+                    else:
+                        elapsed_days = (now - last).total_seconds() / 86400
+                        if elapsed_days < q.recheck_days:
+                            counted = True
+            # v1.24.2: cards-layer match counts even if state is empty
+            # (cross-gateway). Each question's id maps to a card subject;
+            # if a card exists we treat the question as answered.
+            if not counted and q.id in cat_cards:
+                counted = True
+            if counted:
                 answered_fresh += 1
         out[cat_name] = answered_fresh / len(cat.questions)
     return out
