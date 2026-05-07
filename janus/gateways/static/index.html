@@ -44,6 +44,7 @@
       <li><a href="#shells" data-panel="shells">shells</a></li>
       <li><a href="#logs" data-panel="logs">logs</a></li>
       <li><a href="#cost" data-panel="cost">cost</a></li>
+      <li><a href="#grants" data-panel="grants">grants</a></li>
       <li><a href="#mcp" data-panel="mcp">mcp</a></li>
       <li><a href="#settings" data-panel="settings">settings</a></li>
     </ul>
@@ -263,6 +264,21 @@
       <div id="cost-summary" style="background:#fff; border:1px solid #e0e0e0;
            border-radius:4px; padding:14px; font-family:ui-monospace,monospace;
            font-size:0.9em; white-space:pre-wrap;"></div>
+    </section>
+
+    <!-- ---------- Grants panel (v1.31.2) ---------- -->
+    <section id="panel-grants" class="panel">
+      <h2>persistent grants <span style="font-weight:400; color:#888;
+          font-size:0.85em; margin-left:8px;">~/.janus/approvals.json</span></h2>
+      <div class="panel-toolbar">
+        <button id="grants-refresh" class="secondary" type="button">refresh</button>
+        <button id="grants-clear-all" class="secondary" type="button"
+                style="margin-left:8px;">clear all</button>
+        <span style="color:#999; font-size:0.85em;">
+          [a]lways grants from approval prompts. revoke any time.
+        </span>
+      </div>
+      <div id="grants-list" class="item-list"></div>
     </section>
 
     <!-- ---------- MCP panel (v1.29.4) ---------- -->

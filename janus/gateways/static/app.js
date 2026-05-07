@@ -1271,6 +1271,104 @@
     },
   });
 
+  // ---------- v1.31.2: persistent grants panel ----------
+
+  registerPanel('grants', {
+    async mount() {
+      const list = document.getElementById('grants-list');
+      const refresh = document.getElementById('grants-refresh');
+      const clearAll = document.getElementById('grants-clear-all');
+      if (!list) return;
+      const load = async () => {
+        clear(list);
+        list.appendChild(
+          el('div', { class: 'item' },
+            el('div', { class: 'item-meta' }, 'loading...'))
+        );
+        const r = await api('/api/grants');
+        clear(list);
+        if (r.data.error) {
+          list.appendChild(
+            el('div', { class: 'item' },
+              el('div', { class: 'item-meta' }, r.data.error))
+          );
+          return;
+        }
+        const grants = r.data.grants || [];
+        if (grants.length === 0) {
+          list.appendChild(
+            el('div', { class: 'item' },
+              el('div', { class: 'item-meta' },
+                'no persistent grants. earn them via [a]lways at the next approval prompt.'))
+          );
+          setFooter('0 persistent grants');
+          return;
+        }
+        for (const g of grants) {
+          const revokeBtn = el('button',
+            { type: 'button', class: 'secondary' }, 'revoke');
+          const item = el('div', { class: 'item' },
+            el('div', { class: 'item-title' },
+              el('span', { class: 'tag risk-' + (g.risk || 'ask') }, g.risk || ''),
+              ' ',
+              el('code', { style: 'font-size:0.9em;' }, g.tool || '')
+            ),
+            el('div', { class: 'modal-actions',
+                        style: 'margin-top:6px; gap:6px; justify-content:flex-start;' },
+              revokeBtn)
+          );
+          revokeBtn.onclick = async () => {
+            if (!confirm(`Revoke ${g.tool} (${g.risk})?`)) return;
+            revokeBtn.disabled = true;
+            revokeBtn.textContent = 'revoking…';
+            try {
+              const resp = await api('/api/grants/revoke', {
+                method: 'POST',
+                body: { tool: g.tool, risk: g.risk },
+              });
+              if (resp.data.error) {
+                setFooter(`revoke failed: ${resp.data.error}`);
+                revokeBtn.disabled = false;
+                revokeBtn.textContent = 'revoke';
+                return;
+              }
+              setFooter(`revoked: ${g.tool} (${g.risk})`);
+              await load();
+            } catch (e) {
+              setFooter(`revoke failed: ${e.message}`);
+              revokeBtn.disabled = false;
+              revokeBtn.textContent = 'revoke';
+            }
+          };
+          list.appendChild(item);
+        }
+        setFooter(`${grants.length} persistent grant(s)`);
+      };
+      if (refresh) refresh.onclick = load;
+      if (clearAll) clearAll.onclick = async () => {
+        if (!confirm('Wipe ALL persistent grants? Session grants are not affected.')) return;
+        clearAll.disabled = true;
+        try {
+          const resp = await api('/api/grants/clear', {
+            method: 'POST',
+            body: {},
+          });
+          if (resp.data.error) {
+            setFooter(`clear failed: ${resp.data.error}`);
+            return;
+          }
+          setFooter(`cleared ${resp.data.removed} grant(s)`);
+          await load();
+        } catch (e) {
+          setFooter(`clear failed: ${e.message}`);
+        } finally {
+          clearAll.disabled = false;
+        }
+      };
+      await load();
+    },
+  });
+
   // ---------- v1.29.4: MCP catalog browser panel ----------
 
   registerPanel('mcp', {

@@ -2157,6 +2157,107 @@ def _build_app():
             },
         )
 
+    # ---------- v1.31.2: persistent grants panel ----------
+
+    @app.get("/api/grants")
+    async def api_grants(request: Request):
+        """v1.31.2: list persistent approval grants from
+        ``~/.janus/approvals.json``.
+
+        Returns ``{"grants": [{"tool", "risk"}, ...]}``. The web's
+        ``ModeState`` lifecycle is per-HTTP-request so session
+        grants don't survive between calls — only persistent grants
+        are surfaced here. Same source of truth that cli_rich and
+        telegram see (P5: plain-text persistent state).
+        """
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            from .. import permissions
+            grants = permissions._load_persistent_grants()
+            out = sorted(
+                ({"tool": t, "risk": r} for (t, r) in grants),
+                key=lambda d: (d["tool"], d["risk"]),
+            )
+            return JSONResponse({
+                "grants": out,
+                "total": len(out),
+            })
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"grants list failed: {e}"}, status_code=500,
+            )
+
+    @app.post("/api/grants/revoke")
+    async def api_grants_revoke(request: Request):
+        """v1.31.2: revoke a (tool, risk) persistent grant.
+
+        Body: ``{"tool": str, "risk": str}``. The pair must exist
+        in the persistent grants file; missing pair returns 404.
+        """
+        auth_sid, err_resp, ip = _gate_post(request, "/api/grants/revoke")
+        if err_resp is not None:
+            return err_resp
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "body must be an object"}, status_code=400,
+            )
+        tool = str(body.get("tool") or "").strip()
+        risk = str(body.get("risk") or "").strip()
+        if not tool or not risk:
+            return JSONResponse(
+                {"error": "tool and risk required"}, status_code=400,
+            )
+        try:
+            from .. import permissions
+            grants = permissions._load_persistent_grants()
+            key = (tool, risk)
+            if key not in grants:
+                return JSONResponse(
+                    {"error": f"no persistent grant for {tool}/{risk}"},
+                    status_code=404,
+                )
+            grants.discard(key)
+            permissions._save_persistent_grants(grants)
+            web_audit.mutate(
+                auth_sid, ip, "/api/grants/revoke", [tool, risk],
+            )
+            return JSONResponse({
+                "ok": True,
+                "tool": tool,
+                "risk": risk,
+                "remaining": len(grants),
+            })
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"revoke failed: {e}"}, status_code=500,
+            )
+
+    @app.post("/api/grants/clear")
+    async def api_grants_clear(request: Request):
+        """v1.31.2: wipe ALL persistent grants. Drops the file
+        contents (writes back an empty grants list)."""
+        auth_sid, err_resp, ip = _gate_post(request, "/api/grants/clear")
+        if err_resp is not None:
+            return err_resp
+        try:
+            from .. import permissions
+            removed = len(permissions._load_persistent_grants())
+            permissions._save_persistent_grants(set())
+            web_audit.mutate(
+                auth_sid, ip, "/api/grants/clear", [str(removed)],
+            )
+            return JSONResponse({"ok": True, "removed": removed})
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"clear failed: {e}"}, status_code=500,
+            )
+
     @app.get("/api/cost-detail")
     async def api_cost_detail(request: Request, days: int = 14):
         """v1.31.1: structured cost data for the web panel.
