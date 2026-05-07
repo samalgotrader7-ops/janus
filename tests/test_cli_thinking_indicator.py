@@ -19,24 +19,36 @@ from janus import cli, cli_rich
 
 def test_cli_rich_emits_thinking_indicator_before_executor_call():
     """The thinking indicator must be emitted between approver setup and
-    the actual executor.chat() invocation so the user sees activity
-    during the tool-call gather phase."""
+    the actual chat-turn invocation so the user sees activity during
+    the tool-call gather phase.
+
+    v1.25.0: cli_rich migrated from executor.chat() to app.run_turn() —
+    the indicator-then-call shape is what we pin, not the specific
+    callable name."""
     src = inspect.getsource(cli_rich)
     # Indicator should be printed somewhere in the chat flow
     assert "⚡ thinking" in src
     # The CALL site (not earlier docstring/comment mentions) is what we
-    # care about. Find the first `output, trace = executor.chat(` —
-    # that's the actual invocation.
-    call_marker = "output, trace = executor.chat("
-    chat_idx = src.find(call_marker)
-    assert chat_idx >= 0, "could not find the executor.chat() call site"
+    # care about. Try the v1.25.0 call shape first, then fall back to
+    # the legacy shape so this test works through the migration.
+    for call_marker in (
+        "output, trace = app.run_turn(",
+        "output, trace = executor.chat(",
+    ):
+        chat_idx = src.find(call_marker)
+        if chat_idx >= 0:
+            break
+    else:
+        raise AssertionError("could not find the chat-turn call site")
     indicator_idx = src.rfind("⚡ thinking", 0, chat_idx)
     assert indicator_idx >= 0, (
-        "thinking indicator must appear before the executor.chat() call site"
+        "thinking indicator must appear before the chat-turn call site"
     )
-    # And the indicator should be CLOSE to the call (within ~500 chars
+    # And the indicator should be CLOSE to the call (within ~1000 chars
     # — i.e., immediately preceding setup, not way earlier).
-    assert chat_idx - indicator_idx < 500, (
+    # v1.25.0 bumped from 500 to accommodate the migration comment
+    # explaining the executor.chat → app.run_turn move.
+    assert chat_idx - indicator_idx < 1000, (
         "indicator should be in the same setup block as the call, "
         "not buried elsewhere in the file"
     )

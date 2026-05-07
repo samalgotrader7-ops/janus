@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import config, interpreter, executor, logger, memory, index, skills
+from . import app, config, interpreter, executor, logger, memory, index, skills
 from . import eval as eval_mod, planner, orchestrator, skill_evolution
 from . import skills_market, cache, branding, conversation, cost, statusline, skill_catalog
 from . import commands as commands_mod, doctor, init_codebase, output_styles
@@ -2103,7 +2103,13 @@ def main() -> None:
         try:
             t0 = time.time()
             step_renderer = _render_step_factory(console, state)
-            output, trace = executor.chat(
+            # v1.25.0 Phase 0: route through the surface-agnostic event
+            # stream instead of calling executor.chat directly. run_turn
+            # is a drop-in (same kwargs, same return tuple), but the
+            # underlying iteration goes through app.chat_events so any
+            # future event-level features (hook_fired, memory_recall,
+            # keepalive…) reach this surface for free.
+            output, trace = app.run_turn(
                 messages=state["messages"],
                 user_input=req,
                 tools=tools,
