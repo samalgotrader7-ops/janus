@@ -260,6 +260,94 @@
 
   // ---------- skills panel ----------
 
+  // v1.31.0: skill_proposer suggestions UI. Renders inside the
+  // skills panel above the installed-skills list. Mount fetches both
+  // /api/skills/suggestions and /api/skills in parallel and renders
+  // each section. Suggestions block hides when there are 0 patterns.
+  async function loadSkillSuggestions() {
+    const block = document.getElementById('skills-suggestions-block');
+    const list = document.getElementById('skills-suggestions-list');
+    const count = document.getElementById('skills-suggestions-count');
+    if (!block || !list) return 0;
+    const r = await api('/api/skills/suggestions');
+    clear(list);
+    if (r.data.error) {
+      block.style.display = 'block';
+      list.appendChild(el('div', { class: 'item' },
+        el('div', { class: 'item-meta' }, r.data.error)));
+      return 0;
+    }
+    const patterns = r.data.patterns || [];
+    if (patterns.length === 0) {
+      block.style.display = 'none';
+      return 0;
+    }
+    block.style.display = 'block';
+    if (count) count.textContent = `· ${patterns.length} pattern${patterns.length === 1 ? '' : 's'}`;
+    for (const p of patterns) {
+      const draftBtn = el('button',
+        { type: 'button', class: 'secondary' }, 'draft');
+      const declineBtn = el('button',
+        { type: 'button', class: 'secondary' }, 'decline');
+      const item = el('div', { class: 'item' },
+        el('div', { class: 'item-title' },
+          el('span', { class: 'tag' }, p.kind || ''),
+          ' ',
+          el('code', { style: 'font-size:0.85em;' }, p.id || ''),
+          ' ',
+          el('span', { style: 'color:#888; font-size:0.85em;' },
+            `· ${p.occurrences} hits`)
+        ),
+        el('div', { class: 'item-meta' }, p.description || ''),
+        el('div', { class: 'modal-actions',
+                    style: 'margin-top:8px; gap:6px; justify-content:flex-start;' },
+          draftBtn, declineBtn)
+      );
+      draftBtn.onclick = async () => {
+        draftBtn.disabled = true;
+        draftBtn.textContent = 'drafting…';
+        try {
+          const resp = await api(
+            `/api/skills/suggestions/${encodeURIComponent(p.id)}/propose`,
+            { method: 'POST', body: {} },
+          );
+          if (resp.data.error) {
+            setFooter(`draft failed: ${resp.data.error}`);
+            draftBtn.disabled = false;
+            draftBtn.textContent = 'draft';
+            return;
+          }
+          setFooter(`drafted: ${resp.data.name} (quarantined)`);
+          // Re-mount the panel so the new draft appears in
+          // installed list and pattern leaves the suggestions list.
+          await panels.skills.mount();
+        } catch (e) {
+          setFooter(`draft failed: ${e.message}`);
+          draftBtn.disabled = false;
+          draftBtn.textContent = 'draft';
+        }
+      };
+      declineBtn.onclick = async () => {
+        declineBtn.disabled = true;
+        declineBtn.textContent = 'declined';
+        try {
+          await api(
+            `/api/skills/suggestions/${encodeURIComponent(p.id)}/decline`,
+            { method: 'POST', body: {} },
+          );
+          setFooter(`silenced for ${r.data.cooldown_days || 7} days`);
+          item.style.opacity = '0.4';
+        } catch (e) {
+          setFooter(`decline failed: ${e.message}`);
+          declineBtn.disabled = false;
+          declineBtn.textContent = 'decline';
+        }
+      };
+      list.appendChild(item);
+    }
+    return patterns.length;
+  }
+
   registerPanel('skills', {
     async mount() {
       const list = document.getElementById('skills-list');
@@ -270,7 +358,11 @@
         list.appendChild(
           el('div', { class: 'item' }, el('div', { class: 'item-meta' }, 'loading...'))
         );
-        const r = await api('/api/skills');
+        // v1.31.0: load suggestions + installed in parallel.
+        const [suggestionCount, r] = await Promise.all([
+          loadSkillSuggestions().catch(() => 0),
+          api('/api/skills'),
+        ]);
         clear(list);
         if (r.data.error) {
           list.appendChild(el('div', { class: 'item' }, el('div', { class: 'item-meta' }, r.data.error)));
@@ -308,7 +400,10 @@
             )
           );
         }
-        setFooter(`${skills.length} skill(s) listed`);
+        const tail = suggestionCount > 0
+          ? ` · ${suggestionCount} suggestion${suggestionCount === 1 ? '' : 's'}`
+          : '';
+        setFooter(`${skills.length} skill(s) listed${tail}`);
       };
       if (refresh) refresh.onclick = load;
       await load();

@@ -1270,6 +1270,127 @@ def _build_app():
                 {"error": f"promote failed: {e}"}, status_code=400,
             )
 
+    # ---------- v1.31.0: skill_proposer suggestions panel ----------
+
+    @app.get("/api/skills/suggestions")
+    async def api_skill_suggestions(request: Request):
+        """v1.31.0: pure-compute pattern detection — list offerable
+        recurring patterns (after cooldown / accepted filter).
+
+        Returns {"patterns": [{"id", "kind", "occurrences",
+        "description"}, ...]}. No LLM call here — only pattern
+        detection over the local trace + log.jsonl.
+
+        Calling this endpoint marks the surfaced patterns as ``offered``
+        (same shape as cli_rich's /skills suggestions: cooldown timer
+        starts when the user actually sees the pattern). The mark is
+        capped at the top 10 to keep parity with the cli_rich output.
+        """
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            from .. import skill_proposer
+            patterns = skill_proposer.list_offerable() or []
+            out = []
+            for p in patterns[:10]:
+                out.append({
+                    "id": p.id,
+                    "kind": p.kind,
+                    "occurrences": int(p.occurrences),
+                    "description": p.description,
+                })
+                # Mark as offered so the cooldown timer respects the UX.
+                try:
+                    skill_proposer.mark_offered(p.id)
+                except Exception:
+                    pass
+            return JSONResponse({
+                "patterns": out,
+                "total": len(patterns),
+                "cooldown_days": int(
+                    getattr(skill_proposer, "COOLDOWN_DAYS", 7)
+                ),
+            })
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"suggestions failed: {e}"}, status_code=500,
+            )
+
+    @app.post("/api/skills/suggestions/{pattern_id}/propose")
+    async def api_skill_propose(pattern_id: str, request: Request):
+        """v1.31.0: LLM-draft a skill from a detected pattern.
+
+        Mutating endpoint — same gating as /api/skills/promote.
+        Returns {"ok", "name", "path", "state"} on success or
+        {"error", ...} on failure. Failure to find the pattern id
+        returns 404 (rather than 200 with error key) so the client
+        can distinguish.
+        """
+        auth_sid, err_resp, ip = _gate_post(
+            request, f"/api/skills/suggestions/{pattern_id}/propose",
+        )
+        if err_resp is not None:
+            return err_resp
+        try:
+            from .. import skill_proposer
+            patterns = skill_proposer.detect()
+            target = next(
+                (p for p in patterns if p.id == pattern_id), None,
+            )
+            if target is None:
+                return JSONResponse(
+                    {"error": f"no pattern with id {pattern_id}"},
+                    status_code=404,
+                )
+            path = skill_proposer.draft_skill(target)
+            web_audit.mutate(
+                auth_sid, ip,
+                f"/api/skills/suggestions/{pattern_id}/propose",
+                [target.kind],
+            )
+            return JSONResponse({
+                "ok": True,
+                "name": path.stem,
+                "path": str(path),
+                "state": "quarantined",
+            })
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"propose failed: {e}"}, status_code=500,
+            )
+
+    @app.post("/api/skills/suggestions/{pattern_id}/decline")
+    async def api_skill_decline(pattern_id: str, request: Request):
+        """v1.31.0: silence a pattern offer for the cooldown window.
+
+        Pure state-write — no LLM. Mutating endpoint though, so we
+        gate it the same way for consistency + audit trail.
+        """
+        auth_sid, err_resp, ip = _gate_post(
+            request, f"/api/skills/suggestions/{pattern_id}/decline",
+        )
+        if err_resp is not None:
+            return err_resp
+        try:
+            from .. import skill_proposer
+            skill_proposer.mark_declined(pattern_id)
+            web_audit.mutate(
+                auth_sid, ip,
+                f"/api/skills/suggestions/{pattern_id}/decline",
+                [],
+            )
+            return JSONResponse({
+                "ok": True,
+                "cooldown_days": int(
+                    getattr(skill_proposer, "COOLDOWN_DAYS", 7)
+                ),
+            })
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"decline failed: {e}"}, status_code=500,
+            )
+
     @app.post("/api/skills/install-bundled")
     async def api_skills_install_bundled(request: Request):
         """v1.22.1: install bundled skill catalog into ~/.janus/skills/.

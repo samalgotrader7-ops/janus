@@ -104,6 +104,17 @@
           install/promote via cli &mdash; UI controls in v1.22.1.
         </span>
       </div>
+      <!-- v1.31.0: skill_proposer suggestions block. Shows offerable
+           recurring patterns + draft / decline buttons. Hidden when
+           there are no patterns to surface. -->
+      <div id="skills-suggestions-block" style="display:none; margin-bottom:12px;">
+        <h3 style="margin:0 0 6px 0; font-size:0.95em;">
+          🪄 suggested skills
+          <span id="skills-suggestions-count"
+                style="color:#888; font-weight:400; font-size:0.85em;"></span>
+        </h3>
+        <div id="skills-suggestions-list" class="item-list"></div>
+      </div>
       <div id="skills-list" class="item-list"></div>
     </section>
 
