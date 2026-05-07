@@ -23,8 +23,10 @@ path; we leave the seam here.
 """
 
 from __future__ import annotations
+import os
 import re
 import subprocess
+
 from typing import Callable
 
 from . import base
@@ -67,6 +69,176 @@ _BARE_JANUS_RE = re.compile(
     + r"janus(?:\.exe|\.cmd|\.py)?"  # the binary name
     + r"(?=\s|$|[|;&])"              # arg-boundary
 )
+
+
+def _ancestor_pids() -> set[int]:
+    """v1.24.4: walk up the process tree starting at our own PID.
+
+    Returns the set of PIDs that, if killed, would also kill Janus.
+    On POSIX uses /proc/<pid>/status PPid line (no ps dependency).
+    On Windows uses os.getppid() one hop. Failure-silent — if we can't
+    walk the tree we return just our own PID, which still catches the
+    most common case (the model's `kill <janus_pid>` self-shot).
+    """
+    pids: set[int] = set()
+    try:
+        cur = os.getpid()
+        pids.add(cur)
+        # Always include direct parent on POSIX + Windows.
+        try:
+            pids.add(os.getppid())
+        except OSError:
+            pass
+        # On POSIX, walk up to the session leader via /proc.
+        if os.name == "posix":
+            for _ in range(8):  # bounded — don't loop forever on broken /proc
+                try:
+                    status = (
+                        open(f"/proc/{cur}/status", "r", encoding="ascii")
+                        .read()
+                    )
+                except OSError:
+                    break
+                ppid = None
+                for line in status.splitlines():
+                    if line.startswith("PPid:"):
+                        try:
+                            ppid = int(line.split()[1])
+                        except (IndexError, ValueError):
+                            ppid = None
+                        break
+                if ppid is None or ppid <= 1:
+                    break
+                pids.add(ppid)
+                cur = ppid
+    except Exception:
+        pass
+    return pids
+
+
+# Process names that, if killed by name (killall / pkill -f), would
+# take Janus down. Conservative — if there's any chance the pattern
+# matches our own python interpreter, refuse.
+_OUR_PROCESS_NAMES = {"janus", "python", "python3", "python.exe", "python3.exe"}
+
+
+# kill / pkill / killall command detector.
+_KILL_RE = re.compile(
+    _CMD_BOUNDARY + r"(?:/[^\s|;&]*?/)?(kill|pkill|killall)(?=\s|$|[|;&])",
+    re.IGNORECASE,
+)
+
+
+def _extract_kill_target_pids(cmd: str) -> list[tuple[int, str]]:
+    """Extract numeric PIDs from kill/pkill commands in `cmd`.
+
+    Returns a list of (pid, original_token) for every numeric arg that
+    looks like a PID. Conservative — only catches `kill <num>` and
+    `pkill -P <num>` shapes, not name-based killing (handled separately).
+    """
+    out: list[tuple[int, str]] = []
+    for m in _KILL_RE.finditer(cmd):
+        # Take the substring after the kill word until the next shell
+        # separator (; | && >) so we don't pick up PIDs from later
+        # commands in a chain.
+        rest = cmd[m.end():]
+        boundary = rest.find(";")
+        for sep in ("|", "&", ">", "<"):
+            i = rest.find(sep)
+            if i >= 0 and (boundary < 0 or i < boundary):
+                boundary = i
+        if boundary >= 0:
+            rest = rest[:boundary]
+        # Tokenize on whitespace; numeric tokens are PIDs (skip flags).
+        for tok in rest.split():
+            if tok.startswith("-"):
+                continue
+            # Strip surrounding quotes.
+            tok_clean = tok.strip("'\"")
+            try:
+                out.append((int(tok_clean), tok))
+            except ValueError:
+                continue
+    return out
+
+
+def _check_self_kill(cmd: str) -> str | None:
+    """v1.24.4: refuse commands that would terminate Janus itself.
+
+    Triggered the day Sam asked Janus to "restart janus-web" — the
+    model called shell with `kill 44760 ; sleep 1 ; janus web ...` but
+    44760 was Janus's own PID. The CLI immediately died ("Terminated"),
+    leaving Sam looking at a bash prompt with no agent.
+
+    Detection covers:
+      * `kill <pid>` where <pid> is our PID or any ancestor.
+      * `pkill -P <pid>` likewise.
+      * `killall <name>` / `pkill <name>` where <name> matches our
+        process name (janus, python, python3).
+      * Hard-stop signals: `kill -9 ...` is checked the same way.
+    """
+    s = cmd.strip()
+    if not s:
+        return None
+
+    matches = list(_KILL_RE.finditer(s))
+    if not matches:
+        return None
+
+    danger_pids = _ancestor_pids()
+
+    # 1. Numeric PID match.
+    for pid, tok in _extract_kill_target_pids(s):
+        if pid in danger_pids:
+            return (
+                f"refused: command would kill Janus itself "
+                f"(pid {pid} is in the agent's process ancestry "
+                f"{sorted(danger_pids)}). Sam's incident "
+                f"2026-05-07: model ran `kill 44760` to restart janus-web "
+                f"but 44760 was the Janus process itself; the CLI died "
+                f"mid-task. To restart janus-web, ask the user to run "
+                f"`systemctl --user restart janus-web` from a separate "
+                f"shell — Janus shouldn't kill its own ancestor processes."
+            )
+
+    # 2. Name-based kill: killall / pkill <name>.
+    for m in matches:
+        verb = m.group(1).lower()
+        if verb not in ("killall", "pkill"):
+            continue
+        rest = s[m.end():].lstrip()
+        # Walk the args looking for an unquoted name token.
+        boundary = rest.find(";")
+        for sep in ("|", "&", ">", "<"):
+            i = rest.find(sep)
+            if i >= 0 and (boundary < 0 or i < boundary):
+                boundary = i
+        if boundary >= 0:
+            rest = rest[:boundary]
+        for tok in rest.split():
+            if tok.startswith("-"):
+                continue
+            t = tok.strip("'\"")
+            # Match against our known process names (case-insensitive).
+            if t.lower() in _OUR_PROCESS_NAMES:
+                return (
+                    f"refused: `{verb} {t}` would kill Janus itself or "
+                    f"its python interpreter. To restart a Janus "
+                    f"sub-service (web / telegram / daemon), use "
+                    f"`systemctl --user restart janus-<name>` or have "
+                    f"the user run the restart from a separate shell."
+                )
+            # Substring match for safety: 'janus' inside 'janus-web' would
+            # also be killed by `pkill janus`.
+            if "janus" in t.lower():
+                return (
+                    f"refused: `{verb} {t}` would match the Janus "
+                    f"process itself (substring 'janus'). Use "
+                    f"`pkill -f janus-web` (more specific) only if you "
+                    f"can rule out matching the agent."
+                )
+
+    return None
 
 
 def _check_recursive_janus(cmd: str) -> str | None:
@@ -150,6 +322,13 @@ class Shell(base.Tool):
         # The user shouldn't even see the y/N prompt for something that
         # would deadlock anyway.
         refusal = _check_recursive_janus(cmd)
+        if refusal:
+            return refusal
+
+        # v1.24.4: refuse self-killing (kill <our_pid>, killall janus, etc.).
+        # Same pre-approval check — the agent shouldn't be approved to
+        # commit suicide.
+        refusal = _check_self_kill(cmd)
         if refusal:
             return refusal
 

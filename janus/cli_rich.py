@@ -1899,7 +1899,16 @@ def main() -> None:
         # so the user sees Janus is alive during the silent gather phase
         # (multiple fs_read / web_fetch / etc. before the first text
         # token). Without this, long task setups look like a hang.
-        console.print("[magenta dim]⚡ thinking…[/magenta dim]")
+        # v1.24.4: replaced the static thinking heartbeat with a live
+        # status line (status_line.StatusLine) — updates every 400ms
+        # showing elapsed time + token count + current verb. Falls
+        # back to the old static line on non-TTY / JANUS_NO_STATUS_LINE.
+        from . import status_line as _sl
+        status = _sl.StatusLine()
+        state["_status_line"] = status
+        if status._disabled:
+            console.print("[magenta dim]⚡ thinking…[/magenta dim]")
+        status.start()
 
         try:
             t0 = time.time()
@@ -1927,6 +1936,10 @@ def main() -> None:
             record["error"] = f"execute: {e}"
             logger.write(record)
             continue
+        finally:
+            # status.stop is idempotent; runs even on continue/return.
+            status.stop()
+            state.pop("_status_line", None)
 
         # v1.19.0 Phase 4: drip-mode post-turn — after the assistant
         # replies, ask the next drip question (one per turn while quota
@@ -2051,7 +2064,18 @@ def _render_step_factory(console, state=None):
     state = state or {}
     state.setdefault("_stream_buffer", "")
 
+    def _status() -> "object | None":
+        """v1.24.4: short helper to fetch the active StatusLine.
+        Returns None if status is disabled or not started."""
+        return state.get("_status_line")
+
+    def _clear_status_for_print() -> None:
+        sl = _status()
+        if sl is not None:
+            sl.clear()
+
     def render_step(step: dict) -> None:
+        sl = _status()
         if step["type"] == "model_start":
             # v1.5.3: heartbeat at every LLM call boundary so the user
             # sees activity at every step, not just step 0. Step 0 is
@@ -2059,11 +2083,18 @@ def _render_step_factory(console, state=None):
             # steps 1+ are subsequent model turns within the same
             # user-facing turn (post-tool-call cycles).
             step_num = step.get("step", 0)
+            if sl is not None:
+                sl.set_verb("calling model" if step_num > 0 else "thinking")
             if step_num > 0:
                 _flush_stream(console, state)
-                console.print(
-                    f"[magenta dim]⚡ step {step_num + 1} — calling model…[/]"
-                )
+                _clear_status_for_print()
+                # Avoid printing a per-step heartbeat line if the live
+                # status is active — the status already shows what's
+                # happening. Only print on the static fallback.
+                if sl is None or sl._disabled:
+                    console.print(
+                        f"[magenta dim]⚡ step {step_num + 1} — calling model…[/]"
+                    )
         elif step["type"] == "tool_call":
             verbose = state.get("verbose", False)
             limit = 200 if verbose else 60
@@ -2074,14 +2105,34 @@ def _render_step_factory(console, state=None):
             # Flush any in-flight stream chunk first so it doesn't get
             # interleaved with the tool call line.
             _flush_stream(console, state)
+            _clear_status_for_print()
+            if sl is not None:
+                # v1.24.4: switch verb to the per-tool description.
+                from . import status_line as _sl
+                sl.set_verb(_sl.verb_for_tool(step["tool"]))
             console.print(
                 f"[dim]   {branding.TOOL_CALL_ARROW} {step['tool']}({args_brief})[/]"
             )
         elif step["type"] == "tool_result":
+            _clear_status_for_print()
             preview = step.get("result_preview", "")
             head = preview.splitlines()[0][:80] if preview else ""
             if head:
                 console.print(f"[dim]    {branding.TOOL_OK} {head}[/]")
+            # v1.24.4: refresh token count from cost.turn_stats — gives
+            # the user a sense of how the model burn is progressing.
+            if sl is not None:
+                try:
+                    from . import cost as _cost
+                    ts = _cost.turn_stats()
+                    sl.set_tokens(
+                        int(ts.prompt_tokens) + int(ts.completion_tokens),
+                    )
+                except Exception:
+                    pass
+                # Verb back to "thinking" while we wait for the next
+                # model call after this tool's result.
+                sl.set_verb("thinking")
         elif step["type"] == "recovered_tool_call":
             # v1.17.2 — model emitted a tool call as JSON in content
             # rather than a proper tool_calls field. Janus recovered it
@@ -2089,6 +2140,7 @@ def _render_step_factory(console, state=None):
             # endpoint is misconfigured (likely missing
             # --enable-auto-tool-choice on the vLLM side).
             _flush_stream(console, state)
+            _clear_status_for_print()
             console.print(
                 f"[yellow]⚠ recovered tool call from content:[/] "
                 f"[bold]{step.get('tool', '?')}[/] "
@@ -2100,6 +2152,9 @@ def _render_step_factory(console, state=None):
             # tells the user "yes, the model stalled — Janus is pushing
             # it to continue" rather than leaving a silent gap.
             _flush_stream(console, state)
+            _clear_status_for_print()
+            if sl is not None:
+                sl.set_verb("nudging stalled model")
             reason = step.get("reason", "?")
             preview = step.get("preview", "")
             console.print(
@@ -2113,6 +2168,10 @@ def _render_step_factory(console, state=None):
                 # render as mojibake (broken locale / non-UTF-8 stdout).
                 # On healthy terminals this is a no-op.
                 text = branding.emoji_safe_text(text)
+                # v1.24.4: pause the status spinner while we own the
+                # cursor for raw stream writes.
+                if sl is not None and not state.get("_stream_buffer"):
+                    sl.begin_streaming()
                 # Use raw stdout write for unbuffered streaming feel; rich
                 # would re-render the whole panel for each chunk.
                 console.file.write(text)
@@ -2120,6 +2179,15 @@ def _render_step_factory(console, state=None):
                 state["_stream_buffer"] = state.get("_stream_buffer", "") + text
         elif step["type"] == "final":
             _flush_stream(console, state)
+            if sl is not None:
+                sl.end_streaming()
+                sl.clear()
+        elif step["type"] == "soft_cap_warning":
+            _clear_status_for_print()
+            if sl is not None:
+                sl.set_verb("wrapping up (soft cap)")
+        elif step["type"] == "step_limit_reached":
+            _clear_status_for_print()
     return render_step
 
 
