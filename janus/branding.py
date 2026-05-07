@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-VERSION = "1.24.5"
+VERSION = "1.24.6"
 TAGLINE = "intent-first · safety-first agent"
 
 
@@ -44,8 +44,13 @@ def _terminal_is_emoji_safe() -> bool:
     """Heuristic: is the current terminal likely to render 4-byte UTF-8?
 
     Returns True when stdout is bound to a UTF-8 encoder AND the locale
-    looks reasonable. False when LANG/LC_ALL is C/POSIX/ANSI_X3.4-1968,
-    or when stdout encoding is not UTF-8.
+    looks reasonable AND we don't appear to be under a tmux session
+    whose default-terminal isn't UTF-8 capable.
+
+    Sam's 2026-05-07 deploy: tmux on Ubuntu with LANG=en_US.UTF-8 and a
+    UTF-8 stdout encoder STILL mangled emoji + box-drawing chars,
+    because tmux's default TERM ('screen' / 'screen-256color') passes
+    bytes through a 7-bit pipeline. Detect that combo and bail.
     """
     try:
         enc = (getattr(_sys.stdout, "encoding", None) or "").lower()
@@ -64,7 +69,17 @@ def _terminal_is_emoji_safe() -> bool:
         return _os.name != "posix"
     if lang in ("c", "posix", "ansi_x3.4-1968"):
         return False
-    return "utf" in lang or lang.startswith("en") or lang.startswith("en_")
+    if not ("utf" in lang or lang.startswith("en") or lang.startswith("en_")):
+        return False
+    # Inside tmux + TERM lacks any UTF-8 hint → tmux is almost certainly
+    # not configured with `set -g default-terminal "tmux-256color"` or
+    # similar. Keep it conservative — false negatives are fine because
+    # the user can always export JANUS_NO_EMOJI=0 to force emoji on.
+    if _os.environ.get("TMUX"):
+        term = (_os.environ.get("TERM") or "").lower()
+        if not ("utf" in term or "tmux" in term):
+            return False
+    return True
 
 
 def _emoji_disabled() -> bool:
@@ -98,30 +113,68 @@ def glyph(emoji: str, ascii_fallback: str) -> str:
 
 
 def emoji_safe_text(text: str) -> str:
-    """Strip 4-byte UTF-8 emoji from arbitrary text when the terminal
-    can't render them. Conservative — only replaces common emoji
-    ranges, leaves BMP characters (arrows, box-drawing, ✓ ✗) alone.
+    """Strip non-ASCII glyphs that mangle on broken locales (4-byte
+    emoji, box-drawing, geometric shapes used in ASCII-art tables).
+
+    Sam's 2026-05-07 session: model output a markdown ASCII-art frame
+    using ╔ ═ ║ ╗ etc. (U+2500-U+257F) and tmux mangled them into
+    ``Ã¢ÂÂ%`` mojibake. Pre-1.24.6 we only stripped 4-byte emoji and
+    left box-drawing alone. Now both ranges go.
+
+    A small allowlist of single-codepoint pictographs (→ ← ↑ ↓ ✓ ✗ ●)
+    that render reliably on any UTF-8 terminal stays intact — Janus's
+    own logo + tool-result markers depend on them. Box-drawing chars
+    are replaced with safe ASCII (``+`` for corners/junctions, ``-``
+    for horizontals, ``|`` for verticals, ``=`` for double horizontals)
+    so an ASCII-art table doesn't collapse into garbage.
     """
     if not _emoji_disabled():
         return text
-    out = []
+    # Box-drawing replacements: pick a sensible ASCII char per shape so
+    # the visual structure of a table or diagram survives even when the
+    # model insisted on Unicode boxes.
+    _box_substitute = {
+        # Light/heavy horizontals (U+2500-U+250B alternate types).
+        0x2500: "-", 0x2501: "-", 0x2504: "-", 0x2505: "-",
+        0x2508: "-", 0x2509: "-", 0x254C: "-", 0x254D: "-",
+        # Light/heavy verticals.
+        0x2502: "|", 0x2503: "|", 0x2506: "|", 0x2507: "|",
+        0x250A: "|", 0x250B: "|", 0x254E: "|", 0x254F: "|",
+        # Double-line block (U+2550-U+2551).
+        0x2550: "=", 0x2551: "|",
+    }
+    # Allowed BMP pictographs Janus renders deliberately (logo + UI).
+    _allowed_in_emoji_range = {
+        0x2192, 0x2190, 0x2191, 0x2193,   # → ← ↑ ↓
+        0x2713, 0x2717,                    # ✓ ✗
+        0x25CF, 0x25B8, 0x25C2,            # ● ▸ ◂
+    }
+    out: list[str] = []
     for ch in text:
         cp = ord(ch)
-        # Common emoji ranges (not exhaustive; we err on the side of
-        # leaving text intact). Replace with empty string — ASCII
-        # context (square brackets, labels) usually carries the meaning.
+        # 1) Emoji / dingbat / misc-symbol ranges (4-byte UTF-8 mostly).
         if (
             0x1F300 <= cp <= 0x1FAFF   # Misc symbols, emoticons, transport
             or 0x2600 <= cp <= 0x27BF  # Misc symbols + dingbats
             or 0x2B00 <= cp <= 0x2BFF  # Misc symbols and arrows
         ):
-            # Allow common BMP arrows that we use everywhere.
-            if cp in (0x2192, 0x2190, 0x2191, 0x2193,  # ← ↑ ↓ →
-                      0x2713, 0x2717,                   # ✓ ✗
-                      0x25CF, 0x25B8, 0x25C2):          # ● ▸ ◂
+            if cp in _allowed_in_emoji_range:
                 out.append(ch)
-                continue
-            # Otherwise drop.
+            # else drop
+            continue
+        # 2) Box-drawing block (U+2500-U+257F) — replace with ASCII so
+        #    tables don't visually disintegrate. Default to '+' for
+        #    anything we don't have a specific replacement for; that
+        #    looks like a generic junction.
+        if 0x2500 <= cp <= 0x257F:
+            out.append(_box_substitute.get(cp, "+"))
+            continue
+        # 3) Block elements (U+2580-U+259F) — ▓ ▒ ░ ▀ ▄ etc. Drop.
+        if 0x2580 <= cp <= 0x259F:
+            continue
+        # 4) Geometric shapes (U+25A0-U+25FF) outside the allowlist —
+        #    typically ■ □ ▲ ▼ ◆ ◇ ◯ etc. Drop them.
+        if 0x25A0 <= cp <= 0x25FF and cp not in _allowed_in_emoji_range:
             continue
         out.append(ch)
     return "".join(out)

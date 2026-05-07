@@ -52,6 +52,60 @@ from . import config
 # overwrite triggers the warning.
 OVERWRITE_WARN_BYTES = 100 * 1024  # 100 KB
 
+
+# ---------- v1.24.6: protected-path warnings on fs_write / fs_edit ----------
+#
+# Sam's 2026-05-07 7:26 AM session: agent proposed
+# `fs_write docs/SWARM_EXPLAINER.md` after being asked "explain how
+# swarms work". Sam's CLAUDE.md says "Never edit docs/ without
+# asking" — but the prompt rule alone wasn't enough.
+#
+# This is a borderline-shape warning, NOT a block. The user can still
+# approve. We just want a yellow flag visible in the approval prompt
+# AND in the model's observation, so both layers see "wait, this dir
+# is human-curated".
+#
+# Each entry: (matcher, label). The matcher is a callable taking a
+# pathlib.Path and returning True iff the warning should fire.
+
+def _path_segment_match(segments: tuple[str, ...]):
+    """Returns a matcher that fires when any segment of the path
+    equals one of ``segments``. Catches both 'docs/foo.md' (relative)
+    and '/abs/repo/docs/foo.md' (absolute).
+    """
+    seg_set = frozenset(segments)
+    def _m(p):
+        return any(part in seg_set for part in p.parts)
+    return _m
+
+
+def _path_basename_match(names: tuple[str, ...]):
+    """Returns a matcher that fires when the path's basename is in
+    ``names``. For top-level files like LICENSE / CHANGELOG.md."""
+    name_set = frozenset(names)
+    def _m(p):
+        return p.name in name_set
+    return _m
+
+
+PROTECTED_PATH_RULES: tuple[tuple[object, str], ...] = (
+    (_path_segment_match(("docs",)),
+     "writing inside docs/ — human-curated documentation, "
+     "confirm with user before editing"),
+    (_path_segment_match((".github",)),
+     "writing inside .github/ — CI / repo metadata, "
+     "may break workflows"),
+    (_path_segment_match(("vendor", "node_modules")),
+     "writing inside vendor/ or node_modules/ — third-party code, "
+     "edits get blown away on next install"),
+    (_path_basename_match(("LICENSE", "LICENSE.md", "LICENSE.txt")),
+     "writing the LICENSE file — legal-relevant, "
+     "confirm with user before editing"),
+    (_path_basename_match(("CHANGELOG.md", "CHANGES.md", "HISTORY.md")),
+     "writing the CHANGELOG — release-process file, "
+     "many projects gate this on release"),
+)
+
 # Shell commands that are legitimate but commonly cause regret.
 _SHELL_REGRET_PATTERNS = (
     (r"\bgit\s+push\s+(?:--?force|--?force-with-lease|-f)\b",
@@ -108,6 +162,23 @@ def check(tool_name: str, args: dict) -> str:
 # ---------- Per-tool checkers ----------
 
 
+def _check_protected_paths(p: Path) -> list[str]:
+    """v1.24.6: return any protected-path warnings for ``p``.
+
+    Fires on docs/, .github/, vendor/, node_modules/, LICENSE,
+    CHANGELOG.md, etc. — directories the agent shouldn't write to
+    without explicit user permission. See PROTECTED_PATH_RULES.
+    """
+    out: list[str] = []
+    for matcher, label in PROTECTED_PATH_RULES:
+        try:
+            if matcher(p):
+                out.append(label)
+        except Exception:
+            continue
+    return out
+
+
 def _check_fs_write(args: dict) -> list[str]:
     out: list[str] = []
     path = args.get("path")
@@ -117,8 +188,11 @@ def _check_fs_write(args: dict) -> list[str]:
         p = Path(str(path)).expanduser()
     except (TypeError, ValueError):
         return out
+    # Protected-path warning fires whether the file exists or not —
+    # creating a new file inside docs/ is exactly the case Sam refused.
+    out.extend(_check_protected_paths(p))
     if not p.is_file():
-        return out  # creating new file, no warning
+        return out  # creating new file, no overwrite warning
     try:
         size = p.stat().st_size
     except OSError:
@@ -140,6 +214,9 @@ def _check_fs_edit(args: dict) -> list[str]:
         p = Path(str(path)).expanduser()
     except (TypeError, ValueError):
         return out
+    # Protected-path warning works for fs_edit too — model could
+    # bypass fs_write by editing a doc instead of overwriting.
+    out.extend(_check_protected_paths(p))
     if not p.is_file():
         return out
     # In a git repo + this file has uncommitted changes? Cheap check via
