@@ -29,26 +29,16 @@ import requests
 from . import config
 
 
-def chat_stream(
+def _stream_one(
+    chosen_model: str,
     messages: list[dict[str, Any]],
     tools: list[dict] | None = None,
     temperature: float = 0.7,
-    model: str | None = None,
 ) -> Iterator[Any]:
-    """Streaming chat completion.
+    """Single-attempt streaming generator (v1.29.2 extraction).
 
-    Yields:
-      str — each text delta as it arrives.
-      dict (final yield) — the assembled message:
-            {"role": "assistant", "content": "...", "tool_calls": [...]}
-        Caller can read tool_calls from this for the next loop iteration.
-
-    `model` overrides config.MODEL per call (v1.4 — used by swarms to
-    mix cheap/expensive models per role).
-
-    Retry/backoff applies only to the INITIAL connect. Mid-stream
-    failures (server hangs up partway through SSE) are not resumable —
-    the partial response is returned.
+    Yields text deltas + a final assembled message dict. Caller is
+    responsible for chain iteration / fall-through.
     """
     url = f"{config.API_BASE}/chat/completions"
     headers = {
@@ -57,7 +47,6 @@ def chat_stream(
         "Accept": "text/event-stream",
     }
     from . import llm
-    chosen_model = model or config.MODEL
     payload: dict[str, Any] = {
         "model": chosen_model,
         "messages": llm.apply_cache_markers(messages),
@@ -147,3 +136,75 @@ def chat_stream(
     if tool_acc:
         final["tool_calls"] = [tool_acc[i] for i in sorted(tool_acc)]
     yield final
+
+
+def chat_stream(
+    messages: list[dict[str, Any]],
+    tools: list[dict] | None = None,
+    temperature: float = 0.7,
+    model: str | None = None,
+) -> Iterator[Any]:
+    """Streaming chat completion with v1.29.2 fall-through support.
+
+    Yields:
+      str — each text delta as it arrives.
+      dict (final yield) — the assembled message:
+            {"role": "assistant", "content": "...", "tool_calls": [...]}
+        Caller can read tool_calls from this for the next loop iteration.
+
+    `model` overrides config.MODEL per call (v1.4 — used by swarms to
+    mix cheap/expensive models per role).
+
+    v1.29.2 — multi-model fall-through (streaming):
+      * BEFORE first chunk: 5xx / Connection / Timeout falls through
+        to the next model in JANUS_MODEL_FALLBACK (chain via
+        ``model_fallback.parse_chain``).
+      * AFTER any chunk: failures are re-raised. Switching models
+        mid-stream would chimera the output (model-A prefix +
+        model-B suffix) — far worse than a clean error.
+
+    Retry/backoff (v1.4) within ``_post_with_retry`` still applies
+    per-model. Fall-through fires only after that retry budget is
+    exhausted on the current model.
+    """
+    from . import model_fallback as _mfb
+    primary = model or config.MODEL
+    chain = _mfb.parse_chain(primary)
+    if not chain:
+        chain = [primary]
+
+    last_exc: BaseException | None = None
+    for idx, attempt_model in enumerate(chain):
+        any_yielded = False
+        try:
+            for item in _stream_one(
+                attempt_model, messages,
+                tools=tools, temperature=temperature,
+            ):
+                any_yielded = True
+                yield item
+            return
+        except BaseException as e:
+            if not isinstance(e, Exception):
+                # KeyboardInterrupt / SystemExit propagate immediately
+                raise
+            last_exc = e
+            if any_yielded:
+                # Already streamed text from this model — switching
+                # would chimera the output. Fail loud.
+                raise
+            if not _mfb.is_fallback_trigger(e):
+                raise
+            if idx + 1 < len(chain):
+                _mfb.record_fallback(
+                    from_model=attempt_model,
+                    to_model=chain[idx + 1],
+                    reason=_mfb.reason_string(e),
+                )
+                continue
+            raise
+    # Unreachable in practice — chain exhaustion always re-raises
+    # inside the loop. Defensive guard for any future refactor.
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("model_fallback: chain exhausted with no exception")
