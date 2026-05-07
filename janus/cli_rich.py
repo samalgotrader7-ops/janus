@@ -499,6 +499,59 @@ def _show_skill_table(console, items) -> None:
     console.print(t)
 
 
+def _is_high_risk_grant(tool_name: str, capability) -> tuple[bool, str]:
+    """v1.24.6 #5: decide whether the [s]ession/[a]lways grant options
+    should be SUPPRESSED for this approval prompt.
+
+    A "high-risk grant" is one where granting the (tool, risk) pair
+    blanket-approves a class of action whose target the grant doesn't
+    constrain — e.g. `[a]lways approve fs_write` would auto-approve
+    EVERY future fs_write, including writes to docs/, .github/,
+    LICENSE, etc. Sam's 2026-05-07 session: he was offered
+    [a]lways for the docs/SWARM_EXPLAINER.md write; one fat-finger
+    of `a` and Janus would silently overwrite docs/ forever.
+
+    Returns (is_high_risk, reason). Reason renders in the prompt
+    so the user understands why the options shrank.
+
+    Triggers:
+      * fs_write/fs_edit/fs_multi_edit on a protected path
+        (docs/, .github/, vendor/, node_modules/, LICENSE, CHANGELOG.md)
+      * shell/ssh_exec with a regret-pattern command
+        (git push --force, terraform destroy, kubectl delete,
+         rm -rf $/~/, raw block-device write, etc.)
+    """
+    target = ""
+    if isinstance(capability, (tuple, list)) and len(capability) >= 3:
+        target = str(capability[2] or "")
+
+    if tool_name in ("fs_write", "fs_edit", "fs_multi_edit") and target:
+        try:
+            from . import tool_guardrails
+            from pathlib import Path as _P
+            path_obj = _P(target).expanduser()
+            for matcher, _label in tool_guardrails.PROTECTED_PATH_RULES:
+                try:
+                    if matcher(path_obj):
+                        return True, f"target inside a protected path ({target})"
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    if tool_name in ("shell", "ssh_exec") and target:
+        try:
+            from . import tool_guardrails
+            import re as _re
+            for pattern, label in tool_guardrails._SHELL_REGRET_PATTERNS:
+                if _re.search(pattern, target):
+                    return True, f"command matches regret pattern ({label})"
+        except Exception:
+            pass
+
+    return False, ""
+
+
 def _make_mode_approver(console, mode_state: permissions.ModeState):
     """v1.0 approver: consults the active permission mode + tool risk class.
 
@@ -516,6 +569,13 @@ def _make_mode_approver(console, mode_state: permissions.ModeState):
         (tool_name, risk) that bypasses future prompts in this session
       * mode_state.session_grants is consulted BEFORE prompting, so
         the user sees the prompt at most once per "always" tool
+
+    v1.24.6 — high-risk prompt narrowing:
+      * For protected-path writes and regret-pattern shell commands,
+        suppress [s]ession and [a]lways. Only [Y]es/[N]o offered.
+        Prevents fat-fingering a permanent grant that would also
+        cover the unrelated cases the same (tool, risk) pair could
+        approve later in the session.
     """
     def approver(action_label: str, details: str, **kw) -> bool:
         risk = kw.get("risk") or permissions.risk_from_verb(
@@ -534,24 +594,37 @@ def _make_mode_approver(console, mode_state: permissions.ModeState):
 
         # ASK path. v1.24.0: check session grants BEFORE rendering anything.
         tool_name = str(kw.get("tool_name") or "")
+        capability = kw.get("capability")
         grant_key = (tool_name, str(risk))
-        if tool_name and mode_state.has_grant(grant_key):
+        high_risk, hr_reason = _is_high_risk_grant(tool_name, capability)
+        # Even if a session grant exists, a high-risk-now request must
+        # re-prompt — we don't want a `[a]lways approve fs_write` from
+        # earlier to silently green-light a docs/ write.
+        if (
+            tool_name and not high_risk
+            and mode_state.has_grant(grant_key)
+        ):
             console.print(
                 f"[dim]⚡ {action_label}[/] "
                 f"[dim](session-approved: {tool_name})[/]"
             )
             return True
 
+        title_suffix = (
+            f"  [dim](risk={risk}, mode={mode_state.current})[/]"
+        )
+        if high_risk:
+            title_suffix += f" [yellow](high-risk: {hr_reason})[/]"
         console.print(Panel(
             details,
-            title=f"[yellow]⚠ approval needed[/]: {action_label}  "
-                  f"[dim](risk={risk}, mode={mode_state.current})[/]",
-            border_style="yellow",
+            title=f"[yellow]⚠ approval needed[/]: {action_label}{title_suffix}",
+            border_style="red" if high_risk else "yellow",
         ))
-        # v1.24.0: prompt_toolkit-based prompt (when available) for
-        # consistent line editing + history-aware behavior. Falls back
-        # to input() if prompt_toolkit is missing.
-        prompt_text = "[Y]es  [s]ession  [a]lways  [N]o  > "
+        # v1.24.6 #5: narrow prompt for high-risk grants.
+        if high_risk:
+            prompt_text = "[Y]es  [N]o  > "
+        else:
+            prompt_text = "[Y]es  [s]ession  [a]lways  [N]o  > "
         ans = ""
         try:
             if HAVE_RICH:
@@ -564,6 +637,12 @@ def _make_mode_approver(console, mode_state: permissions.ModeState):
         if ans in ("y", "yes"):
             return True
         if ans in ("s", "session"):
+            if high_risk:
+                console.print(
+                    f"[yellow]→ session grant declined: {hr_reason}. "
+                    f"Approve once with `y` or refuse with `n`.[/]"
+                )
+                return False
             if tool_name:
                 mode_state.grant(grant_key)
                 console.print(
@@ -571,6 +650,12 @@ def _make_mode_approver(console, mode_state: permissions.ModeState):
                 )
             return True
         if ans in ("a", "always"):
+            if high_risk:
+                console.print(
+                    f"[yellow]→ persistent grant declined: {hr_reason}. "
+                    f"Approve once with `y` or refuse with `n`.[/]"
+                )
+                return False
             # v1.24.1: persistent grant — survives janus restart.
             if tool_name:
                 mode_state.grant_persistent(grant_key)
@@ -1639,7 +1724,7 @@ def _output_ends_with_question(output: str) -> bool:
 
 
 def _maybe_propose_memory(console, req: str, output: str,
-                          cache_snap=None) -> None:
+                          cache_snap=None, trace=None) -> None:
     if not config.MEMORY_PROPOSE_ENABLED:
         return
     try:
@@ -1649,6 +1734,31 @@ def _maybe_propose_memory(console, req: str, output: str,
         return
     ops = result.get("ops") or []
     cards = result.get("cards") or []
+
+    # v1.24.6 #4: harvest user-refusal events from the trace as
+    # constraint cards. Pure compute — no LLM call, applies silently
+    # because the user's click was already the consent gesture.
+    refusal_cards: list = []
+    if trace:
+        try:
+            from . import memory_refusal, session_context
+            scope = session_context.current_scope() or "cli"
+            refusal_cards = memory_refusal.cards_from_trace(
+                trace, current_scope=scope,
+            )
+            if refusal_cards:
+                written = memory.apply_cards(refusal_cards, gateway="cli")
+                if written:
+                    console.print(
+                        f"[dim]  · recorded {len(written)} user-refusal "
+                        f"constraint(s) — model will see these as cards "
+                        f"on future turns (review with /memory show <id>)[/]"
+                    )
+        except Exception:
+            # Refusal extraction is a courtesy — never block the
+            # main propose_diff path on its failure.
+            pass
+
     if not ops and not cards:
         return
 
@@ -2133,7 +2243,8 @@ def main() -> None:
         except Exception:
             pass
 
-        _maybe_propose_memory(console, req, output, cache_snap=cache_snap)
+        _maybe_propose_memory(console, req, output,
+                              cache_snap=cache_snap, trace=trace)
 
     console.print(f"[dim]bye.[/]")
 

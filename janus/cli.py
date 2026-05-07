@@ -1367,7 +1367,7 @@ def _output_ends_with_question(output: str) -> bool:
     return any(p in tail for p in QUESTION_PHRASES)
 
 
-def maybe_propose_memory(req, output, cache_snap=None):
+def maybe_propose_memory(req, output, cache_snap=None, trace=None):
     """Prompt-and-apply a memory diff. If `cache_snap` is provided and
     user.md is updated, refreshes the snapshot in place so subsequent
     turns see the new preamble (and the prompt cache invalidates for
@@ -1381,6 +1381,27 @@ def maybe_propose_memory(req, output, cache_snap=None):
         return
     ops = result.get("ops") or []
     cards = result.get("cards") or []
+
+    # v1.24.6 #4: capture user-refusal events as constraint cards.
+    # Same pattern as cli_rich._maybe_propose_memory — silent apply,
+    # no LLM call, never blocks the main propose_diff path.
+    if trace:
+        try:
+            from . import memory_refusal, session_context
+            scope = session_context.current_scope() or "cli"
+            refusal_cards = memory_refusal.cards_from_trace(
+                trace, current_scope=scope,
+            )
+            if refusal_cards:
+                written = memory.apply_cards(refusal_cards, gateway="cli")
+                if written:
+                    print(
+                        f"  {C.DIM}· recorded {len(written)} user-refusal "
+                        f"constraint(s){C.R}"
+                    )
+        except Exception:
+            pass
+
     if not ops and not cards:
         return
 
@@ -1719,7 +1740,7 @@ def main():
             index.sync()
         except Exception:
             pass
-        maybe_propose_memory(req, output, cache_snap=cache_snap)
+        maybe_propose_memory(req, output, cache_snap=cache_snap, trace=trace)
         print()
 
     n = len(logger.read_all())
