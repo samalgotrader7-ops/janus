@@ -1026,6 +1026,95 @@
     },
   });
 
+  // ---------- v1.29.4: MCP catalog browser panel ----------
+
+  registerPanel('mcp', {
+    async mount() {
+      const list = document.getElementById('mcp-list');
+      const refresh = document.getElementById('mcp-refresh');
+      if (!list) return;
+      const load = async () => {
+        clear(list);
+        list.appendChild(
+          el('div', { class: 'item' },
+             el('div', { class: 'item-meta' }, 'loading...'))
+        );
+        const r = await api('/api/mcp/catalog');
+        clear(list);
+        if (r.data.error) {
+          list.appendChild(
+            el('div', { class: 'item' },
+               el('div', { class: 'item-meta' }, r.data.error))
+          );
+          return;
+        }
+        const servers = r.data.servers || [];
+        if (servers.length === 0) {
+          list.appendChild(
+            el('div', { class: 'item' },
+               el('div', { class: 'item-meta' },
+                  'no MCP servers configured — add to ~/.janus/mcp/servers.json'))
+          );
+          return;
+        }
+        for (const s of servers) {
+          const stateClass = s.connected ? 'promoted' : 'quarantined';
+          const stateLabel = s.connected ? 'connected' : 'configured';
+          const item = el(
+            'div', { class: 'item' },
+            el(
+              'div', { class: 'item-title' },
+              el('span', { class: 'tag ' + stateClass }, stateLabel),
+              ' ',
+              s.name
+            ),
+            el(
+              'div', { class: 'item-meta' },
+              `${s.command} ${(s.args || []).join(' ')}`
+            )
+          );
+          if (s.error) {
+            item.appendChild(
+              el('div', { class: 'item-meta', style: 'color:#c43;' },
+                 'error: ' + s.error)
+            );
+          }
+          if (s.connected && s.tools && s.tools.length > 0) {
+            const toolListEl = el(
+              'div',
+              { class: 'item-meta',
+                style: 'margin-top:6px; font-family:ui-monospace,monospace;' }
+            );
+            for (const t of s.tools) {
+              toolListEl.appendChild(
+                el('div', { style: 'margin-bottom:4px;' },
+                   el('strong', {}, t.name),
+                   ` · ${t.param_count} param${t.param_count === 1 ? '' : 's'}`,
+                   ' — ',
+                   (t.description || '').slice(0, 100),
+                   el('br', {}),
+                   el('span', { style: 'color:#888; font-size:0.85em;' },
+                      `janus name: ${t.janus_name}`))
+              );
+            }
+            item.appendChild(toolListEl);
+          } else if (s.connected) {
+            item.appendChild(
+              el('div', { class: 'item-meta' }, '(no tools exposed)')
+            );
+          }
+          list.appendChild(item);
+        }
+        const liveCount = servers.filter(s => s.connected).length;
+        setFooter(
+          `${servers.length} server(s) · ${liveCount} connected`
+        );
+      };
+      if (refresh) refresh.onclick = load;
+      await load();
+    },
+  });
+
   // ---------- v1.22.3: settings panel ----------
 
   registerPanel('settings', {

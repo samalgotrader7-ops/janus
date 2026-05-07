@@ -44,6 +44,7 @@
       <li><a href="#shells" data-panel="shells">shells</a></li>
       <li><a href="#logs" data-panel="logs">logs</a></li>
       <li><a href="#cost" data-panel="cost">cost</a></li>
+      <li><a href="#mcp" data-panel="mcp">mcp</a></li>
       <li><a href="#settings" data-panel="settings">settings</a></li>
     </ul>
     <div style="padding:18px; font-size:0.74em; color:#999; line-height:1.5;">
@@ -216,6 +217,19 @@
       <div id="cost-summary" style="background:#fff; border:1px solid #e0e0e0;
            border-radius:4px; padding:14px; font-family:ui-monospace,monospace;
            font-size:0.9em; white-space:pre-wrap;"></div>
+    </section>
+
+    <!-- ---------- MCP panel (v1.29.4) ---------- -->
+    <section id="panel-mcp" class="panel">
+      <h2>MCP servers <span style="font-weight:400; color:#888;
+          font-size:0.85em; margin-left:8px;">read-only browser</span></h2>
+      <div class="panel-toolbar">
+        <button id="mcp-refresh" class="secondary" type="button">refresh</button>
+        <span style="color:#999; font-size:0.85em;">
+          connect/disconnect via cli — UI is browse-only.
+        </span>
+      </div>
+      <div id="mcp-list" class="item-list"></div>
     </section>
 
     <!-- ---------- Settings panel ---------- -->
