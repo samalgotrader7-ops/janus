@@ -461,6 +461,99 @@ def _cmd_interview_drip_rich(console, arg: str) -> bool:
     return True
 
 
+def _cmd_skills_suggestions(console, state: dict) -> bool:
+    """v1.28.0 — `/skills suggestions`: list recurring patterns the
+    skill_proposer detected over the current session + recent log.
+
+    Patterns in cooldown / already accepted are filtered out.
+    """
+    from . import skill_proposer
+    conv = state.get("conv")
+    current_trace = (
+        (conv.turns[-1].get("trace") if conv and conv.turns else None)
+        or state.get("last_trace")
+    )
+    patterns = skill_proposer.list_offerable(current_trace=current_trace)
+    if not patterns:
+        console.print(
+            "[dim]no recurring patterns detected yet — keep working "
+            "and Janus will surface suggestions as they emerge[/]"
+        )
+        return True
+    t = Table(show_header=True, header_style="bold cyan")
+    t.add_column("id", overflow="fold")
+    t.add_column("kind")
+    t.add_column("hits", justify="right", width=4)
+    t.add_column("description", overflow="fold")
+    for p in patterns[:10]:
+        t.add_row(p.id, p.kind, str(p.occurrences), p.description)
+        skill_proposer.mark_offered(p.id)
+    console.print(t)
+    console.print(
+        "[dim]  /skills propose <id>  → LLM-draft a skill (writes to "
+        "skills dir, state=quarantined)[/]\n"
+        "[dim]  /skills decline <id>  → silence for "
+        f"{skill_proposer.COOLDOWN_DAYS} days[/]"
+    )
+    return True
+
+
+def _cmd_skills_propose(console, state: dict, pattern_id: str) -> bool:
+    """v1.28.0 — `/skills propose <id>`: LLM-draft a skill from a
+    detected pattern. The draft lands as a quarantined skill the user
+    can /promote after review."""
+    from . import skill_proposer
+    pattern_id = (pattern_id or "").strip()
+    if not pattern_id:
+        console.print("[red]usage:[/] /skills propose <pattern-id>")
+        return True
+    conv = state.get("conv")
+    current_trace = (
+        (conv.turns[-1].get("trace") if conv and conv.turns else None)
+        or state.get("last_trace")
+    )
+    patterns = skill_proposer.detect(current_trace=current_trace)
+    target = next((p for p in patterns if p.id == pattern_id), None)
+    if target is None:
+        console.print(
+            f"[red]no pattern with id[/] [bold]{pattern_id}[/] "
+            "[dim](run /skills suggestions to see current ids)[/]"
+        )
+        return True
+    console.print(
+        f"[dim]drafting skill for pattern[/] [cyan]{target.id}[/] "
+        "[dim](one LLM call)…[/]"
+    )
+    try:
+        path = skill_proposer.draft_skill(
+            target, current_trace=current_trace,
+        )
+    except Exception as e:
+        console.print(f"[red]draft failed:[/] {type(e).__name__}: {e}")
+        return True
+    console.print(
+        f"  [green]drafted[/] {path.name} "
+        "[dim](state=quarantined; review and /promote when ready)[/]"
+    )
+    return True
+
+
+def _cmd_skills_decline(console, pattern_id: str) -> bool:
+    """v1.28.0 — `/skills decline <id>`: silence a pattern offer for
+    the cooldown window."""
+    from . import skill_proposer
+    pattern_id = (pattern_id or "").strip()
+    if not pattern_id:
+        console.print("[red]usage:[/] /skills decline <pattern-id>")
+        return True
+    skill_proposer.mark_declined(pattern_id)
+    console.print(
+        f"  [dim]declined[/] {pattern_id} "
+        f"[dim](silenced for {skill_proposer.COOLDOWN_DAYS} days)[/]"
+    )
+    return True
+
+
 def _cmd_skills_rich(console, arg: str) -> bool:
     """`/skills` — list, filter, or install bundled.
 
@@ -469,6 +562,9 @@ def _cmd_skills_rich(console, arg: str) -> bool:
       /skills <query>               filter by name/description substring
       /skills install-bundled       copy janus/skills_bundled/ → ~/.janus/skills/
       /skills install-bundled --force   overwrite existing skill files
+      /skills suggestions           v1.28.0: list detected recurring patterns
+      /skills propose <id>          v1.28.0: LLM-draft a skill for a pattern
+      /skills decline <id>          v1.28.0: silence a pattern for cooldown
     """
     arg = (arg or "").strip()
     if arg.startswith("install-bundled"):
@@ -1125,11 +1221,27 @@ def _dispatch(console, line: str, state: dict) -> bool:
         # v1.12.0: /skills validate runs the schema check across all
         # skill files. Other /skills <args> shapes go to the existing
         # skill catalog handler.
-        if arg.strip().lower() == "validate":
+        argl = arg.strip().lower()
+        if argl == "validate":
             from . import skill_preprocessing as _sp
             issues = _sp.validate_all()
             console.print(Markdown(_sp.render(issues)))
             return True
+        # v1.28.0: self-improving skills.
+        # /skills suggestions       — list detected recurring patterns
+        # /skills propose <id>      — LLM-draft a skill for a pattern
+        # /skills decline <id>      — silence a pattern for the cooldown
+        if argl == "suggestions":
+            return _cmd_skills_suggestions(console, state)
+        parts = arg.split(None, 1)
+        if parts and parts[0].lower() == "propose":
+            return _cmd_skills_propose(
+                console, state, parts[1] if len(parts) > 1 else "",
+            )
+        if parts and parts[0].lower() == "decline":
+            return _cmd_skills_decline(
+                console, parts[1] if len(parts) > 1 else "",
+            )
         return _cmd_skills_rich(console, arg)
     if cmd == "/swarm":
         from . import swarms as _swarms
