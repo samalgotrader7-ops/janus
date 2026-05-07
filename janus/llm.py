@@ -196,24 +196,22 @@ def apply_cache_markers(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def chat(
+def _chat_attempt(
+    chosen_model: str,
     messages: list[dict[str, Any]],
+    *,
     tools: list[dict] | None = None,
     json_mode: bool = False,
     temperature: float = 0.7,
-    model: str | None = None,
 ) -> dict:
-    """Single chat completion. Returns the raw 'message' object from the response.
-
-    `model` overrides config.MODEL for this call only. Used by swarm
-    sub-agents to mix cheap/expensive models per role.
-    """
+    """Single attempt — one model, one POST. Extracted from ``chat()``
+    in v1.28.3 so the public ``chat()`` can wrap this in a fallback
+    loop. Behavior identical to the pre-1.28.3 ``chat()`` body."""
     url = f"{config.API_BASE}/chat/completions"
     headers = {
         "Authorization": f"Bearer {config.API_KEY}",
         "Content-Type": "application/json",
     }
-    chosen_model = model or config.MODEL
     payload: dict[str, Any] = {
         "model": chosen_model,
         "messages": apply_cache_markers(messages),
@@ -232,13 +230,10 @@ def chat(
         url, headers=headers, json_payload=payload, timeout=config.LLM_TIMEOUT,
     )
     # v1.11.0 — feed the rate-limit tracker BEFORE raise_for_status so
-    # 429s are recorded even when the call ultimately fails. raise will
-    # then bubble the HTTPError up to the caller (preserving v1.4 retry
-    # semantics).
+    # 429s are recorded even when the call ultimately fails.
     try:
         from . import rate_limit
         provider = _provider_from_base(config.API_BASE)
-        # Tokens 0 if no body yet (429 / 5xx); we'll update on success below.
         rate_limit.record_request(
             provider=provider, model=chosen_model,
             tokens=0,
@@ -249,29 +244,19 @@ def chat(
         pass
 
     # v1.16.1 — turn opaque 404s into actionable errors.
-    # vLLM / Ollama / llama.cpp / vendored OpenAI-compat servers return 404
-    # when the requested model id isn't loaded. The bare requests.HTTPError
-    # message ("404 Client Error: Not Found for url: ...") is useless to the
-    # user. Common cause: an OpenRouter-style 'openai/Foo/Bar' model id
-    # configured against a direct vLLM endpoint that knows the model as
-    # 'Foo/Bar'. We detect that shape and suggest the fix.
-    # v1.16.2: also pass tools-presence so _explain_404 can suggest
-    # JANUS_NO_TOOLS=1 when the request had tools (vLLM without
-    # --enable-auto-tool-choice 404s on tools-bearing requests).
     if r.status_code == 404:
         had_tools = bool(payload.get("tools"))
         raise _explain_404(chosen_model, config.API_BASE, r, had_tools=had_tools)
 
     r.raise_for_status()
     body = r.json()
-    # Phase 13: feed token usage to the cost tracker. Non-fatal — providers
-    # that omit `usage` (some local backends) are silently treated as zero.
+    # Phase 13: feed token usage to the cost tracker.
     try:
         from . import cost
         cost.record(chosen_model, body.get("usage"))
     except Exception:
         pass
-    # v1.11.0 — also report token count to the rate tracker on success.
+    # v1.11.0 — token count to the rate tracker on success.
     try:
         from . import rate_limit
         usage = body.get("usage") or {}
@@ -284,6 +269,67 @@ def chat(
     except Exception:
         pass
     return body["choices"][0]["message"]
+
+
+def chat(
+    messages: list[dict[str, Any]],
+    tools: list[dict] | None = None,
+    json_mode: bool = False,
+    temperature: float = 0.7,
+    model: str | None = None,
+) -> dict:
+    """Single chat completion. Returns the raw 'message' object from the response.
+
+    `model` overrides config.MODEL for this call only. Used by swarm
+    sub-agents to mix cheap/expensive models per role.
+
+    v1.28.3 — multi-model fall-through. When ``JANUS_MODEL_FALLBACK``
+    is set and the primary attempt fails with an infra-shaped error
+    (5xx after retry exhaustion / ConnectionError / Timeout), Janus
+    transparently retries on the next model in the chain. 4xx errors
+    don't trigger fallback (switching model won't fix auth /
+    context-length / unknown-model). See ``model_fallback.py``.
+    """
+    from . import model_fallback as _mfb
+
+    primary = model or config.MODEL
+    chain = _mfb.parse_chain(primary)
+    if not chain:
+        # Defensive — shouldn't happen but degrade gracefully
+        chain = [primary]
+
+    last_exc: BaseException | None = None
+    for idx, attempt_model in enumerate(chain):
+        try:
+            return _chat_attempt(
+                attempt_model, messages,
+                tools=tools, json_mode=json_mode,
+                temperature=temperature,
+            )
+        except BaseException as e:
+            # KeyboardInterrupt / SystemExit must propagate immediately
+            if not isinstance(e, Exception):
+                raise
+            last_exc = e
+            if not _mfb.is_fallback_trigger(e):
+                # Not a fallback-class error — let it bubble normally.
+                raise
+            # Try the next model in the chain
+            if idx + 1 < len(chain):
+                _mfb.record_fallback(
+                    from_model=attempt_model,
+                    to_model=chain[idx + 1],
+                    reason=_mfb.reason_string(e),
+                )
+                continue
+            # No next model — give up and raise the last error
+            raise
+    # Defensive — should be unreachable since we always raise on
+    # exhausted chain. Provide a clear error if some future refactor
+    # breaks the invariant.
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("model_fallback: chain exhausted with no exception")
 
 
 def _provider_from_base(api_base: str) -> str:

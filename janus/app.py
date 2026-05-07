@@ -133,6 +133,12 @@ EVENT_TYPES: frozenset[str] = frozenset({
     # spend just crossed a 50/80/100% threshold of JANUS_BUDGET_USD.
     # Renderers can show a banner / pause / send a notification.
     "budget_alert",
+
+    # v1.28.3 — multi-model fall-through. Fires when the primary model
+    # fails with an infra-shaped error (5xx / connection / timeout)
+    # and Janus transparently retries on the next model in the
+    # JANUS_MODEL_FALLBACK chain.
+    "model_fallback",
 })
 
 
