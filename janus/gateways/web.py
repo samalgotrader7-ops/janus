@@ -1511,6 +1511,145 @@ def _build_app():
         except Exception as e:
             return JSONResponse({"error": f"triggers list failed: {e}"})
 
+    # ---------- v1.29.1 — MCP catalog browser ----------
+
+    @app.get("/api/mcp/catalog")
+    async def api_mcp_catalog(request: Request):
+        """v1.29.1: list configured + connected MCP servers with
+        per-server tool inventory. Connected servers contribute a
+        live tool list; configured-only servers report
+        ``connected: false`` and an empty tool list (the user can
+        connect via the existing CLI to inspect tools)."""
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        try:
+            from ..mcp import client as _mcp
+            servers = _mcp.load_servers()
+            active = _mcp.get_active_clients()
+            out: list[dict] = []
+            seen: set[str] = set()
+            for name, cfg in servers.items():
+                seen.add(name)
+                entry = {
+                    "name": name,
+                    "command": cfg.command,
+                    "args": list(cfg.args),
+                    "enabled": cfg.enabled,
+                    "connected": name in active,
+                    "tools": [],
+                }
+                if name in active:
+                    try:
+                        tools = active[name].list_tools() or []
+                    except Exception as e:
+                        entry["error"] = (
+                            f"list_tools: {type(e).__name__}: {e}"
+                        )
+                        tools = []
+                    for tdef in tools:
+                        params = (
+                            (tdef.get("inputSchema") or {})
+                            .get("properties") or {}
+                        )
+                        entry["tools"].append({
+                            "name": tdef.get("name", ""),
+                            "description": (
+                                tdef.get("description") or ""
+                            ).strip(),
+                            "param_count": len(params),
+                            "janus_name": (
+                                f"mcp_{name}_{tdef.get('name', '')}"
+                                .replace("-", "_")
+                            ),
+                        })
+                out.append(entry)
+            # Connected-not-configured servers (rare — only happens if
+            # someone connects without writing a config file)
+            for name, c in active.items():
+                if name in seen:
+                    continue
+                entry = {
+                    "name": name, "command": "(not in config)",
+                    "args": [], "enabled": True,
+                    "connected": True, "tools": [],
+                }
+                try:
+                    tools = c.list_tools() or []
+                except Exception:
+                    tools = []
+                for tdef in tools:
+                    params = (
+                        (tdef.get("inputSchema") or {})
+                        .get("properties") or {}
+                    )
+                    entry["tools"].append({
+                        "name": tdef.get("name", ""),
+                        "description": (
+                            tdef.get("description") or ""
+                        ).strip(),
+                        "param_count": len(params),
+                        "janus_name": (
+                            f"mcp_{name}_{tdef.get('name', '')}"
+                            .replace("-", "_")
+                        ),
+                    })
+                out.append(entry)
+            return JSONResponse({"servers": out})
+        except Exception as e:
+            return JSONResponse({"error": f"mcp catalog failed: {e}"})
+
+    @app.get("/api/mcp/inspect")
+    async def api_mcp_inspect(request: Request):
+        """v1.29.1: full inputSchema for one MCP tool. Query params:
+        ``server`` and ``tool``. 404-ish (200 with error key) if the
+        server isn't connected."""
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        server = (request.query_params.get("server") or "").strip()
+        tool_name = (request.query_params.get("tool") or "").strip()
+        if not server or not tool_name:
+            return JSONResponse({"error": "missing server / tool"})
+        try:
+            from ..mcp import client as _mcp
+            active = _mcp.get_active_clients()
+            client = active.get(server)
+            if client is None:
+                return JSONResponse({
+                    "error": (
+                        f"server '{server}' not connected — "
+                        f"use `/mcp connect {server}` first"
+                    ),
+                })
+            tools = client.list_tools() or []
+            target = next(
+                (t for t in tools if t.get("name") == tool_name), None,
+            )
+            if target is None:
+                return JSONResponse({
+                    "error": f"no tool '{tool_name}' on '{server}'",
+                    "available": [
+                        t.get("name", "") for t in tools
+                    ],
+                })
+            return JSONResponse({
+                "server": server,
+                "tool": tool_name,
+                "janus_name": (
+                    f"mcp_{server}_{tool_name}".replace("-", "_")
+                ),
+                "description": (
+                    target.get("description") or ""
+                ).strip(),
+                "input_schema": (
+                    target.get("inputSchema")
+                    or {"type": "object", "properties": {}}
+                ),
+            })
+        except Exception as e:
+            return JSONResponse({"error": f"mcp inspect failed: {e}"})
+
     # ---------- v1.22.3: shells / logs / cost / settings ----------
 
     @app.get("/api/shells")

@@ -1918,6 +1918,22 @@ def _cmd_mcp_rich(console, arg: str) -> bool:
     parts = arg.strip().split(maxsplit=1)
     sub = parts[0] if parts else "list"
     rest = parts[1].strip() if len(parts) > 1 else ""
+    # v1.29.1: catalog / tools / inspect subcommands.
+    if sub == "catalog":
+        return _cmd_mcp_catalog(console)
+    if sub == "tools":
+        if not rest:
+            console.print("[red]usage:[/] /mcp tools <server>")
+            return True
+        return _cmd_mcp_tools(console, rest)
+    if sub == "inspect":
+        ins_parts = rest.split(maxsplit=1)
+        if len(ins_parts) < 2:
+            console.print(
+                "[red]usage:[/] /mcp inspect <server> <tool>"
+            )
+            return True
+        return _cmd_mcp_inspect(console, ins_parts[0], ins_parts[1])
     if sub == "list":
         servers = mcp_client.load_servers()
         active = mcp_client.get_active_clients()
@@ -1977,7 +1993,158 @@ def _cmd_mcp_rich(console, arg: str) -> bool:
         else:
             console.print(f"  [yellow]server '{rest}' was not connected[/]")
         return True
-    console.print("[red]usage:[/] /mcp list | /mcp connect <server> | /mcp disconnect <server>")
+    console.print(
+        "[red]usage:[/] /mcp list | /mcp catalog | /mcp tools <server> | "
+        "/mcp inspect <server> <tool> | /mcp connect <server> | "
+        "/mcp disconnect <server>"
+    )
+    return True
+
+
+# ---------- v1.29.1 — catalog / tools / inspect ----------
+
+
+def _cmd_mcp_catalog(console) -> bool:
+    """`/mcp catalog` — full directory of configured + connected MCP
+    servers with per-server tool inventory.
+
+    For CONNECTED servers we list each tool with its name + description
+    + parameter count (from the live client). For CONFIGURED-ONLY
+    servers we show command + args; the user can /mcp connect to
+    inspect tools.
+    """
+    servers = mcp_client.load_servers()
+    active = mcp_client.get_active_clients()
+    if not servers and not active:
+        console.print(
+            f"[dim]no MCP servers configured. drop a JSON config at "
+            f"{config.MCP_SERVERS_FILE} or use ~/.claude/settings.json[/]"
+        )
+        return True
+
+    # Render configured-not-connected first (show command), then
+    # connected (show live tools).
+    for name, cfg in servers.items():
+        if name in active:
+            continue
+        console.print(
+            f"[dim]●[/] [bold]{name}[/]  "
+            f"[dim](configured · {cfg.command} {' '.join(cfg.args)})[/]"
+        )
+    for name, client in active.items():
+        cfg = servers.get(name)
+        cfg_str = (
+            f"{cfg.command} {' '.join(cfg.args)}" if cfg
+            else "(not in config)"
+        )
+        try:
+            tools = client.list_tools()
+        except Exception as e:
+            console.print(
+                f"[red]●[/] [bold]{name}[/] [red](list_tools failed: "
+                f"{type(e).__name__})[/]"
+            )
+            continue
+        console.print(
+            f"[green]●[/] [bold]{name}[/]  "
+            f"[dim]({cfg_str}) · {len(tools)} tool(s)[/]"
+        )
+        for tdef in tools:
+            tool_name = tdef.get("name", "?")
+            desc = (tdef.get("description") or "").strip()
+            param_count = len(
+                ((tdef.get("inputSchema") or {}).get("properties") or {})
+            )
+            short_desc = desc.split("\n")[0][:80]
+            console.print(
+                f"    [cyan]{tool_name}[/] "
+                f"[dim]({param_count} param{'s' if param_count != 1 else ''})[/] "
+                f"— {short_desc}"
+            )
+            console.print(
+                f"      [dim]janus name: mcp_{name}_{tool_name}".replace(
+                    "-", "_"
+                ) + "[/]"
+            )
+    return True
+
+
+def _cmd_mcp_tools(console, server: str) -> bool:
+    """`/mcp tools <server>` — focused per-server tool list."""
+    active = mcp_client.get_active_clients()
+    client = active.get(server)
+    if client is None:
+        servers = mcp_client.load_servers()
+        if server in servers:
+            console.print(
+                f"[yellow]'{server}' configured but not connected[/]. "
+                f"Run [cyan]/mcp connect {server}[/] first."
+            )
+        else:
+            console.print(f"[red]no MCP server '{server}' known[/]")
+        return True
+    try:
+        tools = client.list_tools()
+    except Exception as e:
+        console.print(f"[red]list_tools failed:[/] {type(e).__name__}: {e}")
+        return True
+    if not tools:
+        console.print(f"[dim]'{server}' exposes no tools[/]")
+        return True
+    t = Table(show_header=True, header_style="bold cyan")
+    t.add_column("tool")
+    t.add_column("janus name")
+    t.add_column("params", justify="right", width=6)
+    t.add_column("description", overflow="fold")
+    for tdef in tools:
+        tool_name = tdef.get("name", "?")
+        params = (tdef.get("inputSchema") or {}).get("properties") or {}
+        desc = (tdef.get("description") or "").strip().split("\n")[0][:120]
+        t.add_row(
+            tool_name,
+            f"mcp_{server}_{tool_name}".replace("-", "_"),
+            str(len(params)),
+            desc,
+        )
+    console.print(t)
+    return True
+
+
+def _cmd_mcp_inspect(console, server: str, tool_name: str) -> bool:
+    """`/mcp inspect <server> <tool>` — full parameter schema for one
+    tool. Useful when the model needs to know what args to pass."""
+    active = mcp_client.get_active_clients()
+    client = active.get(server)
+    if client is None:
+        console.print(
+            f"[yellow]'{server}' not connected[/]. "
+            f"Run [cyan]/mcp connect {server}[/] first."
+        )
+        return True
+    try:
+        tools = client.list_tools()
+    except Exception as e:
+        console.print(f"[red]list_tools failed:[/] {type(e).__name__}: {e}")
+        return True
+    target = next((t for t in tools if t.get("name") == tool_name), None)
+    if target is None:
+        names = [t.get("name", "?") for t in tools]
+        console.print(
+            f"[red]no tool '{tool_name}' on server '{server}'[/]"
+        )
+        console.print(f"  [dim]available: {', '.join(names) or '(none)'}[/]")
+        return True
+    janus_name = f"mcp_{server}_{tool_name}".replace("-", "_")
+    desc = (target.get("description") or "").strip()
+    schema = target.get("inputSchema") or {"type": "object", "properties": {}}
+    console.print(f"[bold cyan]{server}[/]/[bold]{tool_name}[/]")
+    console.print(f"  [dim]janus name:[/] {janus_name}")
+    if desc:
+        console.print(f"  [dim]description:[/] {desc}")
+    console.print(f"  [dim]input schema:[/]")
+    import json as _json
+    for line in _json.dumps(schema, indent=2).splitlines():
+        console.print(f"    {line}")
     return True
 
 

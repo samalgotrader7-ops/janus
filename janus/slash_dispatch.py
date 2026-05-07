@@ -105,7 +105,7 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/output-style", "switch output rendering (markdown, plain, json, …)",  "built-in"),
     SlashCommand("/commands",     "list user-defined slash commands and their files",    "built-in"),
     SlashCommand("/eval",         "replay last N records at temp=0 to check stability",  "built-in"),
-    SlashCommand("/mcp",          "manage MCP servers — list | connect | disconnect",    "built-in"),
+    SlashCommand("/mcp",          "MCP servers — list | catalog | tools <s> | inspect <s> <t> | connect | disconnect", "built-in"),
     SlashCommand("/triggers",     "list configured triggers",                            "built-in"),
     SlashCommand("/swarm",        "agent swarms — list | describe | run | status | cancel", "built-in"),
     SlashCommand("/help",         "show all available slash commands grouped by source", "built-in"),
