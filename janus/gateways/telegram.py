@@ -1242,6 +1242,31 @@ async def _run_chat_turn(
     except Exception:
         pass
 
+    # v1.29.3: skill auto-offer parity (extends v1.28.1 cli_rich-only).
+    # Same gates as cli_rich: top pattern only, AUTO_OFFER_MIN_OCCURRENCES
+    # threshold, mark_offered triggers cooldown. Best-effort wrap so
+    # detection bugs never break the chat reply.
+    try:
+        from .. import skill_proposer as _sp
+        patterns = _sp.list_offerable(current_trace=trace)
+        if patterns:
+            top = patterns[0]
+            if top.occurrences >= _sp.AUTO_OFFER_MIN_OCCURRENCES:
+                try:
+                    await ctx.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"🪄 {top.description}.\n"
+                            f"/skills propose {top.id} to draft, "
+                            f"/skills decline {top.id} to silence."
+                        ),
+                    )
+                    _sp.mark_offered(top.id)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
 
 async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Inline-keyboard taps: approval (`appr:`) and clarify (`clr:`).

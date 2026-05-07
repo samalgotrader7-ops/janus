@@ -767,6 +767,25 @@ def _build_app():
         except Exception:
             pass
 
+        # v1.29.3: skill auto-offer parity (extends v1.28.1 cli_rich-only).
+        # Same gates as cli_rich + telegram: top pattern only,
+        # AUTO_OFFER_MIN_OCCURRENCES threshold, mark_offered triggers
+        # cooldown. Best-effort wrap.
+        try:
+            from .. import skill_proposer as _sp
+            patterns = _sp.list_offerable(current_trace=trace)
+            if patterns:
+                top = patterns[0]
+                if top.occurrences >= _sp.AUTO_OFFER_MIN_OCCURRENCES:
+                    drip_suffix += (
+                        f"\n\n---\n\n🪄 {top.description}.\n\n"
+                        f"`/skills propose {top.id}` to draft, "
+                        f"`/skills decline {top.id}` to silence."
+                    )
+                    _sp.mark_offered(top.id)
+        except Exception:
+            pass
+
         final_output = (
             (drip_ack_message + intro + output + drip_suffix)
             if output
