@@ -180,13 +180,18 @@ def risk_from_verb(verb: str) -> str:
 class ModeState:
     """Holds the active mode for a session. Mutable so /mode can swap it.
 
-    v1.24.0 — also stores a per-session approval whitelist for tools the
-    user has approved with "always" / "session" semantics. The approver
-    consults this before showing a prompt; if the (tool_name, risk) pair
-    is in `session_grants`, ALLOW is returned without prompting.
+    v1.24.0 — added per-session approval whitelist for tools the user
+    has approved with "session" semantics. Approver auto-passes when
+    the (tool_name, risk) pair is in `session_grants`.
+
+    v1.24.1 — added persistent "always" grants stored in
+    ~/.janus/approvals.json. ModeState loads them lazily on first
+    has_grant() call and writes them on grant_persistent().
     """
     current: str = DEFAULT
     session_grants: set = field(default_factory=set)
+    _persistent_loaded: bool = False
+    _persistent_grants: set = field(default_factory=set)
 
     def set(self, mode: str) -> str:
         self.current = normalize(mode)
@@ -204,12 +209,111 @@ class ModeState:
         """v1.24.0: add a session-level approval grant.
 
         `key` is typically (tool_name, risk). Future approver calls
-        with the same key auto-approve (no prompt).
+        with the same key auto-approve (no prompt). Cleared on session
+        end.
         """
         self.session_grants.add(key)
 
+    def grant_persistent(self, key: tuple) -> None:
+        """v1.24.1: add a persistent grant — survives janus restart.
+
+        Writes to ~/.janus/approvals.json. Also sets the in-memory
+        bit so the current session sees it immediately.
+        """
+        self._ensure_loaded()
+        self._persistent_grants.add(key)
+        # In-memory copy so the rest of the session sees it via has_grant.
+        self.session_grants.add(key)
+        _save_persistent_grants(self._persistent_grants)
+
+    def revoke_persistent(self, key: tuple) -> None:
+        """v1.24.1: remove a persistent grant. Useful for `/grants clear`."""
+        self._ensure_loaded()
+        self._persistent_grants.discard(key)
+        self.session_grants.discard(key)
+        _save_persistent_grants(self._persistent_grants)
+
     def has_grant(self, key: tuple) -> bool:
-        return key in self.session_grants
+        self._ensure_loaded()
+        return key in self.session_grants or key in self._persistent_grants
+
+    def list_grants(self) -> tuple[set, set]:
+        """v1.24.1: return (session, persistent) grant sets for inspection."""
+        self._ensure_loaded()
+        return (set(self.session_grants), set(self._persistent_grants))
 
     def clear_grants(self) -> None:
+        """Clear in-memory session grants only. Persistent grants stay."""
         self.session_grants.clear()
+
+    def clear_persistent(self) -> None:
+        """v1.24.1: wipe all persistent grants. Drops the file."""
+        self._persistent_grants.clear()
+        # Also drop the in-memory copy of any that were marked persistent.
+        _save_persistent_grants(set())
+
+    def _ensure_loaded(self) -> None:
+        if self._persistent_loaded:
+            return
+        self._persistent_loaded = True
+        try:
+            self._persistent_grants = _load_persistent_grants()
+        except Exception:
+            self._persistent_grants = set()
+
+
+# ---------- persistent grant storage (v1.24.1) ----------
+
+
+def _grants_file_path():
+    """Path to the on-disk grants file. Late import of config to avoid
+    circular imports during bootstrap."""
+    from . import config
+    return config.HOME / "approvals.json"
+
+
+def _load_persistent_grants() -> set:
+    """Read ~/.janus/approvals.json. Returns a set of (tool, risk) tuples."""
+    p = _grants_file_path()
+    if not p.is_file():
+        return set()
+    try:
+        import json as _json
+        data = _json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    out: set = set()
+    for entry in data.get("grants", []):
+        if not isinstance(entry, dict):
+            continue
+        tool = entry.get("tool", "")
+        risk = entry.get("risk", "")
+        if tool and risk:
+            out.add((str(tool), str(risk)))
+    return out
+
+
+def _save_persistent_grants(grants: set) -> None:
+    """Atomic write to ~/.janus/approvals.json with mode 0600."""
+    import json as _json
+    import os as _os
+    p = _grants_file_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "grants": [
+            {"tool": t, "risk": r}
+            for (t, r) in sorted(grants)
+        ],
+    }
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    try:
+        _os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    tmp.replace(p)
+    try:
+        _os.chmod(p, 0o600)
+    except OSError:
+        pass

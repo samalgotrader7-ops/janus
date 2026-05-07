@@ -730,6 +730,18 @@ def _build_app():
         except Exception:
             pass
 
+        # v1.24.1: broadcast memory.changed so the memory panel refreshes.
+        # Chat turns can create new cards (propose_diff → apply_cards).
+        # Best-effort — never break the chat flow.
+        try:
+            from . import web_bridge as _wb
+            _wb._broadcast_from_thread(
+                loop, auth_sid,
+                {"type": "memory.changed", "reason": "chat_turn"},
+            )
+        except Exception:
+            pass
+
         # v1.19.1 — drip post-turn + inferred-suggestion offer appended
         # to the response body. Best-effort.
         drip_suffix = ""
@@ -1166,6 +1178,19 @@ def _build_app():
             except Exception:
                 pass
             web_audit.mutate(auth_sid, ip, "/api/cards/delete", [card_id])
+            # v1.24.1: notify SSE subscribers so the memory panel
+            # can refresh without a manual click.
+            try:
+                from . import web_bridge as _wb
+                import asyncio as _asyncio
+                _wb._broadcast_from_thread(
+                    _asyncio.get_running_loop(),
+                    auth_sid,
+                    {"type": "memory.changed", "reason": "card_deleted",
+                     "card_id": card_id},
+                )
+            except Exception:
+                pass
             return JSONResponse({"ok": True, "moved_to": str(moved)})
         except Exception as e:
             return JSONResponse({"error": f"delete failed: {e}"})
@@ -1505,18 +1530,86 @@ def _build_app():
         except Exception:
             body = {}
         cmd = (body.get("command") or "").strip() if isinstance(body, dict) else ""
+        pty_mode = bool(body.get("pty")) if isinstance(body, dict) else False
         if not cmd:
             return JSONResponse(
                 {"error": "command required"}, status_code=400,
             )
+        # v1.24.1: PTY mode for interactive shells (POSIX only).
+        if pty_mode:
+            from ..tools import shell_pty as _spty
+            if not _spty.is_supported():
+                return JSONResponse(
+                    {"error": (
+                        "PTY shells require POSIX (pty module). Windows "
+                        "ConPTY support lands in v1.24.2. Re-issue "
+                        "without pty=true to use the captured-output mode."
+                    )},
+                    status_code=400,
+                )
+            try:
+                shell_id = _spty.start_pty_shell(cmd)
+                web_audit.mutate(
+                    auth_sid, ip, "/api/shells/run",
+                    ["command", "pty"],
+                )
+                return JSONResponse({
+                    "ok": True,
+                    "output": f"started PTY shell {shell_id}\n"
+                              f"  cmd: {cmd}\n"
+                              f"  attach to /api/shells/{shell_id}/stream\n",
+                    "shell_id": shell_id,
+                    "pty": True,
+                })
+            except Exception as e:
+                return JSONResponse({"error": f"pty start failed: {e}"})
         try:
             from ..tools.shell_bg import ShellRunBg
             tool = ShellRunBg()
             output = tool.run({"command": cmd}, _api_allow())
             web_audit.mutate(auth_sid, ip, "/api/shells/run", ["command"])
-            return JSONResponse({"ok": True, "output": output})
+            return JSONResponse({"ok": True, "output": output, "pty": False})
         except Exception as e:
             return JSONResponse({"error": f"shell run failed: {e}"})
+
+    @app.post("/api/shells/{shell_id}/stdin")
+    async def api_shell_stdin(shell_id: str, request: Request):
+        """v1.24.1: write to a PTY shell's stdin. Body: {"data": str}.
+
+        Only works for shells started with pty=true. For non-PTY shells
+        returns 400 — there's no stdin to write to.
+        """
+        auth_sid, err_resp, ip = _gate_post(
+            request, f"/api/shells/{shell_id}/stdin",
+        )
+        if err_resp is not None:
+            return err_resp
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        data = (body.get("data") or "") if isinstance(body, dict) else ""
+        if not isinstance(data, str):
+            return JSONResponse(
+                {"error": "data must be a string"}, status_code=400,
+            )
+        try:
+            from ..tools import shell_pty as _spty
+            if not _spty.is_supported():
+                return JSONResponse(
+                    {"error": "PTY stdin requires POSIX"},
+                    status_code=400,
+                )
+            n = _spty.write_stdin(shell_id, data)
+            web_audit.mutate(
+                auth_sid, ip, f"/api/shells/{shell_id}/stdin",
+                [f"{n}b"],
+            )
+            return JSONResponse({"ok": True, "bytes": n})
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:
+            return JSONResponse({"error": f"stdin write failed: {e}"})
 
     @app.get("/api/shells/{shell_id}/output")
     async def api_shell_output(shell_id: str, request: Request):
@@ -1678,6 +1771,90 @@ def _build_app():
             return JSONResponse({"entries": entries[::-1]})
         except Exception as e:
             return JSONResponse({"error": f"logs read failed: {e}"})
+
+    @app.get("/api/logs/stream")
+    async def api_logs_stream(request: Request):
+        """v1.24.1: SSE stream of new entries appended to log.jsonl.
+
+        On connect, replays the last 20 entries so the client has
+        context. Then tails the file every 500ms; new lines arrive as
+        `entry` events.
+        """
+        auth_sid, err = _check_auth(request)
+        if err:
+            return JSONResponse({"error": err}, status_code=401)
+        from fastapi.responses import StreamingResponse
+        import asyncio as _asyncio
+        import json as _json
+
+        log_path = config.LOG_FILE
+
+        async def gen():
+            # Bootstrap: replay last 20 entries.
+            try:
+                if log_path.is_file():
+                    lines = log_path.read_text(encoding="utf-8").splitlines()
+                    pos = log_path.stat().st_size
+                    for raw in lines[-20:]:
+                        if not raw.strip():
+                            continue
+                        yield (
+                            "event: entry\n"
+                            f"data: {raw}\n\n"
+                        )
+                else:
+                    pos = 0
+            except OSError:
+                pos = 0
+
+            heartbeat_count = 0
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    if not log_path.is_file():
+                        await _asyncio.sleep(1.0)
+                        continue
+                    size = log_path.stat().st_size
+                    if size < pos:
+                        # Log was rotated/truncated. Re-anchor.
+                        pos = 0
+                    if size == pos:
+                        heartbeat_count += 1
+                        if heartbeat_count >= 50:  # ~25s
+                            yield ":heartbeat\n\n"
+                            heartbeat_count = 0
+                        await _asyncio.sleep(0.5)
+                        continue
+                    heartbeat_count = 0
+                    with log_path.open("rb") as f:
+                        f.seek(pos)
+                        chunk = f.read()
+                    pos = size
+                    text = chunk.decode("utf-8", errors="replace")
+                    for line in text.splitlines():
+                        if not line.strip():
+                            continue
+                        yield (
+                            "event: entry\n"
+                            f"data: {line}\n\n"
+                        )
+                except Exception as e:
+                    yield (
+                        "event: error\n"
+                        f"data: {_json.dumps({'msg': str(e)[:200]})}\n\n"
+                    )
+                    await _asyncio.sleep(1.0)
+                await _asyncio.sleep(0.5)
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={
+                "cache-control": "no-cache",
+                "x-accel-buffering": "no",
+            },
+        )
 
     @app.get("/api/cost-summary")
     async def api_cost_summary(request: Request):

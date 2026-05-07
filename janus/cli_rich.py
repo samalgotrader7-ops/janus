@@ -570,14 +570,12 @@ def _make_mode_approver(console, mode_state: permissions.ModeState):
                 )
             return True
         if ans in ("a", "always"):
-            # "always" is alias for session for now — persistent grants
-            # would need a config file write and survive restart.
-            # That's a v1.24.x follow-up.
+            # v1.24.1: persistent grant — survives janus restart.
             if tool_name:
-                mode_state.grant(grant_key)
+                mode_state.grant_persistent(grant_key)
                 console.print(
-                    f"[dim]→ session grant added for {tool_name} "
-                    f"(persistent 'always' grants in v1.24.x)[/]"
+                    f"[dim]→ persistent grant added for {tool_name} "
+                    f"(saved to ~/.janus/approvals.json; revoke with /grants)[/]"
                 )
             return True
         return False
@@ -603,6 +601,30 @@ def _dispatch(console, line: str, state: dict) -> bool:
     if custom_name in custom:
         state["_pending_custom"] = custom[custom_name].render(arg)
         return False
+
+    # v1.24.1: shared registry (slash_dispatch.py) gets first crack at
+    # the command. Falls through to the legacy if/elif chain below if
+    # no shared handler is registered. Migration starts here — new
+    # cross-surface commands land in slash_dispatch.py and register
+    # via register_shared_handlers().
+    if "_shared_slash_registry" not in state:
+        from . import slash_dispatch as _sd
+        reg = _sd.SlashRegistry()
+        _sd.register_shared_handlers(reg)
+        state["_shared_slash_registry"] = reg
+    sd_reg = state["_shared_slash_registry"]
+    if sd_reg.has(cmd):
+        from . import slash_dispatch as _sd
+        ctx = _sd.SlashContext(
+            surface="cli_rich",
+            state=state,
+            console=console,
+            print_fn=lambda s: console.print(s),
+        )
+        handled, result = sd_reg.dispatch(line, ctx)
+        if handled and isinstance(result, str) and result:
+            console.print(result)
+        return handled
 
     if cmd in ("/quit", "/exit"):
         state["quit"] = True

@@ -111,6 +111,7 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/quit",         "exit the CLI",                                        "built-in"),
     SlashCommand("/exit",         "alias for /quit",                                     "built-in"),
     SlashCommand("/refresh",      "reload sidebar (TUI only)",                           "built-in"),
+    SlashCommand("/grants",       "list / clear approval grants: /grants [list|clear|revoke <tool>]", "built-in"),
 ]
 
 
@@ -247,3 +248,89 @@ def parse_int_arg(arg: str, default: int = 0) -> int:
         return int(arg.strip())
     except (ValueError, AttributeError):
         return default
+
+
+# ---------- v1.24.1: shared handlers (the migration starts here) ----------
+#
+# These handlers live in slash_dispatch.py (single source). Each surface
+# (cli_rich / cli / tui) creates a SlashRegistry on startup, calls
+# register_shared_handlers(reg), and adds its own surface-specific
+# handlers on top.
+#
+# A handler returns a string (rendered to the user) or None (no output).
+# Surfaces format the string however they like — Rich renders with a
+# Panel, basic CLI prints raw, TUI writes to its log.
+
+
+def _h_grants(ctx: SlashContext, arg: str) -> str:
+    """v1.24.1: /grants list | clear | revoke <tool>
+
+    Manage the persistent approval grants in ~/.janus/approvals.json
+    plus this session's in-memory session grants.
+    """
+    from . import permissions
+    ms = ctx.state.get("mode_state") if ctx.state else None
+    if not isinstance(ms, permissions.ModeState):
+        # Surface didn't wire in the mode state; fall back to a fresh
+        # one (still loads persistent file correctly).
+        ms = permissions.ModeState()
+    sub, rest = split_subcommand(arg)
+    sub = sub.lower().strip()
+    if sub in ("", "list", "ls"):
+        session_set, persistent_set = ms.list_grants()
+        # Session grants minus persistent (persistent are auto-copied
+        # into session_grants by has_grant lookup; subtract for clarity).
+        session_only = session_set - persistent_set
+        lines = []
+        if not session_only and not persistent_set:
+            return "no approval grants. earn them via [s]ession or [a]lways at the next approval prompt."
+        if persistent_set:
+            lines.append("persistent (~/.janus/approvals.json):")
+            for tool, risk in sorted(persistent_set):
+                lines.append(f"  {tool:24} {risk}")
+        if session_only:
+            if lines:
+                lines.append("")
+            lines.append("session-only (cleared on exit):")
+            for tool, risk in sorted(session_only):
+                lines.append(f"  {tool:24} {risk}")
+        return "\n".join(lines)
+    if sub in ("clear", "wipe"):
+        ms.clear_persistent()
+        ms.clear_grants()
+        return "all grants cleared (persistent + session)."
+    if sub in ("revoke", "remove", "rm"):
+        target = rest.strip()
+        if not target:
+            return "usage: /grants revoke <tool_name>"
+        # Revoke any grant whose tool matches.
+        _, persistent = ms.list_grants()
+        removed = 0
+        for tool, risk in list(persistent):
+            if tool == target:
+                ms.revoke_persistent((tool, risk))
+                removed += 1
+        # Also drop session grants matching the same tool.
+        for tool, risk in list(ms.session_grants):
+            if tool == target:
+                ms.session_grants.discard((tool, risk))
+                removed += 1
+        return f"revoked {removed} grant(s) for {target}." if removed \
+            else f"no grants matched {target}."
+    return (
+        "usage: /grants [list|clear|revoke <tool>]\n"
+        "  list             show session + persistent grants (default)\n"
+        "  clear            wipe ALL grants (persistent + session)\n"
+        "  revoke <tool>    drop grants for a specific tool"
+    )
+
+
+def register_shared_handlers(registry: SlashRegistry) -> None:
+    """Register the v1.24.1 shared handlers on a surface's registry.
+
+    Surfaces call this during startup AFTER constructing their registry,
+    so the shared handlers sit alongside surface-specific ones. A
+    surface can override any shared handler by registering its own
+    AFTER calling this — registry.register overwrites.
+    """
+    registry.register("/grants", _h_grants)

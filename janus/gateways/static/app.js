@@ -322,7 +322,36 @@
     currentFile: null,
     originalContent: '',
     editing: false,
+    cmEditor: null,   // v1.24.1: CodeMirror instance
   };
+
+  // v1.24.1: file-extension → CodeMirror mode lookup. Falls back to
+  // null mode (plain text) for unknown extensions.
+  const _CM_MODE_BY_EXT = {
+    js: 'javascript', mjs: 'javascript', jsx: 'javascript',
+    ts: 'javascript', tsx: 'javascript',
+    py: 'python', pyi: 'python',
+    md: 'markdown', markdown: 'markdown',
+    html: 'htmlmixed', htm: 'htmlmixed',
+    css: 'css', scss: 'css',
+    xml: 'xml', svg: 'xml',
+    yml: 'yaml', yaml: 'yaml',
+    sh: 'shell', bash: 'shell', zsh: 'shell',
+    json: { name: 'javascript', json: true },
+  };
+
+  function _cmModeFor(path) {
+    const m = path.match(/\.([a-z0-9]+)$/i);
+    if (!m) return null;
+    return _CM_MODE_BY_EXT[m[1].toLowerCase()] || null;
+  }
+
+  function _disposeCM() {
+    if (filesState.cmEditor) {
+      try { filesState.cmEditor.toTextArea(); } catch (e) {}
+      filesState.cmEditor = null;
+    }
+  }
 
   registerPanel('files', {
     async mount() {
@@ -391,6 +420,7 @@
 
       const renderFileEdit = (path) => {
         clear(viewer);
+        _disposeCM();
         filesState.editing = true;
         const dirty = el('span', { class: 'dirty', id: 'file-dirty' }, '');
         const saveBtn = el('button',
@@ -398,38 +428,88 @@
           'save');
         const cancelBtn = el('button',
           { type: 'button', id: 'file-cancel-btn' }, 'cancel');
+        const modeLabel = el('span', {
+          class: 'item-meta', style: 'font-family:ui-monospace,monospace;',
+        }, '');
         const meta = el(
           'div', { class: 'file-actions' },
           el('span', { class: 'item-meta', style: 'flex:1;' }, `editing ${path}`),
-          dirty, saveBtn, cancelBtn,
+          modeLabel, dirty, saveBtn, cancelBtn,
         );
         viewer.appendChild(meta);
-        const ta = el('textarea', { id: 'file-textarea', spellcheck: 'false' },
-          filesState.originalContent);
+        const ta = el('textarea', {
+          id: 'file-textarea', spellcheck: 'false',
+        }, filesState.originalContent);
         viewer.appendChild(ta);
-        // Focus the textarea so the user can immediately type.
-        setTimeout(() => ta.focus(), 30);
+
+        // v1.24.1: upgrade textarea to CodeMirror if available.
+        const mode = _cmModeFor(path);
+        const useCM = (typeof CodeMirror !== 'undefined');
+        const getValue = () => useCM
+          ? filesState.cmEditor.getValue()
+          : ta.value;
+        const setupCM = () => {
+          try {
+            filesState.cmEditor = CodeMirror.fromTextArea(ta, {
+              mode: mode,
+              lineNumbers: true,
+              theme: 'dracula',
+              indentUnit: 2,
+              tabSize: 2,
+              matchBrackets: true,
+              autoCloseBrackets: true,
+              lineWrapping: true,
+              extraKeys: {
+                'Ctrl-S': () => saveBtn.click(),
+                'Cmd-S': () => saveBtn.click(),
+              },
+            });
+            filesState.cmEditor.setSize('100%', '60vh');
+            modeLabel.textContent = mode
+              ? `mode: ${typeof mode === 'string' ? mode : mode.name}`
+              : 'mode: text';
+            filesState.cmEditor.on('change', () => {
+              const v = filesState.cmEditor.getValue();
+              const isDirty = v !== filesState.originalContent;
+              dirty.textContent = isDirty ? '● modified' : '';
+              saveBtn.disabled = !isDirty;
+            });
+            setTimeout(() => filesState.cmEditor.focus(), 30);
+          } catch (e) {
+            // CM init failed; fall back to plain textarea.
+            filesState.cmEditor = null;
+            modeLabel.textContent = '(CM unavailable)';
+            setTimeout(() => ta.focus(), 30);
+          }
+        };
+        if (useCM) {
+          setupCM();
+        } else {
+          modeLabel.textContent = 'plain';
+          setTimeout(() => ta.focus(), 30);
+        }
         ta.oninput = () => {
+          if (filesState.cmEditor) return;
           const isDirty = ta.value !== filesState.originalContent;
           dirty.textContent = isDirty ? '● modified' : '';
           saveBtn.disabled = !isDirty;
         };
         ta.onkeydown = (e) => {
-          // Ctrl+S / Cmd+S → save.
           if ((e.ctrlKey || e.metaKey) && e.key === 's') {
             e.preventDefault();
             saveBtn.click();
           }
         };
         cancelBtn.onclick = () => {
-          if (ta.value !== filesState.originalContent) {
+          if (getValue() !== filesState.originalContent) {
             if (!confirm('discard your edits?')) return;
           }
+          _disposeCM();
           renderFileView(path, filesState.originalContent,
             filesState.originalContent.length);
         };
         saveBtn.onclick = async () => {
-          const content = ta.value;
+          const content = getValue();
           saveBtn.disabled = true;
           dirty.textContent = 'saving...';
           const r = await api('/api/files/write', {
@@ -442,9 +522,10 @@
             saveBtn.disabled = false;
             return;
           }
-          // Re-render in view mode with the new content.
           filesState.originalContent = content;
-          renderFileView(r.data.path || path, content, r.data.size || content.length);
+          _disposeCM();
+          renderFileView(r.data.path || path, content,
+            r.data.size || content.length);
           setFooter('saved ' + (r.data.path || path));
         };
       };
@@ -715,13 +796,46 @@
     }
   }
 
-  function _attachStream(shellId) {
+  // v1.24.1: shellsState tracks PTY mode so onData wiring is conditional.
+  shellsState.activePty = false;
+  shellsState.dataDisposable = null;
+
+  async function _sendStdin(shellId, data) {
+    try {
+      await api('/api/shells/' + encodeURIComponent(shellId) + '/stdin', {
+        method: 'POST',
+        body: { data: data },
+      });
+    } catch (e) {
+      // Fail silently — the user will notice a hang and can refresh.
+    }
+  }
+
+  function _attachStream(shellId, isPty) {
     _closeStream();
     const term = _ensureTerminal();
     if (!term) return;
+    if (shellsState.dataDisposable) {
+      try { shellsState.dataDisposable.dispose(); } catch (e) {}
+      shellsState.dataDisposable = null;
+    }
     term.clear();
-    term.write(`\x1b[36m[attached to ${shellId}]\x1b[0m\r\n`);
+    const ptyTag = isPty ? ' \x1b[35m[PTY]\x1b[0m' : '';
+    term.write(`\x1b[36m[attached to ${shellId}]\x1b[0m${ptyTag}\r\n`);
     shellsState.activeShellId = shellId;
+    shellsState.activePty = !!isPty;
+
+    // v1.24.1: PTY shells accept stdin. Toggle xterm's read-only flag
+    // and pipe keystrokes to the stdin endpoint.
+    if (isPty) {
+      try { term.options.disableStdin = false; } catch (e) {}
+      shellsState.dataDisposable = term.onData((data) => {
+        _sendStdin(shellId, data);
+      });
+    } else {
+      try { term.options.disableStdin = true; } catch (e) {}
+    }
+
     let es;
     try {
       es = new EventSource(
@@ -788,17 +902,25 @@
         }
       };
       if (refresh) refresh.onclick = loadList;
+      const ptyCheckbox = document.getElementById('shell-pty');
       if (runBtn) runBtn.onclick = async () => {
         const c = (cmd ? cmd.value : '').trim();
         if (!c) return;
+        const usePty = !!(ptyCheckbox && ptyCheckbox.checked);
         const r = await api('/api/shells/run', {
-          method: 'POST', body: { command: c },
+          method: 'POST', body: { command: c, pty: usePty },
         });
         if (cmd) cmd.value = '';
-        // The tool output includes the new shell id; auto-attach.
         const out = (r.data && (r.data.output || r.data.error)) || '';
-        const idMatch = out.match(/(sh-[0-9a-f]{4,})/i);
-        if (idMatch) _attachStream(idMatch[1]);
+        // Server may return shell_id directly (PTY path) or embed it
+        // in the legacy ShellRunBg output text.
+        const id = (r.data && r.data.shell_id)
+                || (out.match(/(sh-[0-9a-f]{4,})/i) || [])[1];
+        if (r.data && r.data.error) {
+          alert(r.data.error);
+        } else if (id) {
+          _attachStream(id, !!(r.data && r.data.pty));
+        }
         loadList();
       };
       if (cmd) cmd.onkeydown = (e) => {
@@ -808,38 +930,82 @@
     },
   });
 
-  // ---------- v1.22.3: logs panel ----------
+  // ---------- v1.22.3 + v1.24.1: logs panel (live SSE) ----------
+
+  const logsState = {
+    eventSource: null,
+    list: null,
+    capacity: 200,  // max items kept in DOM
+  };
+
+  function _renderLogEntry(parsed) {
+    const ts = parsed.ts || '';
+    const gw_ = parsed.gateway || '';
+    const mode = parsed.mode || '';
+    const tool = parsed.tool || '';
+    const summary = (parsed.request || parsed.error || parsed.output ||
+                     parsed.type || '');
+    return el(
+      'div', { class: 'item' },
+      el('div', { class: 'item-meta' }, `${ts}  ${gw_}  ${mode}  ${tool}`),
+      el('div', { class: 'item-body' }, String(summary).slice(0, 400)),
+    );
+  }
+
+  function _logsCloseStream() {
+    if (logsState.eventSource) {
+      try { logsState.eventSource.close(); } catch (e) {}
+      logsState.eventSource = null;
+    }
+  }
+
+  function _logsAttachStream() {
+    _logsCloseStream();
+    if (!logsState.list) return;
+    let es;
+    try {
+      es = new EventSource('/api/logs/stream', { withCredentials: true });
+    } catch (e) {
+      logsState.list.prepend(el(
+        'div', { class: 'item' },
+        el('div', { class: 'item-meta' }, '(SSE unsupported)'),
+      ));
+      return;
+    }
+    es.addEventListener('entry', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const node = _renderLogEntry(data);
+        // Append to TOP so newest is visible. Trim DOM after capacity.
+        if (logsState.list.firstChild) {
+          logsState.list.insertBefore(node, logsState.list.firstChild);
+        } else {
+          logsState.list.appendChild(node);
+        }
+        while (logsState.list.children.length > logsState.capacity) {
+          logsState.list.removeChild(logsState.list.lastChild);
+        }
+      } catch (err) {}
+    });
+    es.addEventListener('error', () => {
+      // EventSource auto-reconnects; suppress noise.
+    });
+    logsState.eventSource = es;
+  }
 
   registerPanel('logs', {
     async mount() {
       const list = document.getElementById('logs-list');
       const refresh = document.getElementById('logs-refresh');
       if (!list) return;
-      const load = async () => {
+      logsState.list = list;
+      const reload = async () => {
         clear(list);
-        const r = await api('/api/logs?limit=100');
-        if (r.data.error) {
-          list.appendChild(el('div', { class: 'item' }, el('div', { class: 'item-meta' }, r.data.error)));
-          return;
-        }
-        if (!r.data.entries.length) {
-          list.appendChild(el('div', { class: 'item' }, el('div', { class: 'item-meta' }, '(empty log)')));
-          return;
-        }
-        for (const e of r.data.entries) {
-          const ts = e.ts || '';
-          const gw_ = e.gateway || '';
-          const mode = e.mode || '';
-          const tool = e.tool || '';
-          const summary = (e.request || e.error || e.output || e.type || '');
-          list.appendChild(el('div', { class: 'item' },
-            el('div', { class: 'item-meta' }, `${ts}  ${gw_}  ${mode}  ${tool}`),
-            el('div', { class: 'item-body' }, String(summary).slice(0, 400))
-          ));
-        }
+        // Re-attach SSE stream — its bootstrap sends the last 20.
+        _logsAttachStream();
       };
-      if (refresh) refresh.onclick = load;
-      await load();
+      if (refresh) refresh.onclick = reload;
+      await reload();
     },
   });
 
@@ -1001,6 +1167,13 @@
     });
     es.addEventListener('clarify_resolved', (e) => {
       try { handleSSEEvent('clarify_resolved', JSON.parse(e.data)); } catch {}
+    });
+    // v1.24.1: memory.changed → re-mount the memory panel if it's active.
+    es.addEventListener('memory.changed', () => {
+      const memPanel = document.getElementById('panel-memory');
+      if (memPanel && memPanel.classList.contains('active')) {
+        try { panels.memory.mount(); } catch (e) {}
+      }
     });
     es.onopen = () => { if (sw) sw.textContent = 'events: connected'; };
     es.onerror = () => {

@@ -8,6 +8,9 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/static/app.css">
   <link rel="stylesheet" href="/static/vendor/xterm.css">
+  <!-- v1.24.1: CodeMirror 5 for Files panel syntax highlighting -->
+  <link rel="stylesheet" href="/static/vendor/codemirror.min.css">
+  <link rel="stylesheet" href="/static/vendor/codemirror-theme-dracula.min.css">
 </head>
 <body>
 <div id="app">
@@ -172,6 +175,11 @@
       <h2>background shells</h2>
       <div class="panel-toolbar">
         <input id="shell-cmd" placeholder="command... (e.g. python -m pytest -q)">
+        <label style="display:flex; align-items:center; gap:4px;
+                      font-size:0.85em; color:#666; margin: 0 6px;">
+          <input type="checkbox" id="shell-pty">
+          <span>pty (interactive)</span>
+        </label>
         <button id="shell-run" type="button">run bg</button>
         <button id="shells-refresh" class="secondary" type="button">refresh</button>
       </div>
@@ -265,6 +273,18 @@
 
 <script src="/static/vendor/xterm.min.js"></script>
 <script src="/static/vendor/xterm-addon-fit.min.js"></script>
+<!-- v1.24.1: CodeMirror 5 + modes for Files panel editing -->
+<script src="/static/vendor/codemirror.min.js"></script>
+<script src="/static/vendor/cm-matchbrackets.min.js"></script>
+<script src="/static/vendor/cm-closebrackets.min.js"></script>
+<script src="/static/vendor/mode-javascript.min.js"></script>
+<script src="/static/vendor/mode-python.min.js"></script>
+<script src="/static/vendor/mode-markdown.min.js"></script>
+<script src="/static/vendor/mode-xml.min.js"></script>
+<script src="/static/vendor/mode-htmlmixed.min.js"></script>
+<script src="/static/vendor/mode-css.min.js"></script>
+<script src="/static/vendor/mode-yaml.min.js"></script>
+<script src="/static/vendor/mode-shell.min.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
