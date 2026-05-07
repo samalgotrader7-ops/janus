@@ -272,6 +272,24 @@
       <button id="approval-approve" class="modal-btn-approve" type="button">approve</button>
     </div>
   </div>
+  <!-- v1.30.0: dedicated plan-review modal. Surfaces ExitPlanMode
+       approvals with metric pills, step list, and file chips. The
+       JS handler chooses between this modal and modal-approval based
+       on whether the SSE event includes a `plan` payload. -->
+  <div id="modal-plan" class="modal" style="display:none;">
+    <div class="modal-title">📋 plan review</div>
+    <div class="modal-meta">
+      <span id="plan-metrics" class="tag"></span>
+      <span id="plan-mode-tag" class="tag"></span>
+    </div>
+    <div id="plan-files" class="modal-plan-files"></div>
+    <div id="plan-steps" class="modal-plan-steps"></div>
+    <pre id="plan-body"></pre>
+    <div class="modal-actions">
+      <button id="plan-deny" class="modal-btn-deny" type="button">refine</button>
+      <button id="plan-approve" class="modal-btn-approve" type="button">proceed</button>
+    </div>
+  </div>
   <div id="modal-clarify" class="modal" style="display:none;">
     <div class="modal-title">janus needs your input</div>
     <div id="clarify-question" class="modal-question"></div>

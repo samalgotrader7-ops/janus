@@ -283,10 +283,73 @@ def is_plan_action(action_label: str) -> bool:
     return "exit_plan_mode" in action_label.lower()
 
 
+# ---------- Cross-surface renderers (v1.30.0) ----------
+
+# Telegram caps a message body at 4096 chars. Leave headroom for the
+# header line + a possible trailing "(plan body truncated)" note.
+TELEGRAM_BODY_CAP = 3600
+
+
+def render_telegram_text(
+    parsed: ParsedPlan, plan_text: str, *, mode: str = "plan",
+) -> str:
+    """Markdown-formatted plan-review body for Telegram.
+
+    Returns a string the gateway sends with ``parse_mode="Markdown"``.
+    The metric line is bold + italic so it stands out from the plan
+    body. Underscores in file paths get escaped because Markdown v1
+    treats them as italic delimiters.
+    """
+    metric = _format_metric_line(parsed)
+    header = f"📋 *Plan Review* — _{metric}_  `mode={mode}`"
+
+    body = (plan_text or "").strip()
+    truncated = False
+    if len(body) > TELEGRAM_BODY_CAP:
+        body = body[:TELEGRAM_BODY_CAP].rstrip()
+        truncated = True
+
+    parts = [header, "", body]
+    if truncated:
+        parts.append("")
+        parts.append("_(plan body truncated — full plan is in the audit log)_")
+    return "\n".join(parts)
+
+
+def build_web_payload(
+    parsed: ParsedPlan, plan_text: str, *, mode: str = "plan",
+) -> dict:
+    """Structured payload included on the ``approval_pending`` SSE event.
+
+    The web client renders a dedicated plan-review modal when this
+    payload is present (vs. the generic approval modal). All values are
+    JSON-serializable primitives so the wire format stays simple.
+
+    Files are capped at 16 in the payload — the full list lives in
+    ``raw_text`` if a renderer wants to recover it. 16 fits a single
+    panel of file chips without horizontal overflow.
+    """
+    files = parsed.files[:16]
+    return {
+        "mode": mode,
+        "metric_line": _format_metric_line(parsed),
+        "step_count": parsed.step_count,
+        "file_count": parsed.file_count,
+        "estimated_tool_calls": parsed.estimated_tool_calls,
+        "steps": list(parsed.steps),
+        "files": list(files),
+        "files_truncated": parsed.file_count > len(files),
+        "body_md": plan_text or "",
+    }
+
+
 __all__ = [
     "ParsedPlan",
     "parse_plan",
     "render_plain",
     "render_rich_panel",
     "is_plan_action",
+    "render_telegram_text",
+    "build_web_payload",
+    "TELEGRAM_BODY_CAP",
 ]

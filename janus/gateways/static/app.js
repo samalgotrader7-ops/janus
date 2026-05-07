@@ -1146,8 +1146,9 @@
     backdrop: null,
     approval: null,
     clarify: null,
+    plan: null,        // v1.30.0
     activeRequestId: null,
-    activeKind: null, // 'approval' | 'clarify'
+    activeKind: null, // 'approval' | 'clarify' | 'plan'
   };
 
   function showApprovalModal(evt) {
@@ -1160,7 +1161,64 @@
     riskTag.textContent = evt.risk || '';
     riskTag.className = 'tag risk-' + (evt.risk || 'ask');
     modalState.clarify.style.display = 'none';
+    if (modalState.plan) modalState.plan.style.display = 'none';
     modalState.approval.style.display = 'block';
+    modalState.backdrop.style.display = 'flex';
+  }
+
+  // v1.30.0: dedicated plan-review modal. Hooked from
+  // handleSSEEvent('approval_pending') when the event payload carries
+  // a `plan` key (built server-side via plan_render.build_web_payload).
+  // Resolves through the same /api/approve/{id} POST as a generic
+  // approval — only the rendering differs. No session/always grants
+  // are offered (every plan deserves a fresh decision, matching
+  // v1.27.2 cli_rich narrowing).
+  function showPlanModal(evt) {
+    if (!modalState.backdrop || !modalState.plan) {
+      // Fallback: no plan modal shipped → render via generic approval.
+      showApprovalModal(evt);
+      return;
+    }
+    modalState.activeRequestId = evt.request_id;
+    modalState.activeKind = 'plan';
+    const plan = evt.plan || {};
+    const metric = document.getElementById('plan-metrics');
+    if (metric) metric.textContent = plan.metric_line || '';
+    const modeTag = document.getElementById('plan-mode-tag');
+    if (modeTag) modeTag.textContent = 'mode=' + (plan.mode || 'plan');
+
+    // Files as chips
+    const filesDiv = document.getElementById('plan-files');
+    if (filesDiv) {
+      clear(filesDiv);
+      const files = Array.isArray(plan.files) ? plan.files : [];
+      for (const f of files) {
+        filesDiv.appendChild(el('span', { class: 'file-chip' }, f));
+      }
+      const remaining = (plan.file_count || 0) - files.length;
+      if (remaining > 0 || plan.files_truncated) {
+        const more = remaining > 0 ? '+' + remaining + ' more' : 'more files…';
+        filesDiv.appendChild(el('span', { class: 'file-chip more' }, more));
+      }
+    }
+
+    // Steps as numbered list
+    const stepsList = document.getElementById('plan-steps');
+    if (stepsList) {
+      clear(stepsList);
+      const steps = Array.isArray(plan.steps) ? plan.steps : [];
+      for (const s of steps) {
+        stepsList.appendChild(el('li', {}, s));
+      }
+    }
+
+    // Raw plan body (markdown left as-is — keeps it copyable)
+    const body = document.getElementById('plan-body');
+    if (body) body.textContent = plan.body_md || evt.details || '';
+
+    if (modalState.approval) modalState.approval.style.display = 'none';
+    if (modalState.clarify) modalState.clarify.style.display = 'none';
+    modalState.plan.style.display = 'block';
     modalState.backdrop.style.display = 'flex';
   }
 
@@ -1185,6 +1243,7 @@
       setTimeout(() => text.focus(), 30);
     }
     modalState.approval.style.display = 'none';
+    if (modalState.plan) modalState.plan.style.display = 'none';
     modalState.clarify.style.display = 'block';
     modalState.backdrop.style.display = 'flex';
   }
@@ -1196,7 +1255,9 @@
   }
 
   async function submitApproval(decision) {
-    if (!modalState.activeRequestId || modalState.activeKind !== 'approval') return;
+    // v1.30.0: also resolve plan-modal decisions — same POST endpoint.
+    if (!modalState.activeRequestId) return;
+    if (modalState.activeKind !== 'approval' && modalState.activeKind !== 'plan') return;
     const id = modalState.activeRequestId;
     hideModal();
     try {
@@ -1226,7 +1287,13 @@
   function handleSSEEvent(evt, data) {
     const sw = document.getElementById('footer-events');
     if (evt === 'approval_pending') {
-      showApprovalModal(data);
+      // v1.30.0: route ExitPlanMode approvals (those with a `plan`
+      // payload) to the dedicated plan-review modal.
+      if (data && data.plan) {
+        showPlanModal(data);
+      } else {
+        showApprovalModal(data);
+      }
     } else if (evt === 'clarify_pending') {
       showClarifyModal(data);
     } else if (evt === 'approval_resolved' || evt === 'clarify_resolved') {
@@ -1275,9 +1342,17 @@
     modalState.backdrop = document.getElementById('modal-backdrop');
     modalState.approval = document.getElementById('modal-approval');
     modalState.clarify = document.getElementById('modal-clarify');
+    modalState.plan = document.getElementById('modal-plan');
     if (!modalState.backdrop) return;
     document.getElementById('approval-approve').onclick = () => submitApproval(true);
     document.getElementById('approval-deny').onclick = () => submitApproval(false);
+    // v1.30.0: plan-review modal buttons reuse submitApproval (same
+    // /api/approve/{id} POST). The activeKind === 'plan' branch in
+    // submitApproval lets it through.
+    const planApprove = document.getElementById('plan-approve');
+    const planDeny = document.getElementById('plan-deny');
+    if (planApprove) planApprove.onclick = () => submitApproval(true);
+    if (planDeny) planDeny.onclick = () => submitApproval(false);
     document.getElementById('clarify-submit').onclick = () => {
       const text = document.getElementById('clarify-text');
       submitClarify(text ? text.value : '');

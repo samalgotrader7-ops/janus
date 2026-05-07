@@ -154,11 +154,18 @@ def request_approval(
     label: str,
     details: str,
     risk: str,
+    plan: dict | None = None,
 ) -> bool:
     """Block until the user decides. Called from the chat worker thread.
 
     Returns the user's decision (True=approve, False=deny). Returns
     False on timeout.
+
+    v1.30.0 — when ``plan`` is set (for ExitPlanMode actions), the
+    structured payload is included on the ``approval_pending`` SSE
+    event and on the ``list_pending_approvals`` bootstrap. The web
+    client uses its presence to switch from the generic approval modal
+    to the dedicated plan-review modal.
     """
     request_id = uuid.uuid4().hex
     ev = threading.Event()
@@ -171,14 +178,18 @@ def request_approval(
             "risk": risk,
             "auth_sid": auth_sid,
             "ts": time.time(),
+            "plan": plan,
         }
-    _broadcast_from_thread(loop, auth_sid, {
+    event = {
         "type": "approval_pending",
         "request_id": request_id,
         "label": label,
         "details": details,
         "risk": risk,
-    })
+    }
+    if plan is not None:
+        event["plan"] = plan
+    _broadcast_from_thread(loop, auth_sid, event)
     timed_out = not ev.wait(timeout=_approval_timeout())
     with _state_lock:
         entry = _pending_approvals.pop(request_id, None)
@@ -216,17 +227,25 @@ def list_pending_approvals(auth_sid: str = "") -> list[dict]:
     the SSE connection opened.
     """
     with _state_lock:
-        return [
-            {
+        out: list[dict] = []
+        for rid, e in _pending_approvals.items():
+            if auth_sid and e["auth_sid"] != auth_sid:
+                continue
+            entry = {
                 "request_id": rid,
                 "label": e["label"],
                 "details": e["details"],
                 "risk": e["risk"],
                 "ts": e["ts"],
             }
-            for rid, e in _pending_approvals.items()
-            if not auth_sid or e["auth_sid"] == auth_sid
-        ]
+            # v1.30.0 — include the plan payload on bootstrap so a tab
+            # that reconnects mid-flight gets the dedicated plan modal,
+            # not the generic one.
+            plan = e.get("plan")
+            if plan is not None:
+                entry["plan"] = plan
+            out.append(entry)
+        return out
 
 
 # ---------- clarify request (same pattern, returns text) ----------

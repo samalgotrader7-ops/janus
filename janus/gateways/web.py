@@ -272,9 +272,24 @@ def _make_web_approver(mode: str, auth_sid: str = "", loop=None):
         if not auth_sid or loop is None:
             return False
         from . import web_bridge
+        # v1.30.0 — when this is an ExitPlanMode call, attach a parsed
+        # plan payload so the web client can render the dedicated
+        # plan-review modal (metric pills + step list + file chips)
+        # instead of the generic approval prompt.
+        plan_payload: dict | None = None
+        try:
+            from .. import plan_render as _plan_render
+            if _plan_render.is_plan_action(action_label):
+                parsed = _plan_render.parse_plan(details)
+                plan_payload = _plan_render.build_web_payload(
+                    parsed, details, mode=mode,
+                )
+        except Exception:
+            plan_payload = None
         return web_bridge.request_approval(
             auth_sid=auth_sid, loop=loop,
             label=action_label, details=details, risk=str(risk),
+            plan=plan_payload,
         )
     return approver
 

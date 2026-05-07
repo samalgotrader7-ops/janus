@@ -478,6 +478,59 @@ footer.statusbar #footer-version { color: var(--text-faint); }
 .tag.risk-ask { background: #fafad2; color: #663; }
 .tag.risk-read { background: var(--ok-bg); color: var(--ok); }
 
+/* v1.30.0: plan-review modal (ExitPlanMode approvals) */
+.modal-plan-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.modal-plan-files .file-chip {
+  background: #eef4ff;
+  color: #244a8c;
+  border: 1px solid #c5d6f0;
+  border-radius: 12px;
+  padding: 2px 10px;
+  font-family: var(--mono);
+  font-size: 0.78em;
+}
+.modal-plan-files .file-chip.more {
+  background: #f5f5f5;
+  color: #666;
+  border-color: #ddd;
+  font-style: italic;
+}
+.modal-plan-steps {
+  margin: 0 0 12px 0;
+  padding: 0;
+  counter-reset: planstep;
+  list-style: none;
+}
+.modal-plan-steps li {
+  counter-increment: planstep;
+  font-size: 0.88em;
+  line-height: 1.5;
+  padding: 4px 0 4px 28px;
+  position: relative;
+  border-bottom: 1px dashed #eee;
+}
+.modal-plan-steps li:last-child { border-bottom: 0; }
+.modal-plan-steps li::before {
+  content: counter(planstep);
+  position: absolute;
+  left: 0;
+  top: 4px;
+  background: var(--brand);
+  color: #fff;
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  font-size: 0.72em;
+  font-weight: 600;
+  text-align: center;
+  line-height: 20px;
+}
+
 /* ---------- Login page ---------- */
 
 .auth-wrap {

@@ -278,20 +278,56 @@ def _make_approver(chat_id: int, app, sess: Session, loop: asyncio.AbstractEvent
         sess.approval_futures[token] = fut
         sess.approval_futures[token + ".key"] = cap_key  # type: ignore
 
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✓ Once", callback_data=f"appr:{token}:once"),
-                InlineKeyboardButton("✓ Session", callback_data=f"appr:{token}:sess"),
-            ],
-            [
-                InlineKeyboardButton("✓ Always", callback_data=f"appr:{token}:always"),
-                InlineKeyboardButton("✗ Deny", callback_data=f"appr:{token}:deny"),
-            ],
-        ])
-        body = (
-            f"⚠ approval needed (risk={risk}, mode={sess.mode_state.current})\n"
-            f"*{action_label}*\n\n{details[:1000]}"
+        # v1.30.0 — structured plan-review rendering for ExitPlanMode.
+        # Symmetric to v1.27.2 cli_rich + v1.29.3 auto-offer parity.
+        # Plan approvals get a 2-button (Yes/Deny) keyboard intentionally:
+        # every plan deserves a fresh decision (no session/always grants).
+        try:
+            from .. import plan_render as _plan_render
+        except Exception:
+            _plan_render = None  # type: ignore
+        is_plan = (
+            _plan_render is not None
+            and _plan_render.is_plan_action(action_label)
         )
+
+        if is_plan:
+            try:
+                parsed = _plan_render.parse_plan(details)
+                body = _plan_render.render_telegram_text(
+                    parsed, details, mode=sess.mode_state.current,
+                )
+            except Exception:
+                # Fall back to the generic body if parsing/rendering hiccups.
+                body = (
+                    f"📋 *Plan Review* (mode={sess.mode_state.current})\n\n"
+                    f"{details[:3500]}"
+                )
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "✓ Approve plan", callback_data=f"appr:{token}:once",
+                    ),
+                    InlineKeyboardButton(
+                        "✗ Refine", callback_data=f"appr:{token}:deny",
+                    ),
+                ],
+            ])
+        else:
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✓ Once", callback_data=f"appr:{token}:once"),
+                    InlineKeyboardButton("✓ Session", callback_data=f"appr:{token}:sess"),
+                ],
+                [
+                    InlineKeyboardButton("✓ Always", callback_data=f"appr:{token}:always"),
+                    InlineKeyboardButton("✗ Deny", callback_data=f"appr:{token}:deny"),
+                ],
+            ])
+            body = (
+                f"⚠ approval needed (risk={risk}, mode={sess.mode_state.current})\n"
+                f"*{action_label}*\n\n{details[:1000]}"
+            )
         coro = app.bot.send_message(
             chat_id=chat_id, text=body,
             parse_mode="Markdown", reply_markup=kb,
