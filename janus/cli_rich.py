@@ -1086,16 +1086,38 @@ def _dispatch(console, line: str, state: dict) -> bool:
                 f"[green]moved {n} {type_filter} card(s) to _superseded/[/]"
             )
             return True
-        # /memory consolidate — manual reflection pass (Phase 8 module).
-        if target.lower() == "consolidate":
+        # /memory consolidate — manual reflection pass.
+        # v1.29.0: --multi-stage opts into the swarm-shaped path
+        # (per-type extract in parallel → cross-type synthesize).
+        # JANUS_CONSOLIDATE_STRATEGY=multi_stage env var also triggers it.
+        target_lower = target.lower()
+        if (
+            target_lower == "consolidate"
+            or target_lower.startswith("consolidate")
+        ):
             try:
                 from . import memory_consolidate
             except ImportError:
                 console.print("[dim]consolidate module not available[/]")
                 return True
-            console.print("[dim]running consolidation (LLM call)...[/]")
+            multi_stage = (
+                "--multi-stage" in target_lower
+                or "--multistage" in target_lower
+                or os.environ.get("JANUS_CONSOLIDATE_STRATEGY", "").strip().lower()
+                == "multi_stage"
+            )
+            if multi_stage:
+                console.print(
+                    "[dim]running multi-stage consolidation "
+                    "(parallel per-type → synthesize)…[/]"
+                )
+            else:
+                console.print("[dim]running consolidation (LLM call)...[/]")
             try:
-                summary = memory_consolidate.run_once()
+                if multi_stage:
+                    summary = memory_consolidate.run_multi_stage()
+                else:
+                    summary = memory_consolidate.run_once()
             except Exception as e:
                 console.print(f"[red]error:[/] {type(e).__name__}: {e}")
                 return True
@@ -1103,6 +1125,14 @@ def _dispatch(console, line: str, state: dict) -> bool:
                 f"[green]consolidated:[/] {summary['written']} reflection card(s) "
                 f"from {summary['examined']} examined"
             )
+            stages = summary.get("stages", 0)
+            if stages:
+                ppt = summary.get("patterns_per_type") or {}
+                pat_total = sum(len(v) for v in ppt.values())
+                console.print(
+                    f"  [dim]({stages}-stage; "
+                    f"{pat_total} patterns from {len(ppt)} type(s))[/]"
+                )
             return True
         # /memory prune — pure-compute pruning pass.
         if target.lower() == "prune":
