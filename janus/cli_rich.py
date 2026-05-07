@@ -1937,7 +1937,7 @@ def main() -> None:
             if drip_q is not None:
                 question_text, _fqid = drip_q
                 console.print(
-                    f"\n[cyan]💬 quick question:[/] {question_text}\n"
+                    f"\n[cyan]{branding.glyph('💬', '?')} quick question:[/] {question_text}\n"
                     f"[dim](answer normally, 'skip' to skip, "
                     f"'stop drip' to pause)[/]"
                 )
@@ -1953,7 +1953,7 @@ def main() -> None:
             offer = _inf.pop_pending("cli", "default")
             if offer is not None:
                 console.print(
-                    f"\n[yellow]💡[/] {_inf.render_offer(offer)}"
+                    f"\n[yellow]{branding.glyph('💡', '*')}[/] {_inf.render_offer(offer)}"
                 )
         except Exception:
             pass
@@ -1982,6 +1982,9 @@ def main() -> None:
         # etc. only when a long markdown-shaped reply came back without
         # streaming, or when the user wants a different output style.
         rendered = output_styles.render(output, state.get("output_style", "markdown"))
+        # v1.24.3: drop emoji glyphs when the terminal can't render them.
+        # No-op on healthy UTF-8 terminals.
+        rendered = branding.emoji_safe_text(rendered)
         if not state.get("stream", True) or not output:
             # Streaming already painted it; only print again when we didn't.
             if rendered.strip():
@@ -2106,6 +2109,10 @@ def _render_step_factory(console, state=None):
         elif step["type"] == "stream_chunk":
             text = step.get("text", "")
             if text:
+                # v1.24.3: strip emoji on terminals where they'd
+                # render as mojibake (broken locale / non-UTF-8 stdout).
+                # On healthy terminals this is a no-op.
+                text = branding.emoji_safe_text(text)
                 # Use raw stdout write for unbuffered streaming feel; rich
                 # would re-render the whole panel for each chunk.
                 console.file.write(text)

@@ -42,16 +42,62 @@
 """
 
 import json as _json
+import os as _os
 import sys
 
 # Windows: console default is cp1252 which can't render the ╱─► / ┄ / ► /
 # box-drawing chars in branding.py. Reconfigure to utf-8 once at entry so
 # the banner doesn't crash. No-op on Linux/macOS where utf-8 is default.
 try:
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
 except Exception:
     pass
+
+
+def _check_locale_and_warn() -> None:
+    """v1.24.3: warn once at startup when the terminal locale will
+    misrender emoji. Sam ran into this on his Ubuntu deploy under
+    tmux — emojis came out as 'Ã°ÂÂÂ' (UTF-8 bytes interpreted as
+    Latin-1 and doubly encoded along the way).
+
+    We can't fix the terminal from here, but we can:
+      (a) tell the user how to fix it
+      (b) auto-fall-back to ASCII glyphs in the meantime
+    """
+    if _os.environ.get("JANUS_LOCALE_QUIET", "").lower() in (
+        "1", "true", "yes",
+    ):
+        return
+    enc = (getattr(sys.stdout, "encoding", None) or "").lower()
+    lang = (
+        _os.environ.get("LC_ALL")
+        or _os.environ.get("LC_CTYPE")
+        or _os.environ.get("LANG")
+        or ""
+    )
+    looks_bad = ("utf" not in enc) or (
+        lang.lower() in ("", "c", "posix", "ansi_x3.4-1968")
+    )
+    if not looks_bad:
+        return
+    # Print to stderr so it doesn't pollute -p output piping.
+    msg = (
+        f"\033[33m[janus] terminal locale looks unsafe for emoji "
+        f"rendering (LANG={lang or '<empty>'}, encoding={enc or '?'}).\033[0m\n"
+        f"\033[33m         emojis will be replaced with ASCII fallbacks. "
+        f"to enable emoji output:\033[0m\n"
+        f"\033[33m         export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8\033[0m\n"
+        f"\033[33m         (silence this warning with JANUS_LOCALE_QUIET=1)\033[0m\n"
+    )
+    try:
+        sys.stderr.write(msg)
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+_check_locale_and_warn()
 
 from . import config, index, eval as eval_mod  # noqa: E402  (after stdout fix)
 

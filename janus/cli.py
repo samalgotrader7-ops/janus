@@ -1587,8 +1587,10 @@ def main():
             drip_q = _iv.get_drip_question("cli", "default")
             if drip_q is not None:
                 question_text, _fqid = drip_q
+                from . import branding as _br
                 print(
-                    f"\n  {C.CYAN}💬 quick question:{C.R} {question_text}\n"
+                    f"\n  {C.CYAN}{_br.glyph('💬', '?')} quick question:"
+                    f"{C.R} {question_text}\n"
                     f"  {C.DIM}(answer normally, 'skip' to skip, "
                     f"'stop drip' to pause){C.R}"
                 )
@@ -1600,7 +1602,8 @@ def main():
             from . import interview_inferred as _inf
             offer = _inf.pop_pending("cli", "default")
             if offer is not None:
-                print(f"\n  {C.YELLOW}💡{C.R} {_inf.render_offer(offer)}")
+                from . import branding as _br
+                print(f"\n  {C.YELLOW}{_br.glyph('💡', '*')}{C.R} {_inf.render_offer(offer)}")
         except Exception:
             pass
 
@@ -1608,6 +1611,10 @@ def main():
         rendered = output_styles.render(
             output, _RUN_STATE.get("output_style", "markdown"),
         )
+        # v1.24.3: drop emojis on terminals that can't render them.
+        # No-op on healthy UTF-8 terminals.
+        from . import branding as _br
+        rendered = _br.emoji_safe_text(rendered)
         out_lines = rendered.splitlines() or [""]
         max_w = min(80, max(40, max(len(l) for l in out_lines) + 4))
         bar = "─" * (max_w - 2)

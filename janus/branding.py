@@ -19,8 +19,112 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-VERSION = "1.24.2"
+VERSION = "1.24.3"
 TAGLINE = "intent-first · safety-first agent"
+
+
+# ---------- v1.24.3: emoji-safe terminal rendering ----------
+#
+# When Janus runs under tmux/SSH with a misconfigured locale (LANG=C,
+# missing UTF-8 in tmux's default-terminal, etc.) emojis come out as
+# mojibake — UTF-8 bytes interpreted as Latin-1, sometimes doubly
+# encoded by intermediate layers. Sam reported "Ã°ÂÂÂ" in place of
+# "🎯" on his Ubuntu deploy.
+#
+# We can't fix the broken terminal from inside Janus, but we CAN:
+#   1. Detect when the terminal is unlikely to render emoji correctly.
+#   2. Provide an opt-out env var to force ASCII fallbacks.
+#   3. Offer a glyph() helper that emits emoji-or-fallback consistently.
+
+import os as _os
+import sys as _sys
+
+
+def _terminal_is_emoji_safe() -> bool:
+    """Heuristic: is the current terminal likely to render 4-byte UTF-8?
+
+    Returns True when stdout is bound to a UTF-8 encoder AND the locale
+    looks reasonable. False when LANG/LC_ALL is C/POSIX/ANSI_X3.4-1968,
+    or when stdout encoding is not UTF-8.
+    """
+    try:
+        enc = (getattr(_sys.stdout, "encoding", None) or "").lower()
+    except Exception:
+        enc = ""
+    if "utf" not in enc:
+        return False
+    lang = (
+        _os.environ.get("LC_ALL")
+        or _os.environ.get("LC_CTYPE")
+        or _os.environ.get("LANG")
+        or ""
+    ).lower()
+    if not lang:
+        # Empty locale on POSIX often means C-default. Conservative no.
+        return _os.name != "posix"
+    if lang in ("c", "posix", "ansi_x3.4-1968"):
+        return False
+    return "utf" in lang or lang.startswith("en") or lang.startswith("en_")
+
+
+def _emoji_disabled() -> bool:
+    """True if the user explicitly disabled emoji output, or the
+    terminal looks unsafe for emoji rendering."""
+    flag = _os.environ.get("JANUS_NO_EMOJI", "").strip().lower()
+    if flag in ("1", "true", "yes", "on"):
+        return True
+    if flag in ("0", "false", "no", "off"):
+        return False
+    # No explicit flag — auto-detect.
+    return not _terminal_is_emoji_safe()
+
+
+def glyph(emoji: str, ascii_fallback: str) -> str:
+    """Return ``emoji`` when the terminal can render it, else
+    ``ascii_fallback``.
+
+    Use this for all user-facing output that contains 4-byte UTF-8
+    glyphs (most colorful emoji). Single-codepoint pictographs in the
+    BMP (✓ ✗ → ●) are usually safe in any UTF-8 terminal and don't
+    need wrapping.
+
+    Example:
+        print(glyph("🎯", "->") + " interview mode on")
+
+    The result on a healthy terminal: "🎯 interview mode on"
+    On a Latin-1-leaking session: "-> interview mode on"
+    """
+    return ascii_fallback if _emoji_disabled() else emoji
+
+
+def emoji_safe_text(text: str) -> str:
+    """Strip 4-byte UTF-8 emoji from arbitrary text when the terminal
+    can't render them. Conservative — only replaces common emoji
+    ranges, leaves BMP characters (arrows, box-drawing, ✓ ✗) alone.
+    """
+    if not _emoji_disabled():
+        return text
+    out = []
+    for ch in text:
+        cp = ord(ch)
+        # Common emoji ranges (not exhaustive; we err on the side of
+        # leaving text intact). Replace with empty string — ASCII
+        # context (square brackets, labels) usually carries the meaning.
+        if (
+            0x1F300 <= cp <= 0x1FAFF   # Misc symbols, emoticons, transport
+            or 0x2600 <= cp <= 0x27BF  # Misc symbols + dingbats
+            or 0x2B00 <= cp <= 0x2BFF  # Misc symbols and arrows
+        ):
+            # Allow common BMP arrows that we use everywhere.
+            if cp in (0x2192, 0x2190, 0x2191, 0x2193,  # ← ↑ ↓ →
+                      0x2713, 0x2717,                   # ✓ ✗
+                      0x25CF, 0x25B8, 0x25C2):          # ● ▸ ◂
+                out.append(ch)
+                continue
+            # Otherwise drop.
+            continue
+        out.append(ch)
+    return "".join(out)
 
 # The prompt glyph echoes the bifurcation arrows. ASCII-safe enough on
 # any UTF-8 terminal; no special font required.
