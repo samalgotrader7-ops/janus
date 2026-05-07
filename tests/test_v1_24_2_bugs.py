@@ -19,17 +19,17 @@ def test_cli_rich_apply_uses_prompt_toolkit():
     """v1.24.2: the propose_diff approval prompt must NOT use raw
     input() — that breaks arrow-key handling under tmux. It should
     try prompt_toolkit first.
+
+    v1.24.5: scope the check to the _maybe_propose_memory function
+    rather than a fixed character window — v1.24.5 added a question-
+    detection branch that pushed prompt_toolkit further from the
+    "apply? [y/N]" string, but it's still in the same function.
     """
     pytest.importorskip("rich")
     from janus import cli_rich
-    src = inspect.getsource(cli_rich)
-    # Find the apply prompt block.
-    idx = src.find("apply? [y/N]")
-    assert idx >= 0
-    # Look at the surrounding ~600 chars to confirm the prompt_toolkit
-    # path is referenced near the apply prompt.
-    snippet = src[max(0, idx - 800):idx + 200]
-    assert "prompt_toolkit" in snippet, (
+    src = inspect.getsource(cli_rich._maybe_propose_memory)
+    assert "apply? [y/N]" in src
+    assert "prompt_toolkit" in src, (
         "v1.24.2: the apply prompt should use prompt_toolkit so "
         "arrow keys / readline editing behave correctly. Pre-v1.24.2 "
         "raw input() echoed ^[[A / ^[[B sequences and silently "

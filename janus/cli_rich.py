@@ -14,6 +14,7 @@ optional polish, not a hard dependency.
 """
 
 from __future__ import annotations
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -1593,6 +1594,50 @@ def _cmd_skill_review(console, name: str) -> bool:
 # ---------- Memory propose hook ----------
 
 
+def _output_ends_with_question(output: str) -> bool:
+    """v1.24.5: detect when the assistant's final reply is a question
+    directed at the user.
+
+    Sam (2026-05-07) hit a UX bug: he asked Janus to run pytest, Janus
+    finished and asked "Want me to install pytest-asyncio and re-run,
+    or investigate the web auth failure?". The propose_diff prompt
+    fired immediately and asked "apply? [y/N]: ". Sam typed "y"
+    intending to answer Janus's question — but the "y" was consumed
+    by the memory diff prompt, the diff was applied, and Janus's
+    question was lost (next prompt was empty).
+
+    This heuristic catches that case so we can SKIP the y/N memory
+    prompt and auto-apply silently — preserving the user's
+    conversational flow with the agent.
+    """
+    if not output:
+        return False
+    text = output.rstrip()
+    if not text:
+        return False
+    # 1. Last non-empty line ends with '?'
+    if text.endswith("?"):
+        return True
+    # 2. Look at the last ~250 chars for question-of-action phrases.
+    #    These triggered the bug Sam reported even when no '?' was
+    #    on the literal last line (e.g., emoji or markdown trailing).
+    tail = text[-250:].lower()
+    QUESTION_PHRASES = (
+        "want me to",
+        "should i ", "should i?",
+        "would you like me to",
+        "would you like to",
+        "shall i ", "shall i?",
+        "do you want me to",
+        "let me know if",
+        "let me know whether",
+        "or investigate",  # exact phrase from Sam's screenshot
+        "or should i",
+        "which would you prefer",
+    )
+    return any(p in tail for p in QUESTION_PHRASES)
+
+
 def _maybe_propose_memory(console, req: str, output: str,
                           cache_snap=None) -> None:
     if not config.MEMORY_PROPOSE_ENABLED:
@@ -1605,6 +1650,41 @@ def _maybe_propose_memory(console, req: str, output: str,
     ops = result.get("ops") or []
     cards = result.get("cards") or []
     if not ops and not cards:
+        return
+
+    # v1.24.5: when the assistant ends with a question, the user's
+    # next input is meant for the agent (their answer). Showing a
+    # y/N memory prompt would steal that input. Auto-apply silently
+    # instead. The user can review via `/memory` or `/grants`. This
+    # behavior is opt-out via JANUS_MEMORY_PROMPT_ALWAYS=1.
+    auto_apply_silent = (
+        os.environ.get("JANUS_MEMORY_PROMPT_ALWAYS", "").strip().lower()
+        not in ("1", "true", "yes", "on")
+        and _output_ends_with_question(output)
+    )
+    if auto_apply_silent:
+        if ops:
+            memory.apply(ops)
+            cats = sorted({(op.get("category") or "user") for op in ops})
+            label = ", ".join(f"{c}.md" for c in cats)
+            console.print(
+                f"[dim]  · memory auto-applied to {label} "
+                f"(assistant asked you a question — review with "
+                f"/memory or revert by editing the .md files)[/]"
+            )
+        if cards:
+            written = memory.apply_cards(cards, gateway="cli")
+            if written:
+                console.print(
+                    f"[dim]  · auto-wrote {len(written)} card(s) to "
+                    f"~/.janus/memory/cards/ "
+                    f"(review with /memory show <id>)[/]"
+                )
+        if cache_snap is not None:
+            try:
+                cache_snap.refresh()
+            except Exception:
+                pass
         return
     if ops:
         console.print(Panel(memory.render_diff(ops), title="proposed memory updates",

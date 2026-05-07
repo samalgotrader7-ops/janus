@@ -1345,6 +1345,28 @@ def analyze():
     print()
 
 
+def _output_ends_with_question(output: str) -> bool:
+    """v1.24.5: same heuristic as cli_rich's. See that copy for the
+    Sam-bug context."""
+    if not output:
+        return False
+    text = output.rstrip()
+    if not text:
+        return False
+    if text.endswith("?"):
+        return True
+    tail = text[-250:].lower()
+    QUESTION_PHRASES = (
+        "want me to", "should i ", "should i?",
+        "would you like me to", "would you like to",
+        "shall i ", "shall i?", "do you want me to",
+        "let me know if", "let me know whether",
+        "or investigate", "or should i",
+        "which would you prefer",
+    )
+    return any(p in tail for p in QUESTION_PHRASES)
+
+
 def maybe_propose_memory(req, output, cache_snap=None):
     """Prompt-and-apply a memory diff. If `cache_snap` is provided and
     user.md is updated, refreshes the snapshot in place so subsequent
@@ -1361,6 +1383,39 @@ def maybe_propose_memory(req, output, cache_snap=None):
     cards = result.get("cards") or []
     if not ops and not cards:
         return
+
+    # v1.24.5: when the assistant's reply ends with a question to the
+    # user, auto-apply silently — otherwise the y/N prompt steals the
+    # user's intended answer to Janus. Opt-out via JANUS_MEMORY_PROMPT_ALWAYS=1.
+    import os as _os
+    auto_apply_silent = (
+        _os.environ.get("JANUS_MEMORY_PROMPT_ALWAYS", "").strip().lower()
+        not in ("1", "true", "yes", "on")
+        and _output_ends_with_question(output)
+    )
+    if auto_apply_silent:
+        if ops:
+            memory.apply(ops)
+            cats = sorted({(op.get("category") or "user") for op in ops})
+            label = ", ".join(f"{c}.md" for c in cats)
+            print(
+                f"  {C.DIM}· memory auto-applied to {label} "
+                f"(assistant asked you a question — review with "
+                f"/memory){C.R}"
+            )
+        if cards:
+            written = memory.apply_cards(cards, gateway="cli")
+            if written:
+                print(
+                    f"  {C.DIM}· auto-wrote {len(written)} card(s){C.R}"
+                )
+        if cache_snap is not None:
+            try:
+                cache_snap.refresh()
+            except Exception:
+                pass
+        return
+
     if ops:
         print(f"\n  {C.BOLD}proposed memory updates{C.R}\n")
         for line in memory.render_diff(ops).splitlines():
