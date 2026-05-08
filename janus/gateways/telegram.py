@@ -1696,6 +1696,21 @@ def serve() -> None:
         Application.builder()
         .token(config.TELEGRAM_BOT_TOKEN)
         .post_init(_post_init)
+        # v1.31.11 — enable concurrent update processing. Default in
+        # PTB v20+ is sequential per-chat (preserves message order).
+        # That serialization breaks the v1.31.10 text-reply fallback
+        # because the user's "Y/N" message queues behind the still-
+        # running on_text for the cost.py prompt — which can't
+        # complete because the approver is blocked on a future the
+        # text reply was supposed to resolve. Deadlock by design.
+        # Enabling concurrent_updates(True) lets the second on_text
+        # dispatch immediately, resolve the future, and unblock the
+        # first. Order of unrelated messages within the same chat
+        # is no longer strictly preserved — acceptable trade-off
+        # since plan-mode approvals are interleaved with chat turns
+        # by design and out-of-order delivery within an approval
+        # window is the expected pattern.
+        .concurrent_updates(True)
         .build()
     )
     app.add_handler(CommandHandler("start", cmd_start))
