@@ -243,21 +243,42 @@ def _make_approver(chat_id: int, app, sess: Session, loop: asyncio.AbstractEvent
     last-resort (used by older callers that hadn't been updated yet).
     """
     def approver(action_label: str, details: str, **kw) -> bool:
+        # v1.31.5 — detect plan action FIRST. Field-validation finding
+        # from Sam's VPS Telegram session: the model called
+        # exit_plan_mode, the approver auto-ALLOWed (ExitPlanMode is
+        # risk=read which permissions.decide(read, *) ALLOWs in every
+        # mode), and the v1.30.0 📋 Plan Review message + 2-button
+        # keyboard never rendered. Same root cause as the cli_rich
+        # bug. Fix: gate the mode-based ALLOW/DENY/grants short-circuits
+        # on is_plan == False. Plan actions ALWAYS proceed to the
+        # render+keyboard flow regardless of mode. ``is_plan_action``
+        # from plan_render is the shared detector (same one telegram +
+        # cli_rich + web all use).
+        try:
+            from .. import plan_render as _plan_render_top
+            is_plan = _plan_render_top.is_plan_action(action_label)
+        except Exception:
+            is_plan = bool(
+                action_label
+                and "exit_plan_mode" in action_label.lower()
+            )
+
         risk = kw.get("risk") or permissions.risk_from_verb(
             (kw.get("capability") or (None, "", None))[1]
         )
         cap = kw.get("capability") or (None, "", None)
         cap_key = f"{cap[0]}.{cap[1]}" if cap[0] else action_label
 
-        decision = permissions.decide(risk, sess.mode_state.current)
-        if decision == permissions.ALLOW:
-            return True
-        if decision == permissions.DENY:
-            return False
+        if not is_plan:
+            decision = permissions.decide(risk, sess.mode_state.current)
+            if decision == permissions.ALLOW:
+                return True
+            if decision == permissions.DENY:
+                return False
 
-        # ASK — check pre-existing grants.
-        if cap_key in sess.always_grants or cap_key in sess.session_grants:
-            return True
+            # ASK — check pre-existing grants.
+            if cap_key in sess.always_grants or cap_key in sess.session_grants:
+                return True
 
         # Send 4-button keyboard.
         # Use the loop captured at construction time. Falls back to a
@@ -282,17 +303,11 @@ def _make_approver(chat_id: int, app, sess: Session, loop: asyncio.AbstractEvent
         # Symmetric to v1.27.2 cli_rich + v1.29.3 auto-offer parity.
         # Plan approvals get a 2-button (Yes/Deny) keyboard intentionally:
         # every plan deserves a fresh decision (no session/always grants).
-        try:
-            from .. import plan_render as _plan_render
-        except Exception:
-            _plan_render = None  # type: ignore
-        is_plan = (
-            _plan_render is not None
-            and _plan_render.is_plan_action(action_label)
-        )
-
+        # v1.31.5 — ``is_plan`` is computed at the top of approver()
+        # so plan actions ALWAYS reach this branch regardless of mode.
         if is_plan:
             try:
+                from .. import plan_render as _plan_render
                 parsed = _plan_render.parse_plan(details)
                 body = _plan_render.render_telegram_text(
                     parsed, details, mode=sess.mode_state.current,

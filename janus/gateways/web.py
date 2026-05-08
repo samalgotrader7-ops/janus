@@ -258,14 +258,34 @@ def _make_web_approver(mode: str, auth_sid: str = "", loop=None):
     function stays back-compat for callers that haven't migrated.
     """
     def approver(action_label: str, details: str, **kw) -> bool:
+        # v1.31.5 — detect plan action FIRST via the shared
+        # ``plan_render.is_plan_action`` helper. Field-validation
+        # finding: ExitPlanMode is risk=read which
+        # permissions.decide(read, *) ALLOWs in every mode, so
+        # pre-v1.31.5 the web approver returned True silently and
+        # the v1.30.0 plan-review modal never rendered. Same root
+        # cause as the cli_rich + telegram fixes. Plan actions
+        # always proceed to the bridge regardless of mode.
+        try:
+            from .. import plan_render as _plan_render
+            is_plan = _plan_render.is_plan_action(action_label)
+        except Exception:
+            _plan_render = None  # type: ignore
+            is_plan = bool(
+                action_label
+                and "exit_plan_mode" in action_label.lower()
+            )
         risk = kw.get("risk") or permissions.risk_from_verb(
             (kw.get("capability") or (None, "", None))[1]
         )
-        decision = permissions.decide(risk, mode)
-        if decision == permissions.ALLOW:
-            return True
-        if decision == permissions.DENY:
-            return False
+
+        if not is_plan:
+            decision = permissions.decide(risk, mode)
+            if decision == permissions.ALLOW:
+                return True
+            if decision == permissions.DENY:
+                return False
+
         # ASK — defer to the user via SSE modal. Falls through to deny
         # if we don't have the bridge wired (auth_sid/loop missing,
         # e.g., legacy callers that didn't pass them through).
@@ -277,15 +297,14 @@ def _make_web_approver(mode: str, auth_sid: str = "", loop=None):
         # plan-review modal (metric pills + step list + file chips)
         # instead of the generic approval prompt.
         plan_payload: dict | None = None
-        try:
-            from .. import plan_render as _plan_render
-            if _plan_render.is_plan_action(action_label):
+        if is_plan and _plan_render is not None:
+            try:
                 parsed = _plan_render.parse_plan(details)
                 plan_payload = _plan_render.build_web_payload(
                     parsed, details, mode=mode,
                 )
-        except Exception:
-            plan_payload = None
+            except Exception:
+                plan_payload = None
         return web_bridge.request_approval(
             auth_sid=auth_sid, loop=loop,
             label=action_label, details=details, risk=str(risk),
