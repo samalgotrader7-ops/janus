@@ -497,7 +497,11 @@ def _make_telegram_clarify_cb(chat_id: int, app, sess: Session, loop: asyncio.Ab
         fut: asyncio.Future = loop.create_future()
         sess.clarify_futures[token] = fut
 
-        body = f"❓ *clarify*\n\n{question[:1000]}"
+        # v1.31.12 — plain text body (no markdown) for the same reason
+        # as v1.31.7: model-generated questions might contain
+        # underscores / asterisks that break Telegram's parse_mode
+        # "Markdown". Plain text always delivers.
+        body = f"❓ clarify\n\n{question[:1000]}"
         if choices:
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             kb_rows = []
@@ -516,14 +520,24 @@ def _make_telegram_clarify_cb(chat_id: int, app, sess: Session, loop: asyncio.Ab
                 callback_data=f"clr:{token}:other",
             )])
             kb = InlineKeyboardMarkup(kb_rows)
+            # v1.31.12 — also accept ANY text reply as the answer,
+            # not just after tapping "Other". Mirrors the plan-review
+            # text-reply fallback (v1.31.10). Without this, environments
+            # where Telegram callback_query delivery is broken can't
+            # answer clarifies at all because they can't tap "Other"
+            # to enter the text-reply path.
+            sess.clarify_futures["__awaiting_text__"] = fut  # type: ignore
+            body += (
+                "\n\n💬 OR type the option text (or your own answer) "
+                "if buttons don't work."
+            )
             coro = app.bot.send_message(
-                chat_id=chat_id, text=body,
-                parse_mode="Markdown", reply_markup=kb,
+                chat_id=chat_id, text=body, reply_markup=kb,
             )
         else:
-            body += "\n\n_type your answer in the chat._"
+            body += "\n\ntype your answer in the chat."
             coro = app.bot.send_message(
-                chat_id=chat_id, text=body, parse_mode="Markdown",
+                chat_id=chat_id, text=body,
             )
             # Mark this token as awaiting free text — on_text resolves it.
             sess.clarify_futures["__awaiting_text__"] = fut  # type: ignore
