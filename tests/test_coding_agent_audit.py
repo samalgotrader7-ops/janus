@@ -133,12 +133,17 @@ def test_fs_edit_then_edit_again_works(tmp_path, monkeypatch):
 
 def test_exit_plan_mode_approved():
     out = ExitPlanMode().run({"plan": "1. Read main.py\n2. Refactor"}, _approve)
-    assert out == PLAN_APPROVED
+    # v1.31.13: tool returns enriched guidance message with the
+    # PLAN_APPROVED sentinel as a literal substring (preserved for
+    # cli_rich's post-turn mode-switch detector).
+    assert PLAN_APPROVED in out
 
 
 def test_exit_plan_mode_refused():
     out = ExitPlanMode().run({"plan": "1. delete everything"}, _deny)
-    assert out == PLAN_REFUSED
+    # v1.31.13: tool returns enriched guidance message with the
+    # PLAN_REFUSED sentinel as a literal substring.
+    assert PLAN_REFUSED in out
 
 
 def test_exit_plan_mode_rejects_empty_plan():

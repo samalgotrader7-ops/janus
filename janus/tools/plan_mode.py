@@ -45,6 +45,40 @@ from .base import Tool
 PLAN_APPROVED = "PLAN_APPROVED"
 PLAN_REFUSED = "PLAN_REFUSED"
 
+# v1.31.13 — model-facing mode-awareness messages. Field-validation
+# finding from Sam's VPS (2026-05-08): after PLAN_REFUSED, the
+# model often responded with "ready to execute when you say go" —
+# but mode is still 'plan' (refusal does NOT trigger mode switch),
+# so any subsequent fs_write / fs_edit / shell call would be
+# blocked by mode 'plan'. The model didn't know mode was still
+# plan because the bare "PLAN_REFUSED" sentinel carried no
+# context. v1.31.13 enriches both result strings with explicit
+# guidance — the model receives concrete next-step instructions
+# instead of a bare token. The sentinel substrings remain literal
+# so cli_rich's post-turn mode-switch detector
+# (which uses ``PLAN_APPROVED in str(result_preview)``) keeps
+# working without changes.
+
+PLAN_APPROVED_MESSAGE = (
+    "PLAN_APPROVED — user approved your plan. The framework will "
+    "switch mode to default at the end of this turn. You may begin "
+    "executing the plan now (subsequent write/exec calls in THIS "
+    "turn may still be blocked because the mode-switch is "
+    "post-turn; if so, finish your text reply and the user's next "
+    "message will run with default mode active)."
+)
+PLAN_REFUSED_MESSAGE = (
+    "PLAN_REFUSED — user wants you to refine the plan, not execute "
+    "it. Mode is STILL 'plan' (writes/exec are BLOCKED). Do NOT "
+    "attempt fs_write, fs_edit, fs_multi_edit, shell, code_exec_*, "
+    "or any other write/exec tool — they will all return 'blocked "
+    "by mode plan'. Instead: ask the user what they'd like changed "
+    "(call clarify if helpful), iterate the plan in chat, then "
+    "call exit_plan_mode again with the revised plan when ready. "
+    "The user must switch mode (/mode default or /mode auto) "
+    "BEFORE any execution can happen."
+)
+
 
 class ExitPlanMode(Tool):
     """Present a finished plan to the user and request mode-switch out of plan."""
@@ -92,4 +126,9 @@ class ExitPlanMode(Tool):
             plan[:4000],
             capability=("plan", "exit", "session"),
         )
-        return PLAN_APPROVED if ok else PLAN_REFUSED
+        # v1.31.13 — return the full guidance message instead of the
+        # bare sentinel. Sentinel substrings ("PLAN_APPROVED" /
+        # "PLAN_REFUSED") remain literal at the start of each
+        # message so existing detectors (cli_rich post-turn mode
+        # switch) keep working unchanged.
+        return PLAN_APPROVED_MESSAGE if ok else PLAN_REFUSED_MESSAGE
