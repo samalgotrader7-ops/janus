@@ -293,15 +293,29 @@ TELEGRAM_BODY_CAP = 3600
 def render_telegram_text(
     parsed: ParsedPlan, plan_text: str, *, mode: str = "plan",
 ) -> str:
-    """Markdown-formatted plan-review body for Telegram.
+    """Plain-text plan-review body for Telegram.
 
-    Returns a string the gateway sends with ``parse_mode="Markdown"``.
-    The metric line is bold + italic so it stands out from the plan
-    body. Underscores in file paths get escaped because Markdown v1
-    treats them as italic delimiters.
+    Returns a string the gateway sends with ``parse_mode=None`` (plain
+    text). v1.31.7 — switched from Markdown to plain text after Sam's
+    VPS validation found that model-generated plan bodies often
+    contain markdown that Telegram's parse_mode="Markdown" can't
+    parse (`**bold**`, identifiers like `JANUS_COST_BUDGET_STRICT`
+    where adjacent underscores trip italic detection, etc.). The
+    silent send_message failure left the approver hung on the
+    approval future for 30 minutes.
+
+    The new shape uses unicode for visual structure (emoji + box-
+    drawing separator) instead of markdown formatting. Headers are
+    plain text. The body shows literal content — no risk of parse
+    failure. ``parse_mode=None`` is the only safe choice for
+    unpredictable model output.
+
+    Trade-off: lose nice italic/bold styling in the metric line.
+    Worth it for guaranteed delivery.
     """
     metric = _format_metric_line(parsed)
-    header = f"📋 *Plan Review* — _{metric}_  `mode={mode}`"
+    header_line = f"📋 PLAN REVIEW · {metric} · mode={mode}"
+    separator = "─" * 40
 
     body = (plan_text or "").strip()
     truncated = False
@@ -309,10 +323,10 @@ def render_telegram_text(
         body = body[:TELEGRAM_BODY_CAP].rstrip()
         truncated = True
 
-    parts = [header, "", body]
+    parts = [header_line, separator, body]
     if truncated:
         parts.append("")
-        parts.append("_(plan body truncated — full plan is in the audit log)_")
+        parts.append("(plan body truncated — full plan is in the audit log)")
     return "\n".join(parts)
 
 

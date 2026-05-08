@@ -343,11 +343,51 @@ def _make_approver(chat_id: int, app, sess: Session, loop: asyncio.AbstractEvent
                 f"⚠ approval needed (risk={risk}, mode={sess.mode_state.current})\n"
                 f"*{action_label}*\n\n{details[:1000]}"
             )
+        # v1.31.7 — plan reviews go without parse_mode. Field-validation
+        # finding from Sam's VPS: model-generated plan bodies frequently
+        # contain markdown that Telegram's parse_mode="Markdown" can't
+        # parse (`**bold**`, identifiers with underscores). The send
+        # then fails silently on the asyncio loop and the approver
+        # hangs on the future for 30 minutes (no message → no buttons →
+        # no future-resolve). Plain text is the only safe choice for
+        # unpredictable model output. Generic ASK approvals keep
+        # Markdown — their body is constructed by us and is known
+        # safe.
+        plan_parse_mode = None if is_plan else "Markdown"
         coro = app.bot.send_message(
             chat_id=chat_id, text=body,
-            parse_mode="Markdown", reply_markup=kb,
+            parse_mode=plan_parse_mode, reply_markup=kb,
         )
-        asyncio.run_coroutine_threadsafe(coro, approver_loop)
+        send_fut = asyncio.run_coroutine_threadsafe(coro, approver_loop)
+        # v1.31.7: wait briefly for send to actually complete so a
+        # parse error / network hiccup surfaces here instead of leaving
+        # us hung on the future. If send fails, retry plain-text + log
+        # the failure so future debugging isn't a black box.
+        try:
+            send_fut.result(timeout=10)
+        except Exception as send_exc:
+            try:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "telegram approval send_message failed (%s): %r — "
+                    "retrying with plain text",
+                    type(send_exc).__name__, send_exc,
+                )
+            except Exception:
+                pass
+            try:
+                fallback_coro = app.bot.send_message(
+                    chat_id=chat_id, text=body, reply_markup=kb,
+                )
+                asyncio.run_coroutine_threadsafe(
+                    fallback_coro, approver_loop,
+                ).result(timeout=10)
+            except Exception:
+                # Both Markdown + plain failed. The user won't see a
+                # keyboard; the future will time out at
+                # APPROVAL_TIMEOUT_S and the model gets a refusal.
+                # Better than the pre-v1.31.7 silent-hang.
+                pass
         # The approver runs on the executor thread, so we can't call
         # loop.run_until_complete (would crash — that's a main-loop
         # operation). Schedule the future on the gateway loop and

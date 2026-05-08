@@ -43,7 +43,10 @@ def test_render_telegram_text_has_metric_header():
         "1. read foo.py\n2. edit bar.py\n3. run tests\n"
     )
     out = plan_render.render_telegram_text(parsed, "1. step\n2. step", mode="plan")
-    assert "Plan Review" in out
+    # v1.31.7: header is now plain text "PLAN REVIEW" (uppercase),
+    # no markdown formatting — Telegram parse_mode dropped because
+    # model-generated bodies often break v1 markdown parsing.
+    assert "PLAN REVIEW" in out
     assert "3 steps" in out  # metric line counted
     assert "mode=plan" in out
 
@@ -63,13 +66,18 @@ def test_render_telegram_text_short_body_not_truncated():
     assert "truncated" not in out.lower()
 
 
-def test_render_telegram_text_uses_markdown_emphasis():
-    """Body uses *bold* / _italic_ markdown so Telegram renders it."""
+def test_render_telegram_text_uses_plain_text():
+    """v1.31.7: header is plain text (was Markdown pre-v1.31.7).
+    Telegram parse_mode is dropped at the send call so model-
+    generated bodies with stray markdown don't trip the parser."""
     parsed = plan_render.parse_plan("1. x")
     out = plan_render.render_telegram_text(parsed, "1. x")
-    assert "*Plan Review*" in out
-    # Mode tag uses backticks (monospace)
-    assert "`mode=" in out
+    # No markdown bold/italic/code in the header
+    assert "*Plan Review*" not in out
+    assert "`mode=" not in out
+    # Plain-text uppercase + box-drawing separator
+    assert "PLAN REVIEW" in out
+    assert "─" in out  # box-drawing horizontal line
 
 
 def test_render_telegram_text_includes_emoji_marker():
