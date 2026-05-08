@@ -170,6 +170,16 @@ class Session:
         # v1.18.2 — most-recent inbound message_id, so telegram_react
         # can target the user's last message.
         self.last_user_message_id: int | None = None
+        # v1.31.10 — pending plan-review approval that can be resolved
+        # via Y/N TEXT REPLY in addition to the inline keyboard.
+        # Set by the approver when it sends a plan-review keyboard;
+        # cleared after on_callback or on_text resolves the future.
+        # Workaround for environments where Telegram callback_query
+        # delivery is broken (Sam's VPS field test 2026-05-08:
+        # messages reach the bot but button taps never produce
+        # callback_query updates).
+        # Tuple is (future, token) — token used for double-resolve guards.
+        self.pending_plan_review: "tuple[asyncio.Future, str] | None" = None
 
     @property
     def messages(self) -> list[dict]:
@@ -336,9 +346,18 @@ def _make_approver(chat_id: int, app, sess: Session, loop: asyncio.AbstractEvent
             except Exception:
                 # Fall back to the generic body if parsing/rendering hiccups.
                 body = (
-                    f"📋 *Plan Review* (mode={sess.mode_state.current})\n\n"
+                    f"📋 Plan Review (mode={sess.mode_state.current})\n\n"
                     f"{details[:3500]}"
                 )
+            # v1.31.10 — append Y/N text-reply fallback hint. The
+            # buttons still work (when callback_query delivery is
+            # functional). Text reply is the workaround for environments
+            # where Telegram doesn't deliver callbacks.
+            body += (
+                "\n\n💬 OR reply Y (approve) / N (refine) "
+                "if buttons don't work."
+            )
+            sess.pending_plan_review = (fut, token)
             kb = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -974,6 +993,61 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not req.strip():
         return
 
+    # v1.31.10 — if a plan-review approval is pending and the user
+    # types a Y/N variant, resolve via text reply instead of waiting
+    # for an inline-keyboard callback. Workaround for environments
+    # where Telegram doesn't deliver callback_query updates (Sam's
+    # VPS field test 2026-05-08: every kind of tap reproduced the
+    # silent-no-delivery; button highlight visible client-side but
+    # `getUpdates` never returns the callback_query).
+    pending_pr = getattr(sess, "pending_plan_review", None)
+    if pending_pr is not None:
+        fut, _token = pending_pr
+        if fut.done():
+            # Already resolved (button click won the race) — clear
+            # stale state and fall through to normal chat handling.
+            sess.pending_plan_review = None
+        else:
+            normalized = req.strip().lower()
+            approve_words = (
+                "y", "yes", "approve", "approve plan", "ok", "go", "proceed",
+            )
+            refine_words = (
+                "n", "no", "refine", "decline", "reject", "stop",
+            )
+            if normalized in approve_words:
+                fut.set_result(True)
+                sess.pending_plan_review = None
+                log.info(
+                    "on_text: plan APPROVED via text reply token=%s "
+                    "text=%r", _token, normalized,
+                )
+                try:
+                    await update.message.reply_text(
+                        "✓ plan approved (via text reply)"
+                    )
+                except Exception as e:
+                    log.warning("on_text: reply_text raised: %r", e)
+                return
+            if normalized in refine_words:
+                fut.set_result(False)
+                sess.pending_plan_review = None
+                log.info(
+                    "on_text: plan REFINED via text reply token=%s "
+                    "text=%r", _token, normalized,
+                )
+                try:
+                    await update.message.reply_text(
+                        "✗ plan refined (via text reply)"
+                    )
+                except Exception as e:
+                    log.warning("on_text: reply_text raised: %r", e)
+                return
+            # Not a Y/N reply — fall through to normal chat handling.
+            # The plan-review keyboard stays live for the user to
+            # tap (if their environment supports it) or to type Y/N
+            # in a future message.
+
     # v1.8.0 — if a clarify-free-text future is pending, this incoming
     # message IS the answer (not a new chat turn). Resolve and bail
     # before the normal chat path runs.
@@ -1532,6 +1606,12 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "on_callback: fut.set_result(%s) for token=%s — chat-turn should wake",
         granted, token,
     )
+    # v1.31.10 — clear the text-reply fallback marker so a stray
+    # later Y/N text doesn't try to re-resolve a done future.
+    if getattr(sess, "pending_plan_review", None) is not None:
+        pr_fut, pr_token = sess.pending_plan_review
+        if pr_token == token:
+            sess.pending_plan_review = None
     label = {
         "once": "approved (this call only)",
         "sess": "approved (this session)",
