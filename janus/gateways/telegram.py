@@ -32,6 +32,8 @@ import asyncio
 import concurrent.futures
 import time
 import uuid
+import logging
+import os as _os
 from typing import Any
 
 from .. import app as janus_app  # `app` collides with python-telegram-bot Application
@@ -39,6 +41,25 @@ from .. import config, executor, logger, memory, index, skills, permissions
 from .. import branding, cost
 from ..tools import default_registry, make_protected, CapabilitySet
 from . import _common as gw
+
+
+# v1.31.8 — module-level logger for the telegram gateway. Field-validation
+# finding from Sam's VPS: callbacks (button taps) and text messages were
+# being CONSUMED by the bot but processed silently — handler exceptions
+# eaten by ``except Exception: pass`` blocks, no audit trail. Pre-v1.31.8
+# the only output channel was print() via stdout, which nohup captured
+# but Janus never wrote to. Adding a proper Python logger so future
+# silent failures surface in stderr (and the nohup log) instead of
+# requiring py-spy archaeology to diagnose.
+#
+# Level controllable via JANUS_TELEGRAM_LOG_LEVEL env var (default
+# WARNING — keeps normal operation quiet but exposes errors).
+_LOG_LEVEL = _os.environ.get("JANUS_TELEGRAM_LOG_LEVEL", "WARNING").upper()
+logging.basicConfig(
+    level=getattr(logging, _LOG_LEVEL, logging.WARNING),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+log = logging.getLogger("janus.telegram")
 
 
 try:
@@ -1368,11 +1389,21 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     silently. Pre-fix bug: clicks after the 180s timeout did nothing
     visible — user thought buttons were broken (Sam's screenshot
     2026-05-06).
+
+    v1.31.8: instrumented with logger.info at each branch + decision
+    point so future silent failures show up in the log instead of
+    requiring py-spy to diagnose.
     """
     q = update.callback_query
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    data = (q.data if q else None) or ""
+    log.info(
+        "on_callback FIRED chat=%s data=%r", chat_id, data[:80],
+    )
     # q.answer() may carry a popup. We DON'T answer yet — we want to
     # potentially answer with text/alert for stale clicks.
     if not _is_authorized(update.effective_chat.id):
+        log.warning("on_callback: chat %s not authorized — refusing", chat_id)
         try:
             await q.answer(text="not authorized", show_alert=True)
         except Exception:
@@ -1449,25 +1480,35 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     fut = sess.approval_futures.pop(token, None)
     cap_key = sess.approval_futures.pop(token + ".key", None)
+    log.info(
+        "on_callback appr: token=%s choice=%s fut=%s done=%s",
+        token, choice,
+        "found" if fut is not None else "MISSING",
+        fut.done() if fut is not None else "n/a",
+    )
 
     if fut is None or fut.done():
         # Stale click — prompt expired (timeout fired or process
         # restarted). Show the user a popup so they know the click
         # registered but the request is gone.
+        log.warning(
+            "on_callback: stale click token=%s (fut %s) — showing expired popup",
+            token, "missing" if fut is None else "already done",
+        )
         try:
             await q.answer(
                 text="this approval prompt expired — re-issue the request",
                 show_alert=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("on_callback: q.answer (stale) raised: %r", e)
         # Best-effort: edit the message so it's clear the buttons are dead.
         try:
             await q.edit_message_text(
                 (q.message.text or "(approval prompt)") + "\n\n→ (expired)"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("on_callback: edit_message (stale) raised: %r", e)
         return
 
     granted = choice in ("once", "sess", "always")
@@ -1477,6 +1518,10 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sess.grant_always(str(cap_key))
 
     fut.set_result(granted)
+    log.info(
+        "on_callback: fut.set_result(%s) for token=%s — chat-turn should wake",
+        granted, token,
+    )
     label = {
         "once": "approved (this call only)",
         "sess": "approved (this session)",
@@ -1486,14 +1531,38 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Popup feedback first — this works even if edit_message_text fails.
     try:
         await q.answer(text=label or choice)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("on_callback: q.answer raised: %r", e)
     try:
         await q.edit_message_text(
             (q.message.text or "(approval prompt)") + f"\n\n→ {label}"
         )
-    except Exception:
-        pass
+    except Exception as e:
+        # v1.31.8 — log instead of silent swallow. The plan-review
+        # message is plain-text (no parse_mode) but edit_message_text
+        # defaults to whatever the original message had; if it tries
+        # to re-parse markdown that's now-edited-with-arrow, we want
+        # to know.
+        log.warning("on_callback: edit_message_text raised: %r", e)
+
+
+async def _handle_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    """v1.31.8 — top-level Application error handler.
+
+    Without this, python-telegram-bot's default behavior is to log
+    handler exceptions via its own logger which (without basicConfig)
+    sends them to nowhere visible. Field-validation finding from
+    Sam's VPS: callbacks were arriving but on_callback was crashing
+    silently, leaving the chat-turn approver hung on a future that
+    never resolved. Adding an explicit error handler so any
+    unhandled exception in any handler surfaces in the log.
+    """
+    err = ctx.error
+    log.error(
+        "telegram handler exception: %r | update=%r",
+        err, getattr(update, "to_dict", lambda: update)(),
+        exc_info=err,
+    )
 
 
 # ---------- Public entry point ----------
@@ -1556,5 +1625,14 @@ def serve() -> None:
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(CallbackQueryHandler(on_callback))
 
+    # v1.31.8 — top-level error handler so handler exceptions surface
+    # in the log instead of being silently dropped.
+    app.add_error_handler(_handle_error)
+
     print(f"janus telegram gateway running ({branding.VERSION}). ctrl-c to stop.")
+    log.info(
+        "telegram gateway starting | log_level=%s | "
+        "set JANUS_TELEGRAM_LOG_LEVEL=INFO for handler-entry traces",
+        _LOG_LEVEL,
+    )
     app.run_polling(allowed_updates=["message", "callback_query"])
