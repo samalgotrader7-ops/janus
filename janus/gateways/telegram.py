@@ -953,6 +953,16 @@ async def cmd_cost(update: Update, _: ContextTypes.DEFAULT_TYPE):
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """v1.3 chat handler with pairing, self-intro, indicators, persistence."""
     chat_id = update.effective_chat.id
+    # v1.31.9 — handler-entry logging. Pairs with on_callback's FIRED
+    # log so we can compare handler dispatch for messages vs callbacks
+    # in field-validation logs.
+    try:
+        _txt_preview = (update.message.text or "")[:60] if update.message else ""
+    except Exception:
+        _txt_preview = ""
+    log.info(
+        "on_text FIRED chat=%s text=%r", chat_id, _txt_preview,
+    )
 
     # Unauthorized → pairing flow.
     if not _is_authorized(chat_id):
@@ -1629,10 +1639,48 @@ def serve() -> None:
     # in the log instead of being silently dropped.
     app.add_error_handler(_handle_error)
 
+    # v1.31.9 — catch-all update logger in a separate group so EVERY
+    # update is logged regardless of whether other handlers match.
+    # Group 99 means "after group 0" — group 0 handlers run first
+    # (and stop dispatch within their group), then group 99 always
+    # runs. This tells us definitively whether updates of any type
+    # are reaching the dispatcher at all. Pairs with on_text /
+    # on_callback FIRED logs to triangulate the field bug.
+    from telegram.ext import TypeHandler
+    from telegram import Update as _Upd
+
+    async def _log_all_updates(update, ctx):
+        try:
+            kind = "?"
+            if getattr(update, "callback_query", None):
+                kind = "callback_query"
+            elif getattr(update, "message", None):
+                kind = "message"
+            elif getattr(update, "edited_message", None):
+                kind = "edited_message"
+            chat_id = update.effective_chat.id if update.effective_chat else None
+            log.info(
+                "dispatcher saw update kind=%s chat=%s update_id=%s",
+                kind, chat_id, getattr(update, "update_id", None),
+            )
+        except Exception as e:
+            log.warning("catch-all logger raised: %r", e)
+
+    app.add_handler(TypeHandler(_Upd, _log_all_updates), group=99)
+
     print(f"janus telegram gateway running ({branding.VERSION}). ctrl-c to stop.")
     log.info(
-        "telegram gateway starting | log_level=%s | "
+        "telegram gateway starting | log_level=%s | handlers=%d | "
         "set JANUS_TELEGRAM_LOG_LEVEL=INFO for handler-entry traces",
         _LOG_LEVEL,
+        sum(len(h) for h in app.handlers.values()),
     )
+    # v1.31.9 — log the handler types so we can verify
+    # CallbackQueryHandler is actually registered.
+    for group, handlers in app.handlers.items():
+        for h in handlers:
+            log.info(
+                "registered handler: group=%s type=%s",
+                group, type(h).__name__,
+            )
     app.run_polling(allowed_updates=["message", "callback_query"])
