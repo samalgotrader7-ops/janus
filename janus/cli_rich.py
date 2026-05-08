@@ -697,7 +697,7 @@ def _is_high_risk_grant(tool_name: str, capability) -> tuple[bool, str]:
     return False, ""
 
 
-def _make_mode_approver(console, mode_state: permissions.ModeState):
+def _make_mode_approver(console, mode_state: permissions.ModeState, *, state: dict | None = None):
     """v1.0 approver: consults the active permission mode + tool risk class.
 
     Tool risk arrives via the `risk=` kwarg the Registry injects (see
@@ -747,14 +747,35 @@ def _make_mode_approver(console, mode_state: permissions.ModeState):
                     # Plan-mode prompt is intentionally narrow — no
                     # session/always grants for "approve this plan".
                     prompt_text = "[Y]es proceed  [N]o refine  > "
+                    # v1.31.6: pause + clear the active StatusLine
+                    # before the prompt. Without this, the background
+                    # status redraw (every 400ms via \r\033[K) wipes
+                    # the prompt every tick and the user sees only
+                    # "running exit_plan_mode…" — never the prompt.
+                    # FIELD REPORT (Sam, VPS): apparent 7-min hang
+                    # because the panel rendered but the prompt was
+                    # invisible under the spinner.
+                    sl = state.get("_status_line") if state else None
+                    if sl is not None:
+                        try:
+                            sl.begin_streaming()
+                        except Exception:
+                            pass
                     try:
-                        if HAVE_RICH:
-                            from prompt_toolkit import prompt as _pt_prompt
-                            ans = _pt_prompt(prompt_text, default="").strip().lower()
-                        else:
-                            ans = input(prompt_text).strip().lower()
-                    except (EOFError, KeyboardInterrupt):
-                        return False
+                        try:
+                            if HAVE_RICH:
+                                from prompt_toolkit import prompt as _pt_prompt
+                                ans = _pt_prompt(prompt_text, default="").strip().lower()
+                            else:
+                                ans = input(prompt_text).strip().lower()
+                        except (EOFError, KeyboardInterrupt):
+                            return False
+                    finally:
+                        if sl is not None:
+                            try:
+                                sl.end_streaming()
+                            except Exception:
+                                pass
                     if ans in ("y", "yes"):
                         return True
                     return False
@@ -838,14 +859,33 @@ def _make_mode_approver(console, mode_state: permissions.ModeState):
         else:
             prompt_text = "[Y]es  [s]ession  [a]lways  [N]o  > "
         ans = ""
+        # v1.31.6: pause + clear the status line before any approval
+        # prompt (same fix as the plan-review prompt above; same root
+        # cause — the 400ms status redraw wipes the prompt every tick
+        # otherwise). Sam saw the symptom on plan-review where the
+        # user spends seconds reading; the issue exists on every ASK
+        # prompt though, just less visible on quick decisions.
+        sl = state.get("_status_line") if state else None
+        if sl is not None:
+            try:
+                sl.begin_streaming()
+            except Exception:
+                pass
         try:
-            if HAVE_RICH:
-                from prompt_toolkit import prompt as _pt_prompt
-                ans = _pt_prompt(prompt_text, default="").strip().lower()
-            else:
-                ans = input(prompt_text).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            return False
+            try:
+                if HAVE_RICH:
+                    from prompt_toolkit import prompt as _pt_prompt
+                    ans = _pt_prompt(prompt_text, default="").strip().lower()
+                else:
+                    ans = input(prompt_text).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return False
+        finally:
+            if sl is not None:
+                try:
+                    sl.end_streaming()
+                except Exception:
+                    pass
         if ans in ("y", "yes"):
             return True
         if ans in ("s", "session"):
@@ -2547,7 +2587,6 @@ def main() -> None:
         except Exception:
             _show()
 
-    base_approver = _make_mode_approver(console, mode_state)
     state: dict[str, Any] = {
         "quit": False,
         "conv": None,
@@ -2564,6 +2603,13 @@ def main() -> None:
         # Last user input — used by /why to re-interpret on demand.
         "last_user_input": "",
     }
+    # v1.31.6: pass state into the approver so the plan-review prompt
+    # can pause + clear the active StatusLine while awaiting input.
+    # Without this, the 400ms status redraw ("running exit_plan_mode…")
+    # overwrites the [Y]es/[N]o prompt every tick — Sam saw a 7-min
+    # apparent hang on his VPS where the panel rendered fine but the
+    # prompt was invisible under the spinner.
+    base_approver = _make_mode_approver(console, mode_state, state=state)
     history = FileHistory(str(config.HISTORY_FILE))
     session = PromptSession(
         history=history,
