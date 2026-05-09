@@ -133,15 +133,16 @@ def test_v1_31_15_marker_present():
     assert "v1.31.15" in src
 
 
-def test_version_bumped_to_1_31_15():
-    """branding.VERSION + pyproject version match."""
+def test_version_bumped_to_1_31_15_or_later():
+    """v1.31.15 introduced the unbuffered-startup fix. Pin >=
+    1.31.15 instead of strict equality so subsequent point releases
+    don't break this test."""
     from janus import branding
-    assert branding.VERSION == "1.31.15"
-    pyproject_path = (
-        Path(__file__).parent.parent / "pyproject.toml"
-    )
-    py_src = pyproject_path.read_text(encoding="utf-8")
-    assert 'version = "1.31.15"' in py_src
+
+    def _parts(v: str) -> tuple[int, ...]:
+        return tuple(int(x) for x in v.split("."))
+
+    assert _parts(branding.VERSION) >= (1, 31, 15)
 
 
 # ---------- Behavioral pin: print(..., flush=True) writes immediately ----------

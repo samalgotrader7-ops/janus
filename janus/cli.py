@@ -51,6 +51,13 @@ def banner():
         mcp_count = len(mcp_client.get_active_clients())
     except Exception:
         mcp_count = 0
+    # v1.31.16 — pair the active count with the configured count so
+    # the banner reads "0/12 mcp" when servers exist but aren't
+    # connected yet.
+    try:
+        mcp_configured = len(mcp_client.load_servers())
+    except Exception:
+        mcp_configured = 0
 
     b = branding.BannerInputs(
         model=config.MODEL,
@@ -59,6 +66,7 @@ def banner():
         tool_count=tool_count,
         skill_count=skill_count,
         mcp_count=mcp_count,
+        mcp_configured=mcp_configured,
     )
 
     print()

@@ -616,6 +616,15 @@ class TelegramEmitter(gw.IndicatorEmitter):
             pass
 
     def emit(self, ind: gw.Indicator) -> None:
+        # v1.31.16 — Hermes-style quiet by default. The model's final
+        # assistant message carries the substantive output; intermediate
+        # tool/skill/memory/thinking glyphs were noisy spam in field
+        # use. Set JANUS_TELEGRAM_VERBOSE=1 to bring the glyph stream
+        # back. Approval / clarify / plan-review prompts STILL fire —
+        # those go through different paths (the approver callbacks),
+        # not this emitter, so the user can always intervene.
+        if not config.TELEGRAM_VERBOSE:
+            return
         glyph = gw.INDICATOR_GLYPHS.get(ind.kind, "")
         if ind.kind == "skill_loaded":
             self._send(f"{glyph} skill: {ind.payload.get('name', '?')}")

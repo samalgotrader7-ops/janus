@@ -166,6 +166,16 @@ PLAN_LEAF_STEPS: int = int(os.getenv("JANUS_PLAN_LEAF_STEPS", "15"))
 # --- Phase 5: gateways ---
 TELEGRAM_BOT_TOKEN: str = os.getenv("JANUS_TELEGRAM_TOKEN", "")
 TELEGRAM_ALLOWED_CHATS: str = os.getenv("JANUS_TELEGRAM_CHATS", "")
+# v1.31.16 — Hermes-style quiet telegram by default. Pre-v1.31.16 the
+# gateway emitted a separate Telegram message for every tool_start /
+# tool_end / skill_loaded / memory_update / thinking event. Sam's
+# field-test compared this against Hermes (which emits nothing
+# during the turn — only the model's final summary message lands)
+# and found Janus's per-event spam noisy. Default is now QUIET; set
+# JANUS_TELEGRAM_VERBOSE=1 to bring back the v1.31.x glyph stream.
+TELEGRAM_VERBOSE: bool = os.getenv("JANUS_TELEGRAM_VERBOSE", "0").lower() in (
+    "1", "true", "yes", "on",
+)
 
 # --- Phase 6: daemon ---
 DAEMON_POLL_SECONDS: int = int(os.getenv("JANUS_DAEMON_POLL", "30"))

@@ -215,6 +215,13 @@ def _banner(console) -> None:
         mcp_count = len(mcp_client.get_active_clients())
     except Exception:
         mcp_count = 0
+    # v1.31.16 — also count configured-but-not-connected so the banner
+    # shows "0/12 mcp" instead of "0 mcp" when the user has servers in
+    # ~/.janus/mcp/servers.json but hasn't run /mcp connect yet.
+    try:
+        mcp_configured = len(mcp_client.load_servers())
+    except Exception:
+        mcp_configured = 0
 
     b = branding.BannerInputs(
         model=config.MODEL,
@@ -223,6 +230,7 @@ def _banner(console) -> None:
         tool_count=tool_count,
         skill_count=skill_count,
         mcp_count=mcp_count,
+        mcp_configured=mcp_configured,
     )
 
     parts = []

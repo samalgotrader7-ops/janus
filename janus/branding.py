@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-VERSION = "1.31.15"
+VERSION = "1.31.16"
 TAGLINE = "intent-first · safety-first agent"
 
 
@@ -247,6 +247,16 @@ class BannerInputs:
     tool_count: int
     skill_count: int
     mcp_count: int
+    # v1.31.16 — total MCP servers configured in
+    # ~/.janus/mcp/servers.json. mcp_count is the number CONNECTED
+    # (live clients), which is 0 until the user runs /mcp connect.
+    # Pre-v1.31.16 the banner showed only mcp_count, so a user with
+    # 12 configured-but-not-connected servers saw "0 mcp" and thought
+    # the whole MCP integration was broken. Now we render "0/12 mcp"
+    # so the configured catalog is visible at a glance. Default 0
+    # keeps existing callers (tests + headless modes that pass
+    # mcp_count=0 without enumerating config) shaped the same.
+    mcp_configured: int = 0
 
 
 def logo_with_titles(b: BannerInputs) -> list[tuple[str, str]]:
@@ -264,11 +274,28 @@ def logo_with_titles(b: BannerInputs) -> list[tuple[str, str]]:
     ]
 
 
+def _format_mcp_count(connected: int, configured: int) -> str:
+    """v1.31.16 — render the MCP cell of the status line.
+
+    Returns:
+      "0 mcp"        — when nothing is configured (no slash to imply choice)
+      "0/12 mcp"     — when 12 are configured but none connected
+      "3/12 mcp"     — when some are connected and some aren't
+
+    Pin tested against the field shape Sam saw on his VPS (12
+    configured, 0 connected) so the banner reads "0/12 mcp".
+    """
+    if configured <= 0 or configured == connected:
+        return f"{connected} mcp"
+    return f"{connected}/{configured} mcp"
+
+
 def status_lines(b: BannerInputs) -> list[str]:
     """Return the per-line status block (no ANSI). Counts are right-aligned
     after the home path so the eye lands on them last."""
     counts = (
-        f"{b.tool_count} tools · {b.skill_count} skills · {b.mcp_count} mcp"
+        f"{b.tool_count} tools · {b.skill_count} skills · "
+        f"{_format_mcp_count(b.mcp_count, b.mcp_configured)}"
     )
     return [
         f"   model    {b.model}",
