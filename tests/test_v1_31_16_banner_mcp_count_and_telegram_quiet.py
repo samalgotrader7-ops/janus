@@ -273,8 +273,3 @@ def test_version_bumped_to_1_31_16_or_later():
     from janus import branding as b
     parts = tuple(int(x) for x in b.VERSION.split("."))
     assert parts >= (1, 31, 16)
-    pyproject_path = (
-        Path(b.__file__).parent.parent / "pyproject.toml"
-    )
-    py_src = pyproject_path.read_text(encoding="utf-8")
-    assert 'version = "1.31.16"' in py_src

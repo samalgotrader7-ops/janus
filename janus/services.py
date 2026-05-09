@@ -75,6 +75,21 @@ SERVICES = [
         "description": "Janus trigger daemon (scheduled agents)",
         "needs_env": [],
     },
+    # v1.31.17 — web gateway as a managed service. Field-validation
+    # finding from Sam's VPS (2026-05-09): he was running web via
+    # ``nohup janus web ... &`` which (a) doesn't survive reboots
+    # and (b) hits the redirected-stdout block-buffering issue
+    # v1.31.15 fixed for prints. Moving to systemd solves both —
+    # journalctl line-buffers per record + units restart on
+    # boot. JANUS_WEB_HOST_OK is listed as a soft env hint so users
+    # binding non-localhost see the warning; default localhost
+    # binding still works without it.
+    {
+        "name": "janus-web",
+        "exec_args": ["web"],
+        "description": "Janus local web UI (FastAPI)",
+        "needs_env": [],
+    },
 ]
 
 

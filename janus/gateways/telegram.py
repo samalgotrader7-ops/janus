@@ -1712,6 +1712,22 @@ def serve() -> None:
             "  (chat access via `janus pair approve <CODE>` per chat)"
         )
 
+    # v1.31.17 — same stdout-buffering fix v1.31.15 applied to web.
+    # Under ``nohup janus telegram > log 2>&1`` CPython block-buffers
+    # stdout because it's a redirected file (not a TTY). The startup
+    # banner + getUpdates trace lines never reach the log until the
+    # buffer fills (~4-8KB), making "is this process actually running
+    # and polling?" impossible to answer from `tail -5 log`.
+    # systemd users don't see this (journalctl handles framing per
+    # record), but Sam's VPS used nohup until v1.31.17 added a
+    # janus-web.service unit. Belt-and-suspenders here too so non-
+    # systemd setups keep working transparently.
+    import sys as _sys
+    try:
+        _sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
     config.assert_configured()
     config.ensure_home()
 
@@ -1786,7 +1802,12 @@ def serve() -> None:
 
     app.add_handler(TypeHandler(_Upd, _log_all_updates), group=99)
 
-    print(f"janus telegram gateway running ({branding.VERSION}). ctrl-c to stop.")
+    # v1.31.17 — flush=True belt-and-suspenders so the version banner
+    # appears in nohup-redirected logs even if reconfigure failed.
+    print(
+        f"janus telegram gateway running ({branding.VERSION}). ctrl-c to stop.",
+        flush=True,
+    )
     log.info(
         "telegram gateway starting | log_level=%s | handlers=%d | "
         "set JANUS_TELEGRAM_LOG_LEVEL=INFO for handler-entry traces",
