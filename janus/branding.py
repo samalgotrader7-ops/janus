@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-VERSION = "1.31.14"
+VERSION = "1.31.15"
 TAGLINE = "intent-first · safety-first agent"
 
 

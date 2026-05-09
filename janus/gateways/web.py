@@ -33,6 +33,7 @@ DEPENDENCIES:
 from __future__ import annotations
 import html
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -2541,6 +2542,24 @@ def serve(host: str | None = None, port: int | None = None) -> int:
 
     chosen_port = port if port is not None else config.WEB_PORT
 
+    # v1.31.15 — switch stdout to line-buffering so startup prints
+    # appear immediately when the user runs ``nohup janus web > log
+    # 2>&1`` (a redirected stdout block-buffers by default in
+    # CPython, so the v1.31.14 version banner sat in the buffer
+    # until ~4-8KB of activity flushed it). Field-validation: Sam
+    # restarted with v1.31.14 and ``head -3 /tmp/janus-web.log``
+    # showed only uvicorn's stderr-routed lines — the whole point
+    # of the version banner was to make staleness visible at a
+    # glance, but the buffer ate it. uvicorn's logging goes through
+    # stderr (line-buffered by default + merged via 2>&1), which is
+    # why its output appeared in head while ours didn't. Try/except
+    # because reconfigure isn't available on every kind of stdout
+    # (closed file, custom wrapper) — fall back gracefully.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
     # v1.21: bootstrap-token visibility. Read or create the token; on
     # first start it's freshly generated, so print it. Subsequent starts
     # find it on disk and stay quiet (the user already saw it once or
@@ -2557,11 +2576,17 @@ def serve(host: str | None = None, port: int | None = None) -> int:
     # returned 404. Without the version on startup, "is this process
     # stale?" required digging through pipx + ps + curl. With it,
     # `head -3 /var/log/janus-web.log` answers the question.
+    # v1.31.15 — flush=True belt-and-suspenders so the version
+    # banner reaches the log even on stdouts where reconfigure fails.
     print(
         f"janus web UI v{branding.VERSION} "
-        f"on http://{chosen_host}:{chosen_port}"
+        f"on http://{chosen_host}:{chosen_port}",
+        flush=True,
     )
-    print(f"login at http://{chosen_host}:{chosen_port}/login")
+    print(
+        f"login at http://{chosen_host}:{chosen_port}/login",
+        flush=True,
+    )
 
     is_local = chosen_host in ("127.0.0.1", "localhost", "::1")
     if is_fresh:
