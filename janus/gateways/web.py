@@ -1693,13 +1693,19 @@ def _build_app():
         per-server tool inventory. Connected servers contribute a
         live tool list; configured-only servers report
         ``connected: false`` and an empty tool list (the user can
-        connect via the existing CLI to inspect tools)."""
+        connect via the existing CLI to inspect tools).
+
+        v1.31.14 — response now includes ``skipped`` array listing
+        config entries that were dropped (HTTP-transport servers,
+        malformed configs). Each entry has {name, reason, source}.
+        Frontend renders these so users can see WHY their MCP isn't
+        appearing instead of staring at silence."""
         auth_sid, err_resp = _gate_get(request)
         if err_resp is not None:
             return err_resp
         try:
             from ..mcp import client as _mcp
-            servers = _mcp.load_servers()
+            servers, skipped = _mcp.load_servers_with_diagnostics()
             active = _mcp.get_active_clients()
             out: list[dict] = []
             seen: set[str] = set()
@@ -1769,7 +1775,13 @@ def _build_app():
                         ),
                     })
                 out.append(entry)
-            return JSONResponse({"servers": out})
+            # v1.31.14 — skipped entries surface alongside the live
+            # ones so the frontend can render them.
+            skipped_out = [
+                {"name": s.name, "reason": s.reason, "source": s.source}
+                for s in skipped
+            ]
+            return JSONResponse({"servers": out, "skipped": skipped_out})
         except Exception as e:
             return JSONResponse({"error": f"mcp catalog failed: {e}"})
 
@@ -2537,7 +2549,18 @@ def serve(host: str | None = None, port: int | None = None) -> int:
     is_fresh = not token_path.exists()
     token = web_auth.get_or_create_bootstrap_token()
 
-    print(f"janus web UI on http://{chosen_host}:{chosen_port}")
+    # v1.31.14 — version on the startup banner so future stale-process
+    # bugs are visible at a glance. Field-validation finding from
+    # Sam's VPS (2026-05-09): a janus web process started May 7 was
+    # still running 2 days later, holding old code in memory while
+    # /opt/janus on disk was at v1.31.13. All v1.29-v1.31 endpoints
+    # returned 404. Without the version on startup, "is this process
+    # stale?" required digging through pipx + ps + curl. With it,
+    # `head -3 /var/log/janus-web.log` answers the question.
+    print(
+        f"janus web UI v{branding.VERSION} "
+        f"on http://{chosen_host}:{chosen_port}"
+    )
     print(f"login at http://{chosen_host}:{chosen_port}/login")
 
     is_local = chosen_host in ("127.0.0.1", "localhost", "::1")

@@ -2059,10 +2059,14 @@ def _cmd_mcp_catalog(console) -> bool:
     + parameter count (from the live client). For CONFIGURED-ONLY
     servers we show command + args; the user can /mcp connect to
     inspect tools.
+
+    v1.31.14 — also surfaces SKIPPED entries (HTTP-transport servers,
+    malformed configs) so the user can see WHY their server isn't
+    appearing instead of staring at silence.
     """
-    servers = mcp_client.load_servers()
+    servers, skipped = mcp_client.load_servers_with_diagnostics()
     active = mcp_client.get_active_clients()
-    if not servers and not active:
+    if not servers and not active and not skipped:
         console.print(
             f"[dim]no MCP servers configured. drop a JSON config at "
             f"{config.MCP_SERVERS_FILE} or use ~/.claude/settings.json[/]"
@@ -2112,6 +2116,14 @@ def _cmd_mcp_catalog(console) -> bool:
                 f"      [dim]janus name: mcp_{name}_{tool_name}".replace(
                     "-", "_"
                 ) + "[/]"
+            )
+    # v1.31.14 — skipped entries last so they don't bury the live ones.
+    if skipped:
+        console.print()
+        for s in skipped:
+            console.print(
+                f"[yellow]⚠[/] [bold]{s.name}[/] "
+                f"[dim]skipped: {s.reason}[/]"
             )
     return True
 

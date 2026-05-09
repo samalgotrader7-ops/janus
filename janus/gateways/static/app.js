@@ -1392,7 +1392,8 @@
           return;
         }
         const servers = r.data.servers || [];
-        if (servers.length === 0) {
+        const skipped = r.data.skipped || [];
+        if (servers.length === 0 && skipped.length === 0) {
           list.appendChild(
             el('div', { class: 'item' },
                el('div', { class: 'item-meta' },
@@ -1448,9 +1449,38 @@
           }
           list.appendChild(item);
         }
+        // v1.31.14 — skipped entries surface AFTER the live list so
+        // they don't crowd the active servers. HTTP-transport entries
+        // (Cloudflare/SSE-style MCPs) are the most common reason a
+        // user asks "why isn't my server showing up?".
+        for (const sk of skipped) {
+          const item = el(
+            'div', { class: 'item' },
+            el(
+              'div', { class: 'item-title' },
+              el('span', { class: 'tag quarantined' }, 'skipped'),
+              ' ',
+              sk.name
+            ),
+            el(
+              'div', { class: 'item-meta', style: 'color:#a86;' },
+              sk.reason
+            )
+          );
+          if (sk.source) {
+            item.appendChild(
+              el('div', { class: 'item-meta', style: 'color:#888; font-size:0.85em;' },
+                 'from: ' + sk.source)
+            );
+          }
+          list.appendChild(item);
+        }
         const liveCount = servers.filter(s => s.connected).length;
+        const skipNote = skipped.length > 0
+          ? ` · ${skipped.length} skipped`
+          : '';
         setFooter(
-          `${servers.length} server(s) · ${liveCount} connected`
+          `${servers.length} server(s) · ${liveCount} connected${skipNote}`
         );
       };
       if (refresh) refresh.onclick = load;

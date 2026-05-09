@@ -33,6 +33,7 @@ auto-approval; otherwise the user sees y/N per call.
 
 from __future__ import annotations
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -42,6 +43,11 @@ from typing import Any, Callable
 
 from .. import config
 from ..tools.base import Tool, Registry
+
+
+# v1.31.14 — module-level logger so parse failures and silent drops
+# show up in the daemon log instead of being swallowed.
+log = logging.getLogger("janus.mcp")
 
 
 # ---------- Server config ----------
@@ -54,6 +60,124 @@ class McpServerConfig:
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
+
+
+# v1.31.14 — diagnostics for entries that load_servers() drops.
+# Field-validation finding from Sam's VPS (2026-05-09): a tinyfish MCP
+# server entry with `url` (HTTP transport) but no `command` was
+# silently skipped, and the user spent time wondering why "their MCP
+# server" wasn't appearing. Janus only supports stdio transport in
+# v1.x; HTTP transport is a future v2.x lift. This dataclass + the
+# load_servers_with_diagnostics() function let the cli_rich /mcp
+# catalog and the web /api/mcp/catalog surface explain WHY entries
+# are dropped instead of just leaving them invisible.
+@dataclass
+class SkipReason:
+    """An MCP config entry that was dropped during load. Surfaced
+    via load_servers_with_diagnostics() so users can see why their
+    HTTP-transport / malformed entry isn't showing up."""
+
+    name: str
+    source: str  # path of the config file the entry came from
+    reason: str  # human-readable explanation
+
+
+# Reason strings — kept as module constants so tests can pin them
+# without coupling to wording inside the function body.
+SKIP_REASON_NOT_DICT = "entry is not a JSON object"
+SKIP_REASON_HTTP_PREFIX = (
+    "HTTP transport not supported (Janus v1.x supports stdio only)"
+)
+SKIP_REASON_MISSING_COMMAND = "missing required 'command' field"
+SKIP_REASON_DUPLICATE = (
+    "duplicate name (earlier config source took precedence)"
+)
+
+
+def load_servers_with_diagnostics() -> tuple[
+    dict[str, McpServerConfig], list[SkipReason]
+]:
+    """v1.31.14 — like load_servers() but ALSO returns the list of
+    entries that were silently dropped during config parsing.
+
+    Reasons for skipping:
+      - 'entry is not a JSON object' — the value under the server
+        name isn't a dict (malformed config).
+      - 'HTTP transport not supported' — entry has 'url' but no
+        'command'. Janus v1.x only supports stdio MCP servers; HTTP
+        transport is on the v2.x roadmap. Most common cause of
+        invisible entries — Cloudflare/SSE-style MCP servers.
+      - 'missing required command field' — entry has neither url nor
+        command (incomplete config).
+      - 'duplicate name' — name was already loaded from an earlier
+        source (~/.janus/mcp/servers.json wins over ~/.claude/
+        settings.json).
+
+    Both ``cli_rich /mcp catalog`` and ``web /api/mcp/catalog`` use
+    this function so the user sees skipped entries in both surfaces.
+
+    ``load_servers()`` preserves its single-return signature for
+    back-compat — every existing caller continues to work unchanged.
+    """
+    out: dict[str, McpServerConfig] = {}
+    skipped: list[SkipReason] = []
+    for source in (config.MCP_SERVERS_FILE, config.CLAUDE_SETTINGS_FILE):
+        try:
+            if not source.exists():
+                continue
+            raw = json.loads(source.read_text(encoding="utf-8"))
+        except Exception as e:
+            # Don't swallow the parse error — log it. The user sees a
+            # generic "no servers configured" otherwise and has no
+            # idea their config is unparseable.
+            log.warning(
+                "MCP config %s: parse failed: %s: %s",
+                source, type(e).__name__, e,
+            )
+            continue
+        block = raw.get("mcpServers") if isinstance(raw, dict) else None
+        if block is None and isinstance(raw, dict):
+            # Janus-native: top-level keys ARE servers if they look like configs.
+            if all(isinstance(v, dict) and "command" in v for v in raw.values()):
+                block = raw
+        if not isinstance(block, dict):
+            continue
+        for name, spec in block.items():
+            if not isinstance(spec, dict):
+                skipped.append(SkipReason(
+                    name=str(name),
+                    source=str(source),
+                    reason=SKIP_REASON_NOT_DICT,
+                ))
+                continue
+            if "command" not in spec:
+                if "url" in spec:
+                    reason = (
+                        f"{SKIP_REASON_HTTP_PREFIX}; entry's url={spec.get('url')!r}"
+                    )
+                else:
+                    reason = SKIP_REASON_MISSING_COMMAND
+                skipped.append(SkipReason(
+                    name=str(name),
+                    source=str(source),
+                    reason=reason,
+                ))
+                continue
+            if name in out:
+                skipped.append(SkipReason(
+                    name=str(name),
+                    source=str(source),
+                    reason=SKIP_REASON_DUPLICATE,
+                ))
+                continue
+            out[name] = McpServerConfig(
+                name=name,
+                command=str(spec["command"]),
+                args=[str(a) for a in (spec.get("args") or [])],
+                env={str(k): str(v) for k, v in (spec.get("env") or {}).items()},
+                enabled=not bool(spec.get("disabled")),
+            )
+    return out, skipped
 
 
 def load_servers() -> dict[str, McpServerConfig]:
@@ -69,34 +193,11 @@ def load_servers() -> dict[str, McpServerConfig]:
 
     Janus-native dropping the `mcpServers` wrapper is also accepted:
       {"<name>": {"command": "...", ...}}
+
+    For diagnostics on entries that were silently dropped (HTTP
+    transport, malformed, etc.), use load_servers_with_diagnostics().
     """
-    out: dict[str, McpServerConfig] = {}
-    for source in (config.MCP_SERVERS_FILE, config.CLAUDE_SETTINGS_FILE):
-        try:
-            if not source.exists():
-                continue
-            raw = json.loads(source.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        block = raw.get("mcpServers") if isinstance(raw, dict) else None
-        if block is None and isinstance(raw, dict):
-            # Janus-native: top-level keys ARE servers if they look like configs.
-            if all(isinstance(v, dict) and "command" in v for v in raw.values()):
-                block = raw
-        if not isinstance(block, dict):
-            continue
-        for name, spec in block.items():
-            if not isinstance(spec, dict) or "command" not in spec:
-                continue
-            if name in out:
-                continue  # earlier source wins
-            out[name] = McpServerConfig(
-                name=name,
-                command=str(spec["command"]),
-                args=[str(a) for a in (spec.get("args") or [])],
-                env={str(k): str(v) for k, v in (spec.get("env") or {}).items()},
-                enabled=not bool(spec.get("disabled")),
-            )
+    out, _ = load_servers_with_diagnostics()
     return out
 
 
