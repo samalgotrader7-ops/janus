@@ -2664,6 +2664,130 @@ def _build_app():
         except Exception as e:
             return JSONResponse({"error": f"cost summary failed: {e}"})
 
+    # v1.35.6 — Phase 8.3: settings write. Whitelisted env keys can
+    # be updated via POST; persisted to ~/.janus/.env. The runtime
+    # environment is mutated for the current process so subsequent
+    # turns see the new value (services like janus-web restart on
+    # next pull anyway, but in-process updates are useful for
+    # iterating without a restart).
+    SETTINGS_WRITABLE_KEYS: frozenset = frozenset({
+        "JANUS_APPROVAL",
+        "JANUS_MODEL",
+        "JANUS_API_BASE",
+        "JANUS_TELEGRAM_VERBOSE",
+        "JANUS_TOOL_SCHEMA_SLIM",
+        "JANUS_TOKEN_BUDGET_COMPACT",
+        "JANUS_INTERVIEW_CROSS_GATEWAY",
+        "JANUS_BUDGET_USD",
+        "JANUS_VERIFY_MODEL",
+        "JANUS_SUBAGENT_MODEL",
+        "JANUS_MEMORY_MODEL",
+        "JANUS_TITLE_MODEL",
+    })
+
+    def _write_env_file(updates: dict[str, str]) -> tuple[bool, str]:
+        """Add / replace keys in ~/.janus/.env. Preserves comments
+        and unrelated lines. Idempotent."""
+        env_path = config.HOME / ".env"
+        try:
+            existing_lines: list[str] = []
+            if env_path.is_file():
+                existing_lines = env_path.read_text(encoding="utf-8").splitlines()
+            seen = set()
+            out_lines: list[str] = []
+            for line in existing_lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    out_lines.append(line)
+                    continue
+                key = stripped.split("=", 1)[0].strip()
+                if key in updates:
+                    out_lines.append(f"{key}={updates[key]}")
+                    seen.add(key)
+                else:
+                    out_lines.append(line)
+            for k, v in updates.items():
+                if k not in seen:
+                    out_lines.append(f"{k}={v}")
+            text = "\n".join(out_lines).rstrip() + "\n"
+            env_path.parent.mkdir(parents=True, exist_ok=True)
+            env_path.write_text(text, encoding="utf-8")
+            try:
+                env_path.chmod(0o600)
+            except Exception:
+                pass
+            return True, ""
+        except Exception as e:
+            return False, str(e)
+
+    @app.post("/api/settings")
+    async def api_settings_write(request: Request):
+        """v1.35.6: update whitelisted env keys + persist to
+        ~/.janus/.env. Body: {key: <name>, value: <string>} or
+        {updates: {key: value, ...}} for batch."""
+        auth_sid, err_resp, _ip = _gate_post(request, "/api/settings")
+        if err_resp is not None:
+            return err_resp
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "invalid JSON body"},
+            )
+
+        updates: dict[str, str] = {}
+        if isinstance(body, dict):
+            if "updates" in body and isinstance(body["updates"], dict):
+                for k, v in body["updates"].items():
+                    updates[str(k)] = str(v)
+            elif "key" in body and "value" in body:
+                updates[str(body["key"])] = str(body["value"])
+
+        if not updates:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "missing 'key'+'value' or 'updates' dict"},
+            )
+
+        # Whitelist enforcement
+        rejected = [k for k in updates if k not in SETTINGS_WRITABLE_KEYS]
+        if rejected:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "key not writable via this endpoint",
+                    "rejected": sorted(rejected),
+                    "writable": sorted(SETTINGS_WRITABLE_KEYS),
+                },
+            )
+
+        ok, msg = _write_env_file(updates)
+        if not ok:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"write failed: {msg}"},
+            )
+
+        # Update os.environ in-process so the running web sees the
+        # new values without restart.
+        for k, v in updates.items():
+            os.environ[k] = v
+
+        try:
+            from .. import audit_log
+            audit_log.record(
+                "settings.write",
+                keys=sorted(updates.keys()),
+            )
+        except Exception:
+            pass
+
+        return JSONResponse({
+            "status": "ok",
+            "updated_keys": sorted(updates.keys()),
+        })
+
     @app.get("/api/settings")
     async def api_settings(request: Request):
         """v1.22.3: read-only view of mode + model + key env vars."""
