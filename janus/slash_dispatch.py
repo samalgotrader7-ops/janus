@@ -326,6 +326,54 @@ def _h_grants(ctx: SlashContext, arg: str) -> str:
     )
 
 
+# v1.36.0 — Phase 8.1: 5 more cross-surface handlers (proof of pattern).
+# Migration approach: any read-only / info-only command moves here
+# first. State-mutating commands (/clear, /mode, etc.) stay surface-
+# specific until session-state ownership is unified.
+
+
+def _h_version(ctx, arg) -> str:
+    """`/version` — print the running Janus version."""
+    from . import branding
+    return f"janus {branding.VERSION}  ({branding.TAGLINE})"
+
+
+def _h_cwd(ctx, arg) -> str:
+    """`/cwd` — print the workspace directory janus operates in."""
+    from . import config
+    return str(config.WORKSPACE)
+
+
+def _h_home(ctx, arg) -> str:
+    """`/home` — print the ~/.janus state directory path."""
+    from . import config
+    return str(config.HOME)
+
+
+def _h_uptime(ctx, arg) -> str:
+    """`/uptime` — print this session's uptime in human-readable form."""
+    import time
+    started = ctx.state.get("_session_start_ts") if hasattr(ctx, "state") else None
+    if started is None:
+        return "uptime: (session start not tracked on this surface)"
+    secs = int(time.time() - started)
+    if secs < 60:
+        return f"uptime: {secs}s"
+    if secs < 3600:
+        return f"uptime: {secs // 60}m {secs % 60}s"
+    h, rem = divmod(secs, 3600)
+    return f"uptime: {h}h {rem // 60}m"
+
+
+def _h_provider(ctx, arg) -> str:
+    """`/provider` — show the detected LLM provider + cache support."""
+    from . import llm, config
+    p = llm.detect_provider(config.API_BASE)
+    cache_ok = llm.cache_supported(p)
+    cache_str = "cache supported" if cache_ok else "cache markers ignored"
+    return f"provider: {p}  ({cache_str})  base: {config.API_BASE}"
+
+
 def register_shared_handlers(registry: SlashRegistry) -> None:
     """Register the v1.24.1 shared handlers on a surface's registry.
 
@@ -333,5 +381,14 @@ def register_shared_handlers(registry: SlashRegistry) -> None:
     so the shared handlers sit alongside surface-specific ones. A
     surface can override any shared handler by registering its own
     AFTER calling this — registry.register overwrites.
+
+    v1.36.0 — Phase 8.1: added /version, /cwd, /home, /uptime, /provider
+    as proof-of-pattern for the slash dispatcher migration. Five more
+    commands sourced from one place; surfaces no longer duplicate them.
     """
     registry.register("/grants", _h_grants)
+    registry.register("/version", _h_version)
+    registry.register("/cwd", _h_cwd)
+    registry.register("/home", _h_home)
+    registry.register("/uptime", _h_uptime)
+    registry.register("/provider", _h_provider)
