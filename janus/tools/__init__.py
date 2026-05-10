@@ -41,6 +41,8 @@ from .image_gen import ImageGen
 # v1.38.0 — external CLI agent wrappers (Phase 10.2.0). First entry:
 # Claude Code via its non-interactive `-p` Print Mode.
 from .claude_code import ClaudeCode
+# v1.38.1 — Aider via `aider --message` (Phase 10.2.1).
+from .aider import Aider
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -146,6 +148,10 @@ _BUILTIN_TOOL_FACTORIES = {
     # token external_cli.claude_code.exec. Future v10.2.x adds
     # aider, codex_cli, gemini_cli on the same shape.
     "claude_code": ClaudeCode,
+    # v1.38.1 — Phase 10.2.1: Aider (https://aider.chat) via
+    # `aider --message --yes-always`. Pair-programming agent that
+    # auto-commits to git. Capability token external_cli.aider.exec.
+    "aider": Aider,
 }
 
 
