@@ -384,7 +384,22 @@ def _safe_chat(chat_id: str) -> str:
     return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in s) or "default"
 
 
+def _cross_gateway_enabled() -> bool:
+    """v1.34.8 — Phase 8.2. When JANUS_INTERVIEW_CROSS_GATEWAY=1 is
+    set, the interview state file is keyed by chat_id only (no
+    gateway prefix), so a session started on web continues on
+    telegram. Default off — preserves per-gateway behavior for
+    existing deployments."""
+    import os
+    return os.environ.get(
+        "JANUS_INTERVIEW_CROSS_GATEWAY", "0",
+    ).lower() in ("1", "true", "yes", "on")
+
+
 def state_path(gateway: str, chat_id: str) -> Path:
+    if _cross_gateway_enabled():
+        # Single shared file per chat_id; gateway dropped from name.
+        return _state_dir() / f"shared__{_safe_chat(chat_id)}.json"
     return _state_dir() / f"{gateway}__{_safe_chat(chat_id)}.json"
 
 
