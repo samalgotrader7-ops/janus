@@ -47,6 +47,8 @@ from .aider import Aider
 from .codex_cli import CodexCli
 # v1.38.3 — Google Gemini CLI via `gemini -p` (Phase 10.2.3).
 from .gemini_cli import GeminiCli
+# v1.39.1 — Inter-agent message bus tools (Phase 10.3.1).
+from .bus import BusSend, BusRecv
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -166,6 +168,12 @@ _BUILTIN_TOOL_FACTORIES = {
     # Supports extra_args for --all-files / --model / --sandbox.
     # JANUS_GEMINI_BIN + JANUS_GEMINI_FLAGS env overrides.
     "gemini_cli": GeminiCli,
+    # v1.39.1 — Phase 10.3.1: inter-agent message bus. Subagents
+    # in the same swarm/group coordinate via append-only messages
+    # at ~/.janus/blackboard/<run_id>.messages.jsonl. Capability
+    # tokens: bus.send (+ run_id target), bus.recv is read-only.
+    "bus_send": BusSend,
+    "bus_recv": BusRecv,
 }
 
 
