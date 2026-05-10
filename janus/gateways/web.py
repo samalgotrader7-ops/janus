@@ -868,7 +868,48 @@ def _build_app():
             if output
             else (drip_ack_message + intro + drip_suffix or "(no output)")
         )
-        return JSONResponse({"output": final_output, "session_id": sid})
+
+        # v1.37.2 — Phase 10.1.2: /goal Ralph Loop post-turn hook.
+        # State tracking + response-shape hints only — auto-continue
+        # execution arrives in v1.37.3 (frontend will poll
+        # /api/goal/status and re-POST when next_prompt is set).
+        # The 'goal' field shape is stable: callers can ignore it
+        # safely if they don't know about it.
+        goal_payload: dict[str, Any] = {}
+        try:
+            from .. import goal_loop as _gl
+            _scope = f"web:{sid}"
+            _decision = _gl.after_turn(_scope, output or "")
+            if _decision.achieved:
+                goal_payload = {
+                    "status": "achieved",
+                    "reason": _decision.reason,
+                }
+            elif _decision.paused:
+                _marker = "cycle" if _decision.cycle_detected else (
+                    "budget" if _decision.budget_exhausted else "paused"
+                )
+                goal_payload = {
+                    "status": "paused",
+                    "reason": _decision.reason,
+                    "marker": _marker,
+                }
+            elif _decision.next_prompt:
+                goal_payload = {
+                    "status": "continue",
+                    "next_prompt": _decision.next_prompt,
+                    "reason": _decision.reason,
+                }
+        except Exception:
+            pass
+
+        resp_body: dict[str, Any] = {
+            "output": final_output,
+            "session_id": sid,
+        }
+        if goal_payload:
+            resp_body["goal"] = goal_payload
+        return JSONResponse(resp_body)
 
     @app.post("/home")
     async def set_home(request: Request, body: dict = Body(default={})):
@@ -2495,6 +2536,50 @@ def _build_app():
         )
 
     # ---------- v1.31.2: persistent grants panel ----------
+
+    @app.get("/api/goal/status")
+    async def api_goal_status(request: Request):
+        """v1.37.2: read the active goal for this web session.
+
+        Query string: ``?session_id=<sid>``. Returns the GoalState
+        as JSON: text, status, turn_budget, turns_used, paused_at,
+        plus a derived ``remaining`` field. ``{"goal": null}`` when
+        no goal is set for the scope. Used by the frontend to render
+        the goal banner + decide whether to auto-fire next_prompt
+        (v1.37.3 will plumb that in).
+
+        The scope key matches what the /chat endpoint writes:
+        ``web:<session_id>``.
+        """
+        auth_sid, err_resp = _gate_get(request)
+        if err_resp is not None:
+            return err_resp
+        sid = (request.query_params.get("session_id") or "").strip()
+        if not sid:
+            return JSONResponse(
+                {"error": "session_id required"}, status_code=400,
+            )
+        try:
+            from .. import goals as _goals
+            g = _goals.load(f"web:{sid}")
+            if g is None:
+                return JSONResponse({"goal": None})
+            return JSONResponse({
+                "goal": {
+                    "text": g.text,
+                    "status": g.status,
+                    "turn_budget": g.turn_budget,
+                    "turns_used": g.turns_used,
+                    "remaining": g.remaining_turns(),
+                    "created_at": g.created_at,
+                    "updated_at": g.updated_at,
+                    "paused_at": g.paused_at,
+                },
+            })
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"goal status failed: {e}"}, status_code=500,
+            )
 
     @app.get("/api/grants")
     async def api_grants(request: Request):

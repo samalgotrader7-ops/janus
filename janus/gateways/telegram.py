@@ -1486,6 +1486,63 @@ async def _run_chat_turn(
     except Exception:
         pass
 
+    # v1.37.2 — Phase 10.1.2: /goal Ralph Loop post-turn hook on
+    # telegram. State tracking + UI notifications only — auto-
+    # continue execution (recursive turn chaining with iter cap)
+    # arrives in v1.37.3. For now, when the judge declares the
+    # goal achieved or auto-pauses (cycle/budget), the bot sends a
+    # one-line notification and the loop stops there. The user
+    # can manually continue with another message; turns_used and
+    # cycle detection still increment correctly.
+    try:
+        from .. import goal_loop as _gl
+        _scope = f"telegram:{chat_id}"
+        _decision = _gl.after_turn(_scope, output or "")
+        if _decision.achieved:
+            try:
+                await ctx.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"✓ goal achieved: {_decision.reason}",
+                )
+            except Exception:
+                pass
+        elif _decision.paused:
+            _marker = "cycle" if _decision.cycle_detected else (
+                "budget" if _decision.budget_exhausted else "paused"
+            )
+            try:
+                await ctx.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"⏸ goal paused ({_marker}): {_decision.reason}\n"
+                        f"_/goal resume to continue, /goal clear to drop_"
+                    ),
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+        elif _decision.next_prompt:
+            # v1.37.2: surface the suggested next step so the user
+            # can decide whether to advance manually. v1.37.3 will
+            # auto-fire it via re-entrant _run_chat_turn.
+            try:
+                preview = _decision.next_prompt
+                if len(preview) > 250:
+                    preview = preview[:247] + "..."
+                await ctx.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"→ goal next step: {preview}\n"
+                        f"_(send any message to advance — auto-continue "
+                        f"lands in v1.37.3)_"
+                    ),
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Inline-keyboard taps: approval (`appr:`) and clarify (`clr:`).
