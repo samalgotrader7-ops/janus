@@ -2685,9 +2685,17 @@ def main() -> None:
         console.print(f"[dim]{st}[/]")
         # v1.9.0: /retry can stash the prior input here. Skip the prompt
         # and immediately re-process it as if the user typed it again.
+        # v1.37.1: /goal auto-continue uses the same shape but a
+        # different key, so a queued retry never collides with the
+        # Ralph Loop. Retry takes precedence (user-initiated > auto).
         retry_input = state.pop("__retry_input__", None)
+        auto_input = state.pop("__auto_continue_input__", None)
         if retry_input:
             req = str(retry_input).strip()
+        elif auto_input:
+            req = str(auto_input).strip()
+            preview = req if len(req) <= 120 else req[:117] + "..."
+            console.print(f"[dim cyan]→ goal auto-continue:[/] {preview}")
         else:
             try:
                 line = session.prompt(prompt_text)
@@ -3021,6 +3029,37 @@ def main() -> None:
 
         _maybe_propose_memory(console, req, output,
                               cache_snap=cache_snap, trace=trace)
+
+        # v1.37.1 — Phase 10.1.1: /goal Ralph Loop post-turn hook.
+        # If a goal is active, increment its counter, run the
+        # judge, and decide whether to:
+        #   * pause (cycle detected / budget hit)
+        #   * stop (goal achieved)
+        #   * auto-continue (queue the next prompt for next iter)
+        # Best-effort: a failure here must never break the chat
+        # loop. Surface UX is short — one line per state change.
+        try:
+            from . import goal_loop as _gl
+            _scope = _gl.scope_for_surface("cli_rich")
+            _decision = _gl.after_turn(_scope, output or "")
+            if _decision.achieved:
+                console.print(
+                    f"\n[bold green]✓ goal achieved:[/] {_decision.reason}"
+                )
+            elif _decision.paused:
+                marker = "cycle" if _decision.cycle_detected else (
+                    "budget" if _decision.budget_exhausted else "paused"
+                )
+                console.print(
+                    f"\n[bold yellow]⏸ goal paused ({marker}):[/] "
+                    f"{_decision.reason}\n"
+                    f"[dim]/goal resume to continue, "
+                    f"/goal clear to drop[/]"
+                )
+            elif _decision.next_prompt:
+                state["__auto_continue_input__"] = _decision.next_prompt
+        except Exception:
+            pass
 
     console.print(f"[dim]bye.[/]")
 

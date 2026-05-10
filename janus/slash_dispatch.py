@@ -465,10 +465,31 @@ def _h_goal(ctx: SlashContext, arg: str) -> str:
     # all their words.
     text = arg.strip()
     g = _g.set_goal(scope, text)
+
+    # v1.37.1 — Phase 10.1.1: plan-mode auto-leave. A goal in plan
+    # mode is a contradiction (plan blocks writes; the loop needs
+    # to make changes). Flip to default and tell the user. Sam's
+    # 2026-05-10 design call: auto-leave > refuse, since refuse
+    # would force an extra step every time.
+    plan_msg = ""
+    ms = ctx.state.get("mode_state") if ctx.state else None
+    try:
+        from . import permissions as _perm
+        if ms is not None and getattr(ms, "current", None) == _perm.PLAN:
+            ms.current = _perm.DEFAULT
+            plan_msg = (
+                "\nleft plan mode (default) — /goal needs write "
+                "access to make progress. Re-enter with /mode plan."
+            )
+    except Exception:
+        pass
+
     return (
         f"goal set: {g.text}\n"
         f"turn budget: {g.turn_budget}    "
-        f"(auto-continue loop lands in v1.37.1; for now use `/goal status`)"
+        f"(auto-continue fires after every assistant turn — "
+        f"/goal pause to halt)"
+        f"{plan_msg}"
     )
 
 

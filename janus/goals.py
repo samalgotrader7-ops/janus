@@ -68,6 +68,10 @@ class GoalState:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     paused_at: Optional[float] = None
+    # v1.37.1: sliding window of last N response hashes for cycle
+    # detection. When the last 3 are identical we auto-pause the
+    # loop. Capped to 3 entries to keep the JSON file small.
+    recent_response_hashes: list[str] = field(default_factory=list)
 
     def is_active(self) -> bool:
         return self.status == "active"
@@ -110,6 +114,9 @@ def load(scope: str) -> Optional[GoalState]:
         return None
     if not isinstance(raw, dict) or "text" not in raw:
         return None
+    rrh = raw.get("recent_response_hashes") or []
+    if not isinstance(rrh, list):
+        rrh = []
     return GoalState(
         text=str(raw.get("text", "")),
         status=str(raw.get("status", "active")),
@@ -118,6 +125,7 @@ def load(scope: str) -> Optional[GoalState]:
         created_at=float(raw.get("created_at", time.time())),
         updated_at=float(raw.get("updated_at", time.time())),
         paused_at=raw.get("paused_at"),
+        recent_response_hashes=[str(h) for h in rrh][:3],
     )
 
 

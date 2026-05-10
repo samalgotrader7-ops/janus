@@ -108,6 +108,13 @@ MEMORY_PROPOSE_MODEL: str = os.getenv("JANUS_MEMORY_MODEL", "")
 VERIFY_MODEL: str = os.getenv("JANUS_VERIFY_MODEL", "")
 SUBAGENT_MODEL: str = os.getenv("JANUS_SUBAGENT_MODEL", "")
 TITLE_MODEL: str = os.getenv("JANUS_TITLE_MODEL", "")
+# v1.37.1 — Phase 10.1.1: /goal Ralph Loop judge model. Cheap by
+# design — the judge is called once per turn while a goal is
+# active, so a 500-turn budget × main-model cost would dwarf the
+# value. Recommended values: anthropic/claude-haiku-4-5 or
+# openai/gpt-4o-mini. Falls back to MODEL when unset; users on
+# tight budgets should set this explicitly.
+JUDGE_MODEL: str = os.getenv("JANUS_JUDGE_MODEL", "")
 
 
 def model_for_purpose(purpose: str) -> str:
@@ -120,6 +127,8 @@ def model_for_purpose(purpose: str) -> str:
       'verify'    — post-edit pytest output classification
       'subagent'  — spawned subagent leaf
       'title'     — conversation title generation
+      'judge'     — /goal Ralph Loop achievement evaluator (v1.37.1;
+                    cheap recommended)
       anything else → MODEL
     """
     table = {
@@ -127,6 +136,7 @@ def model_for_purpose(purpose: str) -> str:
         "verify": VERIFY_MODEL,
         "subagent": SUBAGENT_MODEL,
         "title": TITLE_MODEL,
+        "judge": JUDGE_MODEL,
     }
     override = table.get(purpose, "")
     return override or MODEL
