@@ -70,6 +70,14 @@ class AutoContinueDecision:
     paused: bool = False
     cycle_detected: bool = False
     budget_exhausted: bool = False
+    # v1.37.4: a 50/80/100% turn-budget threshold the goal JUST
+    # crossed this turn (None when no threshold crossed). Surfaces
+    # render this as a one-line warning. Same threshold won't
+    # re-fire — goal.budget_alerts_fired persists across turns.
+    budget_alert: Optional[float] = None
+    # v1.37.4: cumulative USD spent on this goal so far. Surfaces
+    # may surface alongside the alert.
+    cost_usd: float = 0.0
 
 
 # ---------- scope helpers ----------
@@ -226,6 +234,38 @@ def run_judge(goal_text: str, last_response: str) -> JudgeResult:
 # Cap recent_response_hashes to this many entries.
 _HASH_WINDOW = 3
 
+# v1.37.4: turn-budget alert thresholds (fraction of turn_budget).
+# Crossing each threshold fires once per goal — surfaces render a
+# one-line warning. 1.0 fires immediately before the budget-
+# exhausted pause, so the user knows why it just stopped.
+BUDGET_ALERT_THRESHOLDS: tuple[float, ...] = (0.5, 0.8, 1.0)
+
+
+def _check_budget_alert(g: "goals.GoalState") -> Optional[float]:
+    """Return the highest threshold the goal JUST crossed (i.e.
+    crossed AND not yet alerted). Mutates g.budget_alerts_fired.
+    Returns None when no new threshold was crossed."""
+    ratio = g.progress_ratio()
+    fired_now: Optional[float] = None
+    for threshold in BUDGET_ALERT_THRESHOLDS:
+        if ratio >= threshold and threshold not in g.budget_alerts_fired:
+            g.budget_alerts_fired.append(threshold)
+            fired_now = threshold  # last-write-wins → highest threshold
+    return fired_now
+
+
+def _accumulate_cost(g: "goals.GoalState") -> None:
+    """Add the latest turn's spend to the goal's running total.
+    Best-effort: if cost.turn_stats() is unavailable, leaves the
+    field unchanged."""
+    try:
+        from . import cost
+        usd = float(cost.turn_stats().usd or 0.0)
+        if usd > 0:
+            g.cost_usd += usd
+    except Exception:
+        pass
+
 
 def after_turn(scope: str, last_response: str) -> AutoContinueDecision:
     """Run the post-turn pipeline for the goal at `scope`.
@@ -243,6 +283,15 @@ def after_turn(scope: str, last_response: str) -> AutoContinueDecision:
     # consistently from /goal status afterward.
     g.turns_used += 1
 
+    # v1.37.4: cost tracking — capture this turn's LLM spend
+    # BEFORE any further processing so it sticks to disk.
+    _accumulate_cost(g)
+
+    # v1.37.4: 50/80/100% turn-budget alerts (one-shot per
+    # threshold). Computed here so 'budget exhausted' (1.0) fires
+    # alongside the budget-exhausted pause below.
+    alert = _check_budget_alert(g)
+
     # Budget exhausted? Pause and stop.
     if g.budget_exhausted():
         g.status = "paused"
@@ -251,6 +300,8 @@ def after_turn(scope: str, last_response: str) -> AutoContinueDecision:
             paused=True,
             budget_exhausted=True,
             reason=f"turn budget exhausted ({g.turns_used}/{g.turn_budget})",
+            budget_alert=alert,
+            cost_usd=g.cost_usd,
         )
 
     # Cycle detection BEFORE judging — saves a judge call when stuck.
@@ -266,6 +317,8 @@ def after_turn(scope: str, last_response: str) -> AutoContinueDecision:
             paused=True,
             cycle_detected=True,
             reason="last 3 assistant outputs were identical — agent stalled",
+            budget_alert=alert,
+            cost_usd=g.cost_usd,
         )
 
     # Update the sliding window before judging.
@@ -284,6 +337,8 @@ def after_turn(scope: str, last_response: str) -> AutoContinueDecision:
         return AutoContinueDecision(
             achieved=True,
             reason=verdict.reason or "judge says goal achieved",
+            budget_alert=alert,
+            cost_usd=g.cost_usd,
         )
 
     # Build the next prompt. If the judge gave us a hint, use it
@@ -299,6 +354,8 @@ def after_turn(scope: str, last_response: str) -> AutoContinueDecision:
     return AutoContinueDecision(
         next_prompt=next_prompt,
         reason=verdict.reason or "judge says continue",
+        budget_alert=alert,
+        cost_usd=g.cost_usd,
     )
 
 

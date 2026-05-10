@@ -900,6 +900,13 @@ def _build_app():
                     "next_prompt": _decision.next_prompt,
                     "reason": _decision.reason,
                 }
+            # v1.37.4 — surface budget alert + cumulative cost so
+            # the frontend can render the gauge / warning banner.
+            if goal_payload:
+                if _decision.budget_alert is not None:
+                    goal_payload["budget_alert"] = _decision.budget_alert
+                if _decision.cost_usd > 0:
+                    goal_payload["cost_usd"] = round(_decision.cost_usd, 6)
         except Exception:
             pass
 
@@ -2574,6 +2581,10 @@ def _build_app():
                     "created_at": g.created_at,
                     "updated_at": g.updated_at,
                     "paused_at": g.paused_at,
+                    # v1.37.4: cost gauge fields
+                    "cost_usd": round(g.cost_usd, 6),
+                    "progress_ratio": round(g.progress_ratio(), 4),
+                    "budget_alerts_fired": g.budget_alerts_fired,
                 },
             })
         except Exception as e:

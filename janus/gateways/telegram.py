@@ -1520,11 +1520,31 @@ async def _run_chat_turn(
         from .. import goal_loop as _gl
         _scope = f"telegram:{chat_id}"
         _decision = _gl.after_turn(_scope, output or "")
-        if _decision.achieved:
+        # v1.37.4 — budget alert at 50/80/100% before the verdict.
+        if _decision.budget_alert is not None:
+            _pct = int(_decision.budget_alert * 100)
+            _spent = (
+                f" (spent ${_decision.cost_usd:.4f})"
+                if _decision.cost_usd > 0 else ""
+            )
             try:
                 await ctx.bot.send_message(
                     chat_id=chat_id,
-                    text=f"✓ goal achieved: {_decision.reason}",
+                    text=f"⚠ goal budget {_pct}% used{_spent}",
+                )
+            except Exception:
+                pass
+        if _decision.achieved:
+            _spent_str = (
+                f" (spent ${_decision.cost_usd:.4f})"
+                if _decision.cost_usd > 0 else ""
+            )
+            try:
+                await ctx.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"✓ goal achieved: {_decision.reason}{_spent_str}"
+                    ),
                 )
             except Exception:
                 pass
@@ -1532,11 +1552,16 @@ async def _run_chat_turn(
             _marker = "cycle" if _decision.cycle_detected else (
                 "budget" if _decision.budget_exhausted else "paused"
             )
+            _spent_str = (
+                f" (spent ${_decision.cost_usd:.4f})"
+                if _decision.cost_usd > 0 else ""
+            )
             try:
                 await ctx.bot.send_message(
                     chat_id=chat_id,
                     text=(
-                        f"⏸ goal paused ({_marker}): {_decision.reason}\n"
+                        f"⏸ goal paused ({_marker}): "
+                        f"{_decision.reason}{_spent_str}\n"
                         f"_/goal resume to continue, /goal clear to drop_"
                     ),
                     parse_mode="Markdown",

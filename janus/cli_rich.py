@@ -3042,17 +3042,39 @@ def main() -> None:
             from . import goal_loop as _gl
             _scope = _gl.scope_for_surface("cli_rich")
             _decision = _gl.after_turn(_scope, output or "")
+            # v1.37.4: budget alert at 50/80/100% turn budget.
+            # Render BEFORE the achieve/pause line so the warning
+            # appears as a context cue to the verdict.
+            if _decision.budget_alert is not None:
+                _pct = int(_decision.budget_alert * 100)
+                _spent = (
+                    f" (spent ${_decision.cost_usd:.4f})"
+                    if _decision.cost_usd > 0 else ""
+                )
+                console.print(
+                    f"\n[bold yellow]⚠ goal budget {_pct}% used[/]{_spent}"
+                )
+
             if _decision.achieved:
+                _spent_msg = (
+                    f"   [dim](spent ${_decision.cost_usd:.4f})[/]"
+                    if _decision.cost_usd > 0 else ""
+                )
                 console.print(
                     f"\n[bold green]✓ goal achieved:[/] {_decision.reason}"
+                    f"{_spent_msg}"
                 )
             elif _decision.paused:
                 marker = "cycle" if _decision.cycle_detected else (
                     "budget" if _decision.budget_exhausted else "paused"
                 )
+                _spent_msg = (
+                    f"   [dim](spent ${_decision.cost_usd:.4f})[/]"
+                    if _decision.cost_usd > 0 else ""
+                )
                 console.print(
                     f"\n[bold yellow]⏸ goal paused ({marker}):[/] "
-                    f"{_decision.reason}\n"
+                    f"{_decision.reason}{_spent_msg}\n"
                     f"[dim]/goal resume to continue, "
                     f"/goal clear to drop[/]"
                 )

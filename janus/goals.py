@@ -72,6 +72,12 @@ class GoalState:
     # detection. When the last 3 are identical we auto-pause the
     # loop. Capped to 3 entries to keep the JSON file small.
     recent_response_hashes: list[str] = field(default_factory=list)
+    # v1.37.4 — Phase 10.1.4: cost tracking. cost_usd is the
+    # cumulative LLM spend (chat + judge) attributed to this goal.
+    # budget_alerts_fired prevents the same threshold (e.g. 0.5,
+    # 0.8, 1.0 of turn_budget) from re-firing every turn.
+    cost_usd: float = 0.0
+    budget_alerts_fired: list[float] = field(default_factory=list)
 
     def is_active(self) -> bool:
         return self.status == "active"
@@ -81,6 +87,12 @@ class GoalState:
 
     def budget_exhausted(self) -> bool:
         return self.turns_used >= self.turn_budget
+
+    def progress_ratio(self) -> float:
+        """0.0–1.0 — how far the goal has burned through its turn budget."""
+        if self.turn_budget <= 0:
+            return 0.0
+        return self.turns_used / self.turn_budget
 
 
 # ---------- storage ----------
@@ -117,6 +129,9 @@ def load(scope: str) -> Optional[GoalState]:
     rrh = raw.get("recent_response_hashes") or []
     if not isinstance(rrh, list):
         rrh = []
+    bafa = raw.get("budget_alerts_fired") or []
+    if not isinstance(bafa, list):
+        bafa = []
     return GoalState(
         text=str(raw.get("text", "")),
         status=str(raw.get("status", "active")),
@@ -126,6 +141,8 @@ def load(scope: str) -> Optional[GoalState]:
         updated_at=float(raw.get("updated_at", time.time())),
         paused_at=raw.get("paused_at"),
         recent_response_hashes=[str(h) for h in rrh][:3],
+        cost_usd=float(raw.get("cost_usd", 0.0) or 0.0),
+        budget_alerts_fired=[float(x) for x in bafa],
     )
 
 
@@ -231,6 +248,8 @@ def format_status(g: Optional[GoalState]) -> str:
         f"({g.remaining_turns()} left)    "
         f"set {age_s} ago",
     ]
+    if g.cost_usd > 0:
+        lines.append(f"spent: ${g.cost_usd:.4f}")
     if g.status == "paused" and g.paused_at:
         lines.append(f"paused: {_human_duration(int(time.time() - g.paused_at))} ago")
     return "\n".join(lines)
