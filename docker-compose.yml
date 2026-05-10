@@ -1,0 +1,61 @@
+# Janus docker-compose example — three services sharing one persistent
+# volume. Equivalent to the systemd-units setup install_services.sh
+# creates on a bare-metal VPS, but containerized.
+#
+# QUICKSTART:
+#   1. Copy `.env.example` (when it exists) to `.env`, fill in your
+#      JANUS_API_KEY, JANUS_API_BASE, JANUS_MODEL, JANUS_TELEGRAM_TOKEN.
+#   2. docker compose up -d
+#   3. Check `docker compose logs -f janus-web` for the startup
+#      banner. Default: web binds to 127.0.0.1:8765 inside the
+#      container, exposed on the host's port 8765.
+#   4. Open http://localhost:8765/login (or SSH-tunnel from a remote
+#      Docker host).
+#
+# To bind the web UI to all interfaces (and accept external traffic
+# directly — HTTP only; pair with Caddy/nginx for TLS), uncomment
+# JANUS_WEB_HOST=0.0.0.0 + JANUS_WEB_HOST_OK=1 in .env.
+
+services:
+  janus-web:
+    image: ghcr.io/samalgotrader7-ops/janus:latest
+    command: web
+    ports:
+      - "8765:8765"
+    env_file:
+      - .env
+    volumes:
+      - janus-data:/root/.janus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8765/login"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  janus-telegram:
+    image: ghcr.io/samalgotrader7-ops/janus:latest
+    command: telegram
+    env_file:
+      - .env
+    volumes:
+      - janus-data:/root/.janus
+    restart: unless-stopped
+    depends_on:
+      - janus-web
+
+  janus-daemon:
+    image: ghcr.io/samalgotrader7-ops/janus:latest
+    command: daemon
+    env_file:
+      - .env
+    volumes:
+      - janus-data:/root/.janus
+    restart: unless-stopped
+    depends_on:
+      - janus-web
+
+volumes:
+  janus-data:
+    name: janus-data
