@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# scripts/git-hooks/post-merge — auto-restart janus services after pull.
+#
+# WHEN THIS FIRES:
+#   git pull / git merge / any merge-resolving operation that ends in
+#   a fast-forward or actual merge commit.
+#
+# WHAT IT DOES:
+#   1. Bails silently if systemd isn't available (e.g. local dev box).
+#   2. Computes the file list changed by this merge (ORIG_HEAD..HEAD).
+#   3. If any janus/*.py changed, restarts janus-telegram +
+#      janus-web + janus-daemon (whichever are active).
+#   4. If pyproject.toml changed, prints a warning that dependencies
+#      may need ``pipx reinstall janus-agent`` — it does NOT
+#      auto-run that, since reinstalling without the user watching
+#      can fail in subtle ways (network, locked dependencies, etc.).
+#   5. Doc-only / test-only / script-only pulls skip the restart.
+#
+# BYPASS:
+#   Set JANUS_NO_AUTO_RESTART=1 in the env to skip the restart entirely
+#   on a particular pull. Useful when you're intentionally pulling code
+#   to inspect before activating it.
+#
+# WIRED VIA: install_services.sh sets git's core.hooksPath to point
+# at scripts/git-hooks/, so this file fires from the standard hook
+# machinery without needing a symlink in .git/hooks/.
+
+set -euo pipefail
+
+GREEN=$'\033[32m'
+YELLOW=$'\033[33m'
+RED=$'\033[31m'
+DIM=$'\033[2m'
+RESET=$'\033[0m'
+
+if [[ "${JANUS_NO_AUTO_RESTART:-0}" == "1" ]]; then
+    echo "${DIM}janus post-merge: skipped (JANUS_NO_AUTO_RESTART=1)${RESET}"
+    exit 0
+fi
+
+# Bail silently if systemd isn't usable. Local dev clones don't get
+# the hook anyway because there's no janus-*.service installed; this
+# is just defense-in-depth.
+if ! command -v systemctl >/dev/null 2>&1; then
+    exit 0
+fi
+if ! systemctl --user is-system-running >/dev/null 2>&1; then
+    exit 0
+fi
+
+# What changed in this merge? `git diff --name-only ORIG_HEAD HEAD`
+# returns the file list git updated. ORIG_HEAD is set by git pull/merge
+# to the previous HEAD. If ORIG_HEAD doesn't exist (rare — e.g. hook
+# run outside merge context) bail silently.
+if ! git rev-parse --verify ORIG_HEAD >/dev/null 2>&1; then
+    exit 0
+fi
+
+CHANGED="$(git diff --name-only ORIG_HEAD HEAD 2>/dev/null || true)"
+if [[ -z "$CHANGED" ]]; then
+    exit 0
+fi
+
+# If pyproject.toml changed, deps might need reinstall. Warn but don't
+# block — the restart still happens for any code change below.
+if echo "$CHANGED" | grep -q '^pyproject\.toml$'; then
+    echo "${YELLOW}janus post-merge: pyproject.toml changed${RESET}"
+    echo "${DIM}  if a new dependency was added, run:${RESET}"
+    echo "${DIM}    pipx reinstall janus-agent${RESET}"
+fi
+
+# Only restart if Python source actually changed. Doc / test / script
+# pulls don't need a service bounce.
+if ! echo "$CHANGED" | grep -qE '^janus/.*\.py$'; then
+    echo "${DIM}janus post-merge: no janus/*.py changes — services not restarted${RESET}"
+    exit 0
+fi
+
+echo "${GREEN}janus post-merge:${RESET} restarting services after code change"
+
+for svc in janus-telegram janus-web janus-daemon; do
+    if systemctl --user is-active "${svc}.service" >/dev/null 2>&1; then
+        if systemctl --user restart "${svc}.service" >/dev/null 2>&1; then
+            echo "  ${GREEN}✓${RESET} $svc restarted"
+        else
+            echo "  ${RED}✗${RESET} $svc restart failed"
+            echo "    ${DIM}journalctl --user -u $svc -n 30 --no-pager${RESET}"
+        fi
+    else
+        echo "  ${DIM}○ $svc not active — skipped${RESET}"
+    fi
+done
+
+exit 0

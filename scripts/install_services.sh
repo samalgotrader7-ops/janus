@@ -279,7 +279,33 @@ sleep 2
 
 # ---------- 6. Status report ----------
 
-step "6. Final status"
+step "6. Wiring git post-merge auto-restart"
+
+# Find the repo this script lives in (resolves symlinks; works whether
+# you ran it from /opt/janus or piped it). The hooks dir is alongside
+# the script's parent directory.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+HOOKS_DIR="${SCRIPT_DIR}/git-hooks"
+
+if [[ -d "$REPO_ROOT/.git" && -d "$HOOKS_DIR" ]]; then
+    if (cd "$REPO_ROOT" && git config core.hooksPath "scripts/git-hooks"); then
+        ok "git core.hooksPath → scripts/git-hooks (post-merge auto-restart wired)"
+        # Make sure the hook is executable. git tracks the +x bit but
+        # a fresh fetch on Windows + crlf-mangled clone can lose it.
+        if [[ -f "$HOOKS_DIR/post-merge" ]]; then
+            chmod +x "$HOOKS_DIR/post-merge"
+            ok "  post-merge hook executable"
+        fi
+        hint "Bypass with JANUS_NO_AUTO_RESTART=1 git pull"
+    else
+        warn "Couldn't set core.hooksPath — auto-restart not wired"
+    fi
+else
+    hint "No .git/ at $REPO_ROOT — skipping hook wiring (running outside the repo?)"
+fi
+
+step "7. Final status"
 
 for svc in janus-telegram janus-web janus-daemon; do
     if systemctl --user is-active "${svc}.service" >/dev/null 2>&1; then
@@ -302,6 +328,10 @@ Useful commands:
   Last 50 lines: journalctl --user -u janus-telegram -n 50 --no-pager
   Stop all:      janus service disable
   Re-deploy:     FORCE_ENV=1 bash scripts/install_services.sh
+
+  After-pull is now AUTOMATIC: a git post-merge hook restarts the
+  services whenever janus/*.py changes. Bypass with:
+    JANUS_NO_AUTO_RESTART=1 git pull
 
 The web UI binds 127.0.0.1:8765 by default. To reach it from your
 desktop browser:
