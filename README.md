@@ -1,29 +1,36 @@
 <div align="center">
 
-# Janus
+<img src="assets/banner.svg" alt="Janus — the agent that learns from you · plain-text everything" width="640">
 
-**Claude Code's UX, on any model, with plain-text state and a learning loop.**
+<br>
+
+[![PyPI version](https://img.shields.io/pypi/v/janus-agent.svg?color=a020f0)](https://pypi.org/project/janus-agent/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-a020f0.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-a020f0.svg)](LICENSE)
+[![Docker image](https://img.shields.io/badge/docker-ghcr.io-a020f0.svg)](https://github.com/samalgotrader7-ops/janus/pkgs/container/janus)
+
+**A self-improving AI agent for developers.**
+**Plain-text state · three gateways · any OpenAI-compatible model.**
 
 </div>
 
-Janus is a local AI agent that talks to you the way Claude Code does —
-streaming responses, inline tool calls, permission modes you set and
-forget — but runs against any OpenAI-compatible model (Anthropic,
-OpenRouter, Ollama, OpenAI, llama.cpp, …). Memory, skills, hooks, and
-every interaction live as plain-text files under `~/.janus/` that you
-can `cat`, `grep`, version-control, or hand-edit.
+---
 
-What makes it useful:
+## What is Janus
 
-- **Model-agnostic.** Swap providers with one env var. No vendor lock-in.
-- **Plain-text everywhere.** Memory is markdown, conversations are JSON,
-  the audit log is JSONL. No opaque database.
-- **Skills you teach it.** Durable workflows land as `quarantined`
-  markdown files; you `/promote` them to trusted state when ready.
-- **Permission modes copied from Claude Code.** `default` /
-  `acceptEdits` / `plan` / `bypassPermissions`, switchable mid-session
-  with `/mode`.
-- **Self-hostable.** No cloud dependencies. No SaaS user model.
+Janus is a **self-improving AI agent for developers**. It learns
+from how you use it: noticing repeated patterns, proposing new
+skills you review and accept, evolving a memory of your
+preferences and projects over time.
+
+State lives as **plain-text markdown** — auditable, hackable,
+syncable across devices. **Three gateways** (CLI, Telegram, Web)
+share one brain. Bring your own model from any OpenAI-compatible
+provider (Anthropic, OpenAI, OpenRouter, Ollama, llama.cpp, …).
+
+> Janus is not a SaaS product. It runs on your hardware. Your
+> conversations, memory, and skills never leave your machine
+> unless you explicitly send them somewhere.
 
 ---
 
@@ -31,7 +38,7 @@ What makes it useful:
 
 ```bash
 # 1. Install (Linux / macOS — requires Python 3.10+)
-curl -sSL https://raw.githubusercontent.com/samalgotrader7-ops/janus/main/scripts/install.sh | sh
+pipx install janus-agent
 
 # 2. Configure (interactive — picks up existing OPENAI_API_KEY etc.)
 janus onboard
@@ -44,73 +51,114 @@ That's it. You'll see a streaming chat with inline tool calls and a
 permission prompt for any side effect.
 
 > **Want a deeper walkthrough?** Four progressive tutorials in
-> [`docs/tutorials/`](docs/tutorials/) cover skills, memory, and MCP
+> [`tutorials/`](tutorials/) cover skills, memory, and MCP
 > integration — each one screenful, ~10 minutes each.
 
 > **Want to deploy on a VPS?**
-> [`scripts/install_services.sh`](scripts/install_services.sh) installs
-> systemd units for `telegram` + `web` + `daemon` with auto-restart on
-> `git pull`. See [Production deployment](#production-deployment) below.
+> [`scripts/install_services.sh`](scripts/install_services.sh)
+> installs systemd units for `telegram` + `web` + `daemon` with
+> auto-restart on `git pull`.
 
 ---
 
-## Table of contents
+## How it works
 
-- [Why Janus](#why-janus)
-- [Install](#install)
-- [Configure](#configure)
-- [Quickstart](#quickstart)
-- [Tutorials](#tutorials)
-- [Production deployment](#production-deployment)
-- [Permission modes](#permission-modes)
-- [Updating](#updating)
-- [Slash commands](#slash-commands)
-- [Architecture](#architecture)
-- [Where state lives](#where-state-lives)
-- [Testing](#testing)
-- [Documentation](#documentation)
-- [License](#license)
+```mermaid
+flowchart LR
+    User[You] --> CLI[CLI<br/>janus]
+    User --> TG[Telegram bot<br/>janus telegram]
+    User --> Web[Web UI<br/>janus web]
+
+    CLI --> Loop
+    TG --> Loop
+    Web --> Loop
+
+    Loop[executor.chat<br/>permission modes<br/>tool dispatch]
+
+    Loop --> Tools[Tools<br/>fs · shell · web<br/>code_exec · MCP · …]
+    Loop --> Skills[Skills<br/>~/.janus/skills/<br/>quarantined → trusted]
+    Loop --> Memory[Memory<br/>~/.janus/memory/<br/>diff-and-approve]
+    Loop --> Audit[Audit log<br/>~/.janus/log.jsonl<br/>every action recorded]
+
+    Memory -.review diffs.-> User
+    Skills -.review proposals.-> User
+```
+
+**One agent loop. Three surfaces talk to it. State on disk you
+can read.**
 
 ---
 
 ## Why Janus
 
-| | Janus | Claude Code | Typical agent CLI |
-|---|---|---|---|
-| **Model** | Any OpenAI-compatible | Anthropic only | Provider-locked |
-| **State** | Plain text under `~/.janus/` (cat, grep, git) | Opaque | Database-backed |
-| **Permission modes** | `default` / `acceptEdits` / `plan` / `bypass` | Same | Coarse "yolo / ask" |
-| **Skills** | Markdown files; quarantined → user `/promote`s | None first-class | Auto-evolve, hard to roll back |
-| **Memory** | Plain `user.md` + diff propose + manual approve | None first-class | Opaque embeddings |
-| **Logs** | Every turn → `~/.janus/log.jsonl`, FTS5-indexed | n/a | Best-effort |
-| **Model-call path** | ~50 lines of `requests`, no SDK | n/a | litellm / openai-python |
-| **Self-hostable** | Yes | No | Varies |
+|  | Janus | Typical agent CLI |
+|---|---|---|
+| **Model** | Any OpenAI-compatible (Anthropic, OpenAI, OpenRouter, Ollama, …) | Provider-locked |
+| **State** | Plain text under `~/.janus/` (cat, grep, git) | Opaque database |
+| **Skills** | Markdown files; quarantined → user `/promote`s | None or auto-evolve |
+| **Memory** | Diff-and-approve; user controls every save | Opaque embeddings |
+| **Audit** | Every turn → `~/.janus/log.jsonl`, FTS5-indexed | Best-effort |
+| **Gateways** | CLI + Telegram + Web sharing one state | CLI only |
+| **Deploy** | systemd / Docker / PyPI / git+URL | varies |
+| **Self-host** | Always | Sometimes |
 
-If you want Claude Code's ergonomics without Anthropic lock-in, with
-state you can audit and a skill system you actually control, Janus is
-for you.
+---
+
+## Features
+
+- **Self-improving learning loop**
+  - Skills auto-proposed from repeated patterns; you review + promote.
+  - Memory diffs proposed after each turn; you accept / reject / edit.
+- **Multi-surface**
+  - `janus` — terminal chat with streaming, tool inline, slash commands
+  - `janus telegram` — bot gateway with inline plan-review keyboards
+  - `janus web` — local FastAPI UI with cost charts, MCP browser, skills panel
+  - `janus daemon` — runs scheduled agents (cron-style triggers)
+- **Plain-text everything**
+  - Memory: markdown cards under `~/.janus/memory/`
+  - Conversations: JSON files under `~/.janus/conversations/`
+  - Skills: markdown + YAML frontmatter under `~/.janus/skills/`
+  - Audit: JSONL log under `~/.janus/log.jsonl` + `audit.jsonl`
+- **Permission modes** — `default` / `acceptEdits` / `plan` / `bypassPermissions`. Set with `/mode` or `JANUS_APPROVAL` env.
+- **MCP integration** — connect any stdio Model Context Protocol server (filesystem, git, sqlite, fetch, …). Browse the catalog with `/mcp catalog`.
+- **Production-ready**
+  - systemd integration: `janus service install/enable/status`
+  - Reverse-proxy generators: `janus web config caddy|nginx`
+  - Rate limiting on public endpoints (token-bucket per IP)
+  - Backup / restore: `janus backup` / `janus restore`
+  - Health endpoint: `GET /api/health`
+  - Audit log: `janus audit --action skill.promote`
+- **Cross-device memory sync** — `janus sync push|pull` (git-backed; bring your own remote)
+- **Webhooks** — `POST /api/webhook/<key>` with HMAC-SHA256 fires the agent from any external service
+- **Image generation** — built-in `image_gen` tool (DALL-E / Stable Diffusion via OpenAI-compatible endpoints)
+- **Cost tracking** — `/cost` shows token usage + budget alerts at 50/80/100%
 
 ---
 
 ## Install
 
-Janus runs on **Windows, macOS, and Linux** with Python ≥ 3.10. The core
-install is one dependency (`requests`) — everything else is opt-in.
+### Easiest — PyPI
 
-### Easiest — one-line installer (Linux / macOS)
+```bash
+pipx install janus-agent
+```
+
+For all gateways (Telegram + Web + headless browser tools):
+
+```bash
+pipx install 'janus-agent[all]'
+```
+
+### One-line installer (auto-detects platform)
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/samalgotrader7-ops/janus/main/scripts/install.sh | sh
 ```
 
-Detects your platform, installs `pipx` if missing, pulls Janus from
-PyPI (or git+URL fallback), and prints next-step instructions. Handles
-PEP 668 (`--break-system-packages`) on recent Debian / Ubuntu.
-
-### Docker (any platform)
+### Docker
 
 ```bash
-# Standalone
+# Standalone web UI
 docker run --rm -it -p 8765:8765 \
   -v janus-data:/root/.janus \
   --env-file .env \
@@ -123,190 +171,66 @@ cp .env.example .env  # fill in your keys
 docker compose up -d
 ```
 
-### From source (for contributors)
-
-#### 1. Clone
+### From source
 
 ```bash
 git clone https://github.com/samalgotrader7-ops/janus.git
 cd janus
-```
-
-#### 2. Create a virtual environment
-
-<details>
-<summary><b>Windows (PowerShell)</b></summary>
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-If activation is blocked: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
-</details>
-
-<details>
-<summary><b>macOS / Linux</b></summary>
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-</details>
-
-#### 3. Install
-
-##### Option A — pipx (recommended on Linux & macOS)
-
-`pipx` puts `janus` on your PATH globally without needing to activate a
-venv each shell. This is the durable install for servers and dev boxes.
-
-```bash
-sudo apt install -y pipx          # Ubuntu / Debian
-# or: brew install pipx           # macOS
-pipx ensurepath                    # adds ~/.local/bin to PATH (once)
-
-pipx install -e ".[rich]"          # editable install + rich TUI
-```
-
-To later switch extras: `pipx uninstall janus-agent && pipx install -e ".[all]"`.
-
-##### Option B — pip in a venv (works everywhere)
-
-```bash
-pip install -e .                   # core only (just `requests`)
-pip install -e ".[rich]"           # + polished TUI (recommended)
-pip install -e ".[web]"            # + local web UI
-pip install -e ".[browser]"        # + headless Chromium tools
-pip install -e ".[all]"            # everything
-```
-
-After install, `janus` is on your PATH **as long as the venv is
-activated**. Open a new shell and you'll need to `source .venv/bin/activate`
-again, or use Option A above.
-
-#### 4. Smoke test
-
-```bash
-janus --version     # janus 1.1
-janus --logo        # prints the bifurcation logo
-janus --help        # subcommands and flags
-janus --doctor      # config + environment diagnostics
+pipx install -e '.[all]'
 ```
 
 ---
 
 ## Configure
 
-Copy the example env file and fill in your provider key:
+Janus needs three env vars: an API key, an API base URL, and a model id.
 
-<details>
-<summary><b>Windows (PowerShell)</b></summary>
-
-```powershell
-Copy-Item .env.example .env
-notepad .env
-```
-</details>
-
-<details>
-<summary><b>macOS / Linux</b></summary>
+The fastest path:
 
 ```bash
-cp .env.example .env
-$EDITOR .env
+janus onboard
 ```
-</details>
 
-Janus auto-loads `.env` from the current working directory, then falls
-back to `~/.janus/.env`. Existing shell exports always win.
+The interactive wizard walks you through provider selection
+(OpenRouter, OpenAI, Anthropic, Ollama, …) and picks up
+existing `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
+`OPENROUTER_API_KEY` from your shell automatically.
 
-| Variable | Required | Default | Notes |
-|---|---|---|---|
-| `JANUS_API_KEY` | ✅ | — | Provider key (OpenRouter, Anthropic, OpenAI, …) |
-| `JANUS_API_BASE` |   | `https://openrouter.ai/api/v1` | Override for direct providers |
-| `JANUS_MODEL` |   | `openai/gpt-4o-mini` | Any chat model the base supports |
-| `JANUS_WORKSPACE` |   | current directory | Pin so fs/shell tools can't escape |
-| `JANUS_MEMORY_MODEL` |   | same as `JANUS_MODEL` | Cheaper model for the memory-diff loop |
-| `JANUS_BRAVE_API_KEY` |   | — | Web search (free key at brave.com) |
-| `JANUS_TELEGRAM_TOKEN` |   | — | Telegram gateway |
-| `JANUS_WHATSAPP_*` |   | — | WhatsApp Cloud API webhook |
-
-Full reference: [`.env.example`](.env.example).
-
----
-
-## Quickstart
+Or set directly:
 
 ```bash
-janus                              # interactive REPL (rich TUI if installed)
-janus --basic                      # plain input() loop
-janus -p "summarise the readme"    # headless, single-shot
-
-janus web                          # local web UI on http://127.0.0.1:8765
-janus daemon                       # proactive trigger daemon
-janus telegram                     # Telegram bot
-janus whatsapp                     # WhatsApp webhook
-
-janus --eval --last 20             # replay recent turns at temp=0
-janus --analyze                    # log statistics
-janus --resume <id>                # resume a saved conversation
-janus --continue                   # continue the most recent one
+export JANUS_API_KEY="sk-..."
+export JANUS_API_BASE="https://openrouter.ai/api/v1"
+export JANUS_MODEL="anthropic/claude-haiku-4-5"
 ```
 
-A typical session:
-
-```
-›  refactor janus/cli_rich.py to extract the dispatcher into its own module
-
-I'll start by reading the current cli_rich.py to see what's in the
-dispatcher.
-
-   → fs_read(path=janus/cli_rich.py)
-   ✓ 1209 lines
-
-The dispatcher is roughly 280 lines (_dispatch + helpers). I'll move it to
-janus/dispatcher.py and re-export. Approve the new file?
-
-   ⚠ approval needed: fs_write: create  (risk=write, mode=default)
-   create janus/dispatcher.py  (8412 bytes)
-   --- proposed contents ---
-   ...
-
-approve? [y/N]: y
-```
-
-No interpretation picker — just chat with tool calls inline, gated by
-the active permission mode. Use `/why` if you want the model to surface
-2–3 alternative readings of a message before acting.
+Persist these to `~/.janus/.env` so they survive shell restarts.
 
 ---
 
 ## Tutorials
 
-Four progressive walkthroughs in [`docs/tutorials/`](docs/tutorials/),
-each one screenful (~10 minutes):
+Four progressive walkthroughs in [`tutorials/`](tutorials/), each
+one screenful (~10 minutes each):
 
-1. **[Hello, Janus](docs/tutorials/01-hello-janus.md)** — install,
+1. **[Hello, Janus](tutorials/01-hello-janus.md)** — install,
    configure a model, first turn.
-2. **[Your First Skill](docs/tutorials/02-your-first-skill.md)** —
-   write a skill, see it auto-load, `/promote` it.
-3. **[Memory Loop](docs/tutorials/03-memory-loop.md)** — memory
+2. **[Your First Skill](tutorials/02-your-first-skill.md)** — write
+   a skill, see it auto-load, `/promote` it.
+3. **[Memory Loop](tutorials/03-memory-loop.md)** — memory
    proposals, review, hygiene.
-4. **[Connect MCP](docs/tutorials/04-connect-mcp.md)** — configure a
-   stdio MCP server, list tools, call them through Janus.
+4. **[Connect MCP](tutorials/04-connect-mcp.md)** — configure a
+   stdio MCP server, list its tools, call them through Janus.
 
 ---
 
 ## Production deployment
 
-For VPS / always-on deployments, the **systemd path** is recommended:
+For VPS / always-on setups, the **systemd path** is recommended:
 
 ```bash
-# On the VPS (after one-line install):
 git clone https://github.com/samalgotrader7-ops/janus.git /opt/janus
 cd /opt/janus
-
 # Set required env vars in your shell, then:
 bash scripts/install_services.sh
 ```
@@ -317,19 +241,24 @@ What this gets you:
   `janus-daemon` — each with auto-restart on failure.
 - `~/.janus/.env` written with `chmod 600` from your shell env.
 - `loginctl enable-linger` so units survive SSH logout.
-- `git config core.hooksPath scripts/git-hooks` so `git pull` auto-
-  restarts services when `janus/*.py` changes.
+- `git config core.hooksPath scripts/git-hooks` so `git pull`
+  auto-restarts services when `janus/*.py` changes.
 - Bypass with `JANUS_NO_AUTO_RESTART=1 git pull`.
 
-For Docker, see `docker-compose.yml` (three services share one named
-volume `janus-data`).
+For TLS, generate a reverse-proxy snippet:
+
+```bash
+janus web config caddy --domain janus.example.com >> /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+(Both Caddy and nginx supported.)
 
 ---
 
 ## Permission modes
 
-Copied from Claude Code so muscle memory transfers. Switch with
-`/mode <name>` or set `JANUS_APPROVAL` in `.env`. The decision matrix:
+Set with `/mode <name>` mid-session or `JANUS_APPROVAL` in `.env`:
 
 | mode | read | write | exec |
 |---|---|---|---|
@@ -338,187 +267,72 @@ Copied from Claude Code so muscle memory transfers. Switch with
 | `plan` | allow | **DENY** | **DENY** |
 | `bypassPermissions` | allow | allow | allow |
 
-- **default** — start here. The model can read freely, asks before
-  writing files or running commands.
-- **acceptEdits** — for trusted refactors when you don't want to babysit
-  every diff. Shell commands still ask.
-- **plan** — read-only thinking. The model can browse the codebase and
-  propose a plan; nothing mutates. Switch to `default` when ready to act.
-- **bypassPermissions** — fully autonomous. Use only in throwaway
-  workspaces.
-
-Skills can grant capability tokens (e.g. `shell.exec: ["git *"]`) that
-short-circuit the prompt for narrow targets without flipping the whole
-session into bypass.
-
----
-
-## Updating
-
-Janus follows simple SemVer tags (`v0.13.0`, `v0.14.0`, …). Pull the
-latest tag and reinstall in place:
-
-```bash
-cd /path/to/janus
-git pull --tags
-janus --version            # confirm the new version
-```
-
-Then **reinstall** so the new code is picked up:
-
-```bash
-# If installed via pipx:
-pipx reinstall janus-agent
-
-# If installed via pip in a venv:
-source .venv/bin/activate
-pip install -e ".[rich]" --upgrade
-```
-
-To pin to a specific release:
-
-```bash
-git checkout v0.13.0
-pipx reinstall janus-agent      # or: pip install -e ".[rich]" --upgrade
-```
-
----
-
-## Slash commands
-
-Type `/` in the REPL to open the dropdown. All commands carry inline
-descriptions; the menu is grouped by source (built-in vs. user-defined).
-
-| Command | Purpose |
-|---|---|
-| `/mode [name]` | Switch permission mode: `default` / `acceptEdits` / `plan` / `bypassPermissions` |
-| `/why` | Re-interpret your last message and show 2–3 candidate readings |
-| `/workspace [path]` | Show or change the active workspace directory |
-| `/analyze` | Scan the workspace for tools, skills, project hints |
-| `/memory` | Show the `user.md` memory file |
-| `/search <query>` | Search prior interactions in the FTS5 log index |
-| `/skills` | List installed skills with state and trust score |
-| `/promote <name> <state>` | Promote a quarantined skill to a trusted state |
-| `/skill new \| review \| import` | Skill authoring |
-| `/cost` | Token + cost summary for this session |
-| `/clear` | Clear conversation turns and cost counters |
-| `/compact` | Summarize and prune older turns |
-| `/resume <id>` / `/continue` | Conversation continuity |
-| `/verbose` / `/stream` | Toggle verbose tool args / token streaming |
-| `/init` | Scan codebase and propose starter `user.md` + skills |
-| `/model [id]` | Show or set the model for this session |
-| `/doctor` | Run diagnostics on configuration and environment |
-| `/output-style` | Switch output rendering (markdown / plain / json / …) |
-| `/commands` | List user-defined slash commands |
-| `/eval [--last N] [--skill <name>]` | Replay last N turns at temp=0 (drift check) |
-| `/mcp list \| connect \| disconnect` | Manage MCP servers |
-| `/triggers` | List configured triggers |
-| `/help` | Full grouped command list |
-| `/quit` | Exit |
-
-You can author your own commands as plain markdown files with optional
-frontmatter — drop them in `~/.janus/commands/` (global) or
-`<workspace>/.janus/commands/` (per-project):
-
-```markdown
----
-name: refactor
-description: rewrite the supplied snippet for clarity
----
-
-Refactor this code:
-
-{args}
-```
-
----
-
-## Architecture
-
-```
-user types
-   │
-   ▼
-slash command? handle and continue
-   │
-   ▼
-skills.match()  →  trusted-auto skill attaches (if any)
-   │
-   ▼
-executor.chat(messages, user_input, tools, approver, mode, …)
-   │
-   ▼
-loop:
-   llm.chat_stream(messages, tools=registry.schemas())
-   if tool_calls:
-      for each call:
-         hooks.fire(PreToolUse) → maybe deny
-         tools.call() → approver(action, details, risk=…, capability=(…))
-                       → permissions.decide(risk, mode) → allow / ask / deny
-         hooks.fire(PostToolUse)
-         append tool result
-   else:
-      final text → return
-   │
-   ▼
-cost.record()  ·  conversation.add_turn()  ·  skill.record_run()
-memory.propose_diff()  ·  logger.write()
-```
-
-The legacy interpretation-gated flow is preserved on `/why` for users
-who want to inspect ambiguity before acting.
+`plan` mode is great for first sessions — Janus can read the
+codebase, propose a plan via the `exit_plan_mode` tool, and only
+start writing once you approve.
 
 ---
 
 ## Where state lives
 
-Everything Janus learns about you lives under `~/.janus/`, in plain
-files you can open in any text editor:
-
 ```
 ~/.janus/
-├── log.jsonl                   every interaction (append-only)
-├── sessions.db                 SQLite FTS5 index over log.jsonl
-├── user.md                     plain-text user model
-├── skills/<name>.md            installed skills
-├── conversations/<id>.json     resumable conversations
-├── triggers/<name>.yaml        proactive triggers
-├── hooks/<event>.<order>.json  lifecycle hooks
-├── mcp/servers.json            MCP server registry
-├── commands/<name>.md          custom slash commands
-├── evals/run-<ts>.json         eval reports
-└── demo/phase_<N>.md           per-phase demo records
+├── memory/                  # markdown cards loaded into prompt
+│   ├── MEMORY.md            # the index — always loaded
+│   └── *.md                 # individual cards loaded on relevance
+├── skills/<name>/SKILL.md   # markdown + YAML frontmatter
+├── conversations/           # JSON per conversation; resumable
+├── log.jsonl                # every turn + tool call + response
+├── audit.jsonl              # mode changes / skill promotes / MCP connects
+├── cost.jsonl               # token usage + USD spend
+├── mcp/servers.json         # MCP server configs
+├── triggers/*.json          # scheduled agents (run by `janus daemon`)
+├── images/                  # generated images
+├── backups/                 # `janus backup` output
+└── .env                     # provider keys + config (chmod 600)
 ```
 
-Inspect, diff, version-control, or hand-edit any of it. There is no
-opaque database.
+Everything is plain text. `cat`, `grep`, `git diff`, hand-edit at will.
 
 ---
 
-## Testing
+## Slash commands (cheatsheet)
+
+```
+/help                      list available commands
+/mode <name>               change permission mode
+/cost [--daily]            token usage + budget
+/skills [show <name>]      list / inspect skills
+/promote <name> <state>    promote skill (quarantined → trusted)
+/memory review             review pending memory diffs
+/memory consolidate        ask the model to dedupe memories
+/mcp catalog               list configured MCP servers
+/mcp connect <name>        connect to an MCP server
+/resume [id]               resume a saved conversation
+/clear                     start a fresh conversation
+/why                       have model surface 2-3 alternative readings
+```
+
+---
+
+## Contributing
+
+Janus is MIT-licensed and welcomes contributions. The codebase is
+plain Python with minimal dependencies — `requests` is the only
+required runtime dep; everything else is opt-in via extras.
 
 ```bash
-pip install -e ".[test]"
-pytest tests/ -q
+git clone https://github.com/samalgotrader7-ops/janus.git
+cd janus
+pipx install -e '.[all,test]'
+python -m pytest tests/ -q
 ```
 
-The suite is fast (~12 s for 401 tests as of v1.1) and uses no network
-or LLM calls — `fake_llm` and `janus_home` fixtures isolate every run.
-
----
-
-## Documentation
-
-| Doc | What it covers |
-|---|---|
-| [`docs/JANUS_MASTER_SPEC.md`](docs/JANUS_MASTER_SPEC.md) | The design contract |
-| [`docs/BUILD_GUIDE_FOR_CLAUDE_CODE.md`](docs/BUILD_GUIDE_FOR_CLAUDE_CODE.md) | The operational contract — read before contributing |
-| [`docs/HERMES_AUDIT.md`](docs/HERMES_AUDIT.md) | Competitive thesis + why each safety primitive exists |
-| [`docs/PHASE_2_3_DESIGN.md`](docs/PHASE_2_3_DESIGN.md) | Original design rationale for memory + skills |
-| [`CLAUDE.md`](CLAUDE.md) | Onboarding for AI assistants working in this repo |
+Issues, ideas, and PRs welcome at
+[github.com/samalgotrader7-ops/janus/issues](https://github.com/samalgotrader7-ops/janus/issues).
 
 ---
 
 ## License
 
-[MIT](LICENSE) © 2026 Sam.
+[MIT](LICENSE) © Sam.

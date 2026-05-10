@@ -19,8 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-VERSION = "1.34.4"
-TAGLINE = "intent-first · safety-first agent"
+VERSION = "1.34.5"
+TAGLINE = "the agent that learns from you · plain-text everything"
 
 
 # ---------- v1.24.3: emoji-safe terminal rendering ----------

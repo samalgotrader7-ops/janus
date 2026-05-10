@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 220" width="800" height="220">
+  <style>
+    .wordmark { font: 700 88px ui-sans-serif, system-ui, -apple-system, sans-serif; fill: #a020f0; letter-spacing: -0.02em; }
+    .tagline { font: 400 22px ui-sans-serif, system-ui, -apple-system, sans-serif; fill: #6b7280; letter-spacing: 0.02em; }
+  </style>
+  <defs>
+    <marker id="banner-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="strokeWidth" markerWidth="4" markerHeight="4" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#a020f0" stroke="none"/>
+    </marker>
+  </defs>
+  <!-- Logo glyph on the left -->
+  <g transform="translate(40,60) scale(3.0)" fill="none" stroke="#a020f0" stroke-width="2" stroke-linecap="round">
+    <circle cx="6" cy="16" r="2.5" fill="#a020f0" stroke="none"/>
+    <g marker-end="url(#banner-arrow)">
+      <line x1="9" y1="16" x2="22" y2="7"/>
+      <line x1="9" y1="16" x2="26" y2="16"/>
+      <line x1="9" y1="16" x2="22" y2="25"/>
+    </g>
+  </g>
+  <!-- Wordmark + tagline -->
+  <text class="wordmark" x="240" y="118">janus</text>
+  <text class="tagline" x="240" y="160">the agent that learns from you · plain-text everything</text>
+</svg>

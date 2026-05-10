@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 
-TUTORIALS_DIR = Path(__file__).parent.parent / "docs" / "tutorials"
+TUTORIALS_DIR = Path(__file__).parent.parent / "tutorials"
 
 EXPECTED_TUTORIALS = [
     "01-hello-janus.md",
