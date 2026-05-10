@@ -1730,6 +1730,64 @@ def _build_app():
 
     # ---------- v1.29.1 — MCP catalog browser ----------
 
+    # ---------- v1.34.0 — Generic incoming webhooks (Phase 7.5) ----------
+
+    @app.post("/api/webhook/{key}")
+    async def api_webhook(key: str, request: Request):
+        """v1.34.0 — incoming webhook endpoint. Validates HMAC of
+        raw body using the per-key shared secret in
+        ~/.janus/webhooks.json, then renders the configured prompt
+        template with payload substitutions and audits the fire.
+
+        Returns:
+          202 Accepted    when fired successfully
+          401 Unauthorized when signature mismatch / missing
+          404 Not Found    when key isn't configured
+
+        NOT auth-gated through the cookie/token system — auth is
+        the HMAC. Anyone with the secret can fire.
+        """
+        from .. import webhooks
+        body = await request.body()
+        sig = (
+            request.headers.get("x-janus-signature")
+            or request.headers.get("X-Janus-Signature")
+        )
+        result = webhooks.evaluate(key, body, sig)
+        # Audit every webhook attempt (including failures) so abuse
+        # patterns are visible in `janus audit --action webhook.`.
+        try:
+            from .. import audit_log
+            audit_log.record(
+                f"webhook.{result.status}",
+                key=key,
+                bytes=len(body),
+            )
+        except Exception:
+            pass
+        if result.status == "unknown_key":
+            return JSONResponse(
+                status_code=404,
+                content={"error": result.detail},
+            )
+        if result.status == "bad_signature":
+            return JSONResponse(
+                status_code=401,
+                content={"error": result.detail},
+            )
+        # Fired: return 202 + the rendered prompt so the caller can
+        # log it / verify what was sent. The agent fire itself is
+        # async / out-of-band — v1.34.0 ships the wire without
+        # running the turn (turn-fire is a follow-up; needs care
+        # around session ownership + rate limits).
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "accepted",
+                "prompt_preview": (result.rendered_prompt or "")[:500],
+            },
+        )
+
     # ---------- v1.33.2 — Health endpoint (Phase 6.3) ----------
 
     @app.get("/api/health")
