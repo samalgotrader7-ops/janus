@@ -108,6 +108,7 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/mcp",          "MCP servers — list | catalog | tools <s> | inspect <s> <t> | connect | disconnect", "built-in"),
     SlashCommand("/triggers",     "list configured triggers",                            "built-in"),
     SlashCommand("/swarm",        "agent swarms — list | describe | run | status | cancel", "built-in"),
+    SlashCommand("/goal",         "manage standing objective: /goal <text> | status | pause | resume | clear | budget <N>", "built-in"),
     SlashCommand("/help",         "show all available slash commands grouped by source", "built-in"),
     SlashCommand("/quit",         "exit the CLI",                                        "built-in"),
     SlashCommand("/exit",         "alias for /quit",                                     "built-in"),
@@ -374,6 +375,103 @@ def _h_provider(ctx, arg) -> str:
     return f"provider: {p}  ({cache_str})  base: {config.API_BASE}"
 
 
+# ---------- v1.37.0 — Phase 10.1.0: /goal Ralph Loop primitive ----------
+#
+# /goal sets a standing objective the agent works toward across turns.
+# v10.1.0 ships ONLY the state primitive + slash commands. The auto-
+# continue loop + judge model lands in v10.1.1.
+#
+# Subcommands:
+#   /goal <text>      — set a new goal (replaces any existing)
+#   /goal             — show status (== /goal status)
+#   /goal status      — show the current goal + remaining turn budget
+#   /goal pause       — pause the active goal
+#   /goal resume      — resume a paused goal
+#   /goal clear       — drop the goal entirely
+#   /goal budget <N>  — adjust the turn budget on the active goal
+#
+# Scope: each surface declares its session identity. cli_rich uses the
+# fixed string 'cli_rich'; future telegram/web pass scope via
+# ctx.extra['goal_scope'] so the same handler serves all surfaces.
+
+
+def _goal_scope(ctx: SlashContext) -> str:
+    """Resolve the storage scope for this surface's goals.
+
+    Surfaces that have multi-session shape (telegram per chat_id,
+    web per session_id) pass `ctx.extra['goal_scope']`. Surfaces
+    without that fall back to the surface name — works for cli_rich
+    where there's only one session at a time.
+    """
+    if ctx.extra:
+        s = ctx.extra.get("goal_scope")
+        if s:
+            return str(s)
+    return ctx.surface or "default"
+
+
+def _h_goal(ctx: SlashContext, arg: str) -> str:
+    """`/goal` — manage the standing objective for this scope."""
+    from . import goals as _g
+
+    scope = _goal_scope(ctx)
+    sub, rest = split_subcommand(arg)
+    sub_lower = sub.lower().strip()
+
+    # Bare `/goal` → status
+    if not arg.strip():
+        return _g.format_status(_g.load(scope))
+
+    # Reserved subcommand keywords come first; anything else is goal text.
+    if sub_lower in ("status", "stat"):
+        return _g.format_status(_g.load(scope))
+
+    if sub_lower in ("pause",):
+        g = _g.pause(scope)
+        if g is None:
+            return "no goal set."
+        if g.status == "paused":
+            return f"goal paused.\n{_g.format_status(g)}"
+        return f"goal already {g.status}.\n{_g.format_status(g)}"
+
+    if sub_lower in ("resume", "continue"):
+        g = _g.resume(scope)
+        if g is None:
+            return "no goal set."
+        if g.status == "active":
+            return f"goal resumed.\n{_g.format_status(g)}"
+        return f"goal is {g.status}, can't resume.\n{_g.format_status(g)}"
+
+    if sub_lower in ("clear", "drop", "cancel"):
+        existed = _g.clear(scope)
+        return "goal cleared." if existed else "no goal to clear."
+
+    if sub_lower in ("budget",):
+        try:
+            new_budget = int(rest.strip())
+        except (ValueError, AttributeError):
+            return "usage: /goal budget <N>   (positive integer)"
+        if new_budget <= 0:
+            return "budget must be a positive integer."
+        g = _g.load(scope)
+        if g is None:
+            return "no goal set."
+        g.turn_budget = new_budget
+        _g.save(scope, g)
+        return f"budget updated to {new_budget}.\n{_g.format_status(g)}"
+
+    # Anything else = goal text. Use the WHOLE arg (not split) so
+    # multi-word goals like "/goal refactor the planner module" keep
+    # all their words.
+    text = arg.strip()
+    g = _g.set_goal(scope, text)
+    return (
+        f"goal set: {g.text}\n"
+        f"turn budget: {g.turn_budget}    "
+        f"(auto-continue loop lands in v1.37.1; for now use `/goal status`)"
+    )
+
+
 def register_shared_handlers(registry: SlashRegistry) -> None:
     """Register the v1.24.1 shared handlers on a surface's registry.
 
@@ -385,6 +483,10 @@ def register_shared_handlers(registry: SlashRegistry) -> None:
     v1.36.0 — Phase 8.1: added /version, /cwd, /home, /uptime, /provider
     as proof-of-pattern for the slash dispatcher migration. Five more
     commands sourced from one place; surfaces no longer duplicate them.
+
+    v1.37.0 — Phase 10.1.0: added /goal (Ralph Loop primitive). State
+    is filesystem-backed (~/.janus/goals/<scope>.json) so all surfaces
+    read the same goal. Auto-continue loop arrives in v10.1.1.
     """
     registry.register("/grants", _h_grants)
     registry.register("/version", _h_version)
@@ -392,3 +494,4 @@ def register_shared_handlers(registry: SlashRegistry) -> None:
     registry.register("/home", _h_home)
     registry.register("/uptime", _h_uptime)
     registry.register("/provider", _h_provider)
+    registry.register("/goal", _h_goal)
