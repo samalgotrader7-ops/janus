@@ -1230,6 +1230,10 @@ def main():
     if sub == "audit":
         from . import audit_log
         sys.exit(audit_log.cmd_audit(args[1:]))
+    # v1.34.1 — local-first git-backed memory sync (Phase 7.2).
+    if sub == "sync":
+        from . import memory_sync
+        sys.exit(memory_sync.cmd_sync(args[1:]))
     if sub == "service":
         from . import services
         sub_args = args[1:] if len(args) > 1 else ["status"]
