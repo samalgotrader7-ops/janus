@@ -251,9 +251,14 @@ def _run_telegram():
 def _run_web(args):
     # v1.21: subcommands. `janus web` (no args) starts the server.
     # `janus web rotate-token` regenerates the bootstrap token.
+    # v1.33.0: `janus web config <proxy>` emits a reverse-proxy
+    # snippet (Caddy / nginx) for production deployment.
     if args and args[0] == "rotate-token":
         from .gateways.web import rotate_token_cmd
         sys.exit(rotate_token_cmd())
+    if args and args[0] == "config":
+        from .web_config import cmd_config
+        sys.exit(cmd_config(args[1:]))
     from .gateways.web import serve
     host = None
     port = None
