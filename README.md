@@ -27,12 +27,41 @@ What makes it useful:
 
 ---
 
+## 60-second quickstart
+
+```bash
+# 1. Install (Linux / macOS — requires Python 3.10+)
+curl -sSL https://raw.githubusercontent.com/samalgotrader7-ops/janus/main/scripts/install.sh | sh
+
+# 2. Configure (interactive — picks up existing OPENAI_API_KEY etc.)
+janus onboard
+
+# 3. Chat
+janus
+```
+
+That's it. You'll see a streaming chat with inline tool calls and a
+permission prompt for any side effect.
+
+> **Want a deeper walkthrough?** Four progressive tutorials in
+> [`docs/tutorials/`](docs/tutorials/) cover skills, memory, and MCP
+> integration — each one screenful, ~10 minutes each.
+
+> **Want to deploy on a VPS?**
+> [`scripts/install_services.sh`](scripts/install_services.sh) installs
+> systemd units for `telegram` + `web` + `daemon` with auto-restart on
+> `git pull`. See [Production deployment](#production-deployment) below.
+
+---
+
 ## Table of contents
 
 - [Why Janus](#why-janus)
 - [Install](#install)
 - [Configure](#configure)
 - [Quickstart](#quickstart)
+- [Tutorials](#tutorials)
+- [Production deployment](#production-deployment)
 - [Permission modes](#permission-modes)
 - [Updating](#updating)
 - [Slash commands](#slash-commands)
@@ -68,14 +97,42 @@ for you.
 Janus runs on **Windows, macOS, and Linux** with Python ≥ 3.10. The core
 install is one dependency (`requests`) — everything else is opt-in.
 
-### 1. Clone
+### Easiest — one-line installer (Linux / macOS)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/samalgotrader7-ops/janus/main/scripts/install.sh | sh
+```
+
+Detects your platform, installs `pipx` if missing, pulls Janus from
+PyPI (or git+URL fallback), and prints next-step instructions. Handles
+PEP 668 (`--break-system-packages`) on recent Debian / Ubuntu.
+
+### Docker (any platform)
+
+```bash
+# Standalone
+docker run --rm -it -p 8765:8765 \
+  -v janus-data:/root/.janus \
+  --env-file .env \
+  ghcr.io/samalgotrader7-ops/janus:latest web
+
+# Three-service stack (web + telegram + daemon)
+git clone https://github.com/samalgotrader7-ops/janus.git
+cd janus
+cp .env.example .env  # fill in your keys
+docker compose up -d
+```
+
+### From source (for contributors)
+
+#### 1. Clone
 
 ```bash
 git clone https://github.com/samalgotrader7-ops/janus.git
 cd janus
 ```
 
-### 2. Create a virtual environment
+#### 2. Create a virtual environment
 
 <details>
 <summary><b>Windows (PowerShell)</b></summary>
@@ -97,9 +154,9 @@ source .venv/bin/activate
 ```
 </details>
 
-### 3. Install
+#### 3. Install
 
-#### Option A — pipx (recommended on Linux & macOS)
+##### Option A — pipx (recommended on Linux & macOS)
 
 `pipx` puts `janus` on your PATH globally without needing to activate a
 venv each shell. This is the durable install for servers and dev boxes.
@@ -114,7 +171,7 @@ pipx install -e ".[rich]"          # editable install + rich TUI
 
 To later switch extras: `pipx uninstall janus-agent && pipx install -e ".[all]"`.
 
-#### Option B — pip in a venv (works everywhere)
+##### Option B — pip in a venv (works everywhere)
 
 ```bash
 pip install -e .                   # core only (just `requests`)
@@ -128,7 +185,7 @@ After install, `janus` is on your PATH **as long as the venv is
 activated**. Open a new shell and you'll need to `source .venv/bin/activate`
 again, or use Option A above.
 
-### 4. Smoke test
+#### 4. Smoke test
 
 ```bash
 janus --version     # janus 1.1
@@ -222,6 +279,50 @@ approve? [y/N]: y
 No interpretation picker — just chat with tool calls inline, gated by
 the active permission mode. Use `/why` if you want the model to surface
 2–3 alternative readings of a message before acting.
+
+---
+
+## Tutorials
+
+Four progressive walkthroughs in [`docs/tutorials/`](docs/tutorials/),
+each one screenful (~10 minutes):
+
+1. **[Hello, Janus](docs/tutorials/01-hello-janus.md)** — install,
+   configure a model, first turn.
+2. **[Your First Skill](docs/tutorials/02-your-first-skill.md)** —
+   write a skill, see it auto-load, `/promote` it.
+3. **[Memory Loop](docs/tutorials/03-memory-loop.md)** — memory
+   proposals, review, hygiene.
+4. **[Connect MCP](docs/tutorials/04-connect-mcp.md)** — configure a
+   stdio MCP server, list tools, call them through Janus.
+
+---
+
+## Production deployment
+
+For VPS / always-on deployments, the **systemd path** is recommended:
+
+```bash
+# On the VPS (after one-line install):
+git clone https://github.com/samalgotrader7-ops/janus.git /opt/janus
+cd /opt/janus
+
+# Set required env vars in your shell, then:
+bash scripts/install_services.sh
+```
+
+What this gets you:
+
+- Three systemd user-units: `janus-telegram`, `janus-web`,
+  `janus-daemon` — each with auto-restart on failure.
+- `~/.janus/.env` written with `chmod 600` from your shell env.
+- `loginctl enable-linger` so units survive SSH logout.
+- `git config core.hooksPath scripts/git-hooks` so `git pull` auto-
+  restarts services when `janus/*.py` changes.
+- Bypass with `JANUS_NO_AUTO_RESTART=1 git pull`.
+
+For Docker, see `docker-compose.yml` (three services share one named
+volume `janus-data`).
 
 ---
 
