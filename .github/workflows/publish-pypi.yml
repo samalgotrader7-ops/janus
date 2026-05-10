@@ -1,0 +1,120 @@
+name: Publish to PyPI
+
+# Phase 5.1 — Distribution. Build sdist + wheel on tag push, validate
+# the package, and upload to PyPI when the PYPI_API_TOKEN secret is
+# configured. Without the secret the workflow runs in DORMANT mode:
+# it still builds + validates, but skips the upload step gracefully.
+#
+# To enable real publishing:
+#   1. Create a PyPI account at https://pypi.org/account/register/
+#   2. Reserve the `janus-agent` namespace (manually upload a v0.0.0
+#      placeholder OR let the first tagged build claim it — be aware
+#      of name-squatting risk if you delay).
+#   3. Generate an API token at https://pypi.org/manage/account/token/
+#      with scope limited to `janus-agent`.
+#   4. Add the token to the GitHub repo as a secret named
+#      `PYPI_API_TOKEN` (Settings → Secrets and variables → Actions
+#      → New repository secret).
+#
+# After step 4, the next tag push (v1.32.1+) auto-publishes.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build + validate only (no upload). Default true for manual runs.'
+        type: boolean
+        default: true
+
+jobs:
+  build:
+    name: Build distribution packages
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade build twine
+
+      - name: Verify version-tag agreement
+        id: version
+        run: |
+          set -euo pipefail
+          PKG_VERSION="$(grep '^version = ' pyproject.toml | sed -E 's/version = "([^"]+)"/\1/')"
+          echo "Package version: $PKG_VERSION"
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+
+          # Only enforce tag-vs-version match on tag pushes (not
+          # workflow_dispatch). On manual dispatch we just build the
+          # current main HEAD.
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+            if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
+              echo "::error::Tag '$TAG_VERSION' does not match pyproject.toml version '$PKG_VERSION'"
+              echo "::error::Bump pyproject.toml + branding.py BEFORE tagging."
+              exit 1
+            fi
+            echo "Tag $TAG_VERSION matches package version $PKG_VERSION"
+          fi
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Twine check
+        run: twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ steps.version.outputs.version }}
+          path: dist/
+          retention-days: 14
+
+  publish:
+    name: Upload to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Only auto-publish on a real tag push. workflow_dispatch builds
+    # but does not upload (lets users dry-run the workflow).
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/janus-agent
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ needs.build.outputs.version }}
+          path: dist/
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install twine
+        run: pip install --upgrade twine
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TWINE_PASSWORD:-}" ]]; then
+            echo "::warning::PYPI_API_TOKEN secret not configured — workflow is DORMANT."
+            echo "::warning::Add the secret in Settings → Secrets to enable real publishing."
+            echo "Build artifacts are still attached to this run; no upload performed."
+            exit 0
+          fi
+          # --skip-existing so a retag on the same version doesn't
+          # 400-error against an already-uploaded distribution.
+          twine upload --skip-existing dist/*

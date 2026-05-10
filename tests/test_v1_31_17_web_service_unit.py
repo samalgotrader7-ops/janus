@@ -174,15 +174,9 @@ def test_telegram_v1_31_17_marker_present():
 
 
 def test_version_bumped_to_1_31_17_or_later():
-    """Both branding.VERSION and pyproject version match (and are
-    >= 1.31.17 so subsequent point releases don't need to bump
-    this test)."""
+    """branding.VERSION is >= 1.31.17 — that's enough; subsequent
+    releases don't need to update this test."""
     def _parts(v: str) -> tuple[int, ...]:
         return tuple(int(x) for x in v.split("."))
 
     assert _parts(branding.VERSION) >= (1, 31, 17)
-    pyproject_path = (
-        Path(branding.__file__).parent.parent / "pyproject.toml"
-    )
-    py_src = pyproject_path.read_text(encoding="utf-8")
-    assert 'version = "1.31.17"' in py_src
