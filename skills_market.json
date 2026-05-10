@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "_about": "Janus skill marketplace catalog. To add your skill, open a PR adding an entry below. The 'url' must be a raw .md (or directory link with SKILL.md) — the install pipeline forces every imported skill to land as `state: quarantined` regardless of source frontmatter, per Janus invariant P4. Users review the body and run `/promote <name>` when ready.",
+  "skills": []
+}

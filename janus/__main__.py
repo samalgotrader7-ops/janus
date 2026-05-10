@@ -1234,6 +1234,10 @@ def main():
     if sub == "sync":
         from . import memory_sync
         sys.exit(memory_sync.cmd_sync(args[1:]))
+    # v1.34.6 — skill marketplace (Phase 7.6).
+    if sub == "skills" and len(args) > 1 and args[1] == "market":
+        from . import skills_market
+        sys.exit(skills_market.cmd_market(args[2:]))
     if sub == "service":
         from . import services
         sub_args = args[1:] if len(args) > 1 else ["status"]
