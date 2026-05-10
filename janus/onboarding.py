@@ -134,6 +134,91 @@ def run_wizard(*, prompt=input, output=print) -> bool:
         return False
 
 
+# ---------- v1.32.3 — Auto-detect provider from env / localhost ----------
+#
+# Phase 5.4 polish: a fresh user with OPENAI_API_KEY already in their
+# shell shouldn't have to type it again. Same for ANTHROPIC_API_KEY,
+# OPENROUTER_API_KEY, or a running Ollama on localhost. The wizard
+# probes these signals and offers them as the default first option.
+
+
+def _detect_env_keys(env: dict[str, str] | None = None) -> list[dict]:
+    """Inspect the environment for known API keys. Returns a list of
+    candidate provider matches (in preference order — most specific
+    first), each with the provider dict + the discovered key."""
+    if env is None:
+        env = dict(os.environ)
+    matches: list[dict] = []
+    # Map well-known env var names to their provider names.
+    # Order = preference: more-specific keys before generic.
+    key_to_provider = [
+        ("ANTHROPIC_API_KEY", "Anthropic"),
+        ("OPENROUTER_API_KEY", "OpenRouter"),
+        ("OPENAI_API_KEY", "OpenAI"),
+    ]
+    for env_var, provider_name in key_to_provider:
+        val = env.get(env_var)
+        if not val:
+            continue
+        provider = next(
+            (p for p in PROVIDERS if p["name"] == provider_name),
+            None,
+        )
+        if provider is None:
+            continue
+        matches.append({
+            "provider": provider,
+            "source": f"env:{env_var}",
+            "key": val,
+        })
+    # Janus-native key: if JANUS_API_KEY is already set, we can't
+    # tell which provider it's for, but we surface it as a "use
+    # whatever's in .env" option.
+    if env.get("JANUS_API_KEY") and not matches:
+        matches.append({
+            "provider": None,
+            "source": "env:JANUS_API_KEY",
+            "key": env["JANUS_API_KEY"],
+        })
+    return matches
+
+
+def _detect_ollama(host: str = "http://localhost:11434", *, timeout: float = 0.5) -> bool:
+    """Probe whether Ollama is running. Short timeout so the wizard
+    doesn't stall on a network roundtrip."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{host}/api/tags")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def detect_candidates(
+    env: dict[str, str] | None = None,
+    *,
+    probe_ollama: bool = True,
+) -> list[dict]:
+    """Return a list of detected candidate providers, in preference
+    order. Each entry: {provider, source, key} where key may be empty
+    when only the provider was detected (e.g., Ollama on localhost
+    doesn't need a key)."""
+    candidates: list[dict] = list(_detect_env_keys(env))
+    if probe_ollama and _detect_ollama():
+        ollama_provider = next(
+            (p for p in PROVIDERS if "Ollama" in p["name"] or "Local" in p["name"]),
+            None,
+        )
+        if ollama_provider is not None:
+            candidates.append({
+                "provider": ollama_provider,
+                "source": "localhost:11434",
+                "key": "",
+            })
+    return candidates
+
+
 def _run(*, prompt, output) -> bool:
     config.ensure_home()
     env_path = config.HOME / ".env"
@@ -162,13 +247,27 @@ def _run(*, prompt, output) -> bool:
             return False
 
     # Step 3 — api key.
-    output(f"\nAPI key (stored in ~/.janus/.env, never printed back):")
-    if provider.get("key_url"):
-        output(f"  Get one: {provider['key_url']}")
-    api_key = (prompt("> ") or "").strip()
-    if not api_key:
+    # v1.32.3 — if the auto-detect step pre-filled a key from env
+    # (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.) use it without
+    # asking again. User can blank-Enter to override.
+    prefilled = provider.get("_prefill_key", "")
+    if prefilled:
+        masked = prefilled[:6] + "..." + prefilled[-4:] if len(prefilled) > 10 else "***"
+        output(f"\nAPI key — using {masked} (auto-detected). Press Enter to keep, or paste a new one:")
+        raw = (prompt("> ") or "").strip()
+        api_key = raw or prefilled
+    else:
+        output("\nAPI key (stored in ~/.janus/.env, never printed back):")
+        if provider.get("key_url"):
+            output(f"  Get one: {provider['key_url']}")
+        api_key = (prompt("> ") or "").strip()
+    # Local Ollama doesn't need a real key — accept any placeholder.
+    is_local = "localhost" in (api_base or "") or "127.0.0.1" in (api_base or "")
+    if not api_key and not is_local:
         output("no API key — aborting")
         return False
+    if not api_key and is_local:
+        api_key = "ollama"  # Ollama ignores the key but the runtime requires non-empty
 
     # Step 4 — model.
     model = _pick_model(provider, prompt=prompt, output=output)
@@ -202,6 +301,53 @@ def _run(*, prompt, output) -> bool:
 
 
 def _pick_provider(*, prompt, output) -> dict[str, Any] | None:
+    """Pick a provider. v1.32.3 — if env vars OR localhost Ollama
+    suggest a provider, surface those as the top options so the
+    user only types '1<Enter>' for the common case."""
+    candidates = detect_candidates()
+    if candidates:
+        output("Detected from your environment:\n")
+        for i, c in enumerate(candidates, 1):
+            p = c["provider"]
+            name = p["name"] if p else "Custom (using $JANUS_API_KEY)"
+            source = c["source"]
+            output(f"  {i}. {name}  [{source}]")
+        next_index = len(candidates) + 1
+        output("")
+        output("Or pick from the full provider list:")
+        for j, p in enumerate(PROVIDERS, next_index):
+            output(f"  {j}. {p['name']} — {p['blurb']}")
+        output("")
+        raw = (prompt("> ") or "").strip()
+        if not raw:
+            output("no provider selected — aborting")
+            return None
+        try:
+            idx = int(raw) - 1
+        except ValueError:
+            output(f"unrecognized choice {raw!r} — aborting")
+            return None
+        # Indices 0..len(candidates)-1 → detected candidates (use
+        # their pre-filled key/provider). Indices >= len(candidates)
+        # → full PROVIDERS list (offset by len(candidates)).
+        if 0 <= idx < len(candidates):
+            cand = candidates[idx]
+            if cand["provider"] is not None:
+                # Stash the discovered key on the provider dict so
+                # the API-key step can reuse it without re-asking.
+                provider = dict(cand["provider"])
+                provider["_prefill_key"] = cand["key"]
+                return provider
+            # JANUS_API_KEY-only candidate — fall back to manual.
+            output("  Using existing $JANUS_API_KEY — pick the matching provider below.")
+            output("")
+        else:
+            idx -= len(candidates)
+        if not 0 <= idx < len(PROVIDERS):
+            output("out of range — aborting")
+            return None
+        return PROVIDERS[idx]
+    # No detection — original behavior.
     output("Choose a provider:\n")
     for i, p in enumerate(PROVIDERS, 1):
         output(f"  {i}. {p['name']} — {p['blurb']}")
