@@ -45,6 +45,8 @@ from .claude_code import ClaudeCode
 from .aider import Aider
 # v1.38.2 — OpenAI Codex CLI via `codex exec` (Phase 10.2.2).
 from .codex_cli import CodexCli
+# v1.38.3 — Google Gemini CLI via `gemini -p` (Phase 10.2.3).
+from .gemini_cli import GeminiCli
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -159,6 +161,11 @@ _BUILTIN_TOOL_FACTORIES = {
     # extra_args for --json structured output / --model overrides.
     # JANUS_CODEX_BIN + JANUS_CODEX_FLAGS env overrides.
     "codex_cli": CodexCli,
+    # v1.38.3 — Phase 10.2.3: Google Gemini CLI
+    # (https://github.com/google-gemini/gemini-cli) via `gemini -p`.
+    # Supports extra_args for --all-files / --model / --sandbox.
+    # JANUS_GEMINI_BIN + JANUS_GEMINI_FLAGS env overrides.
+    "gemini_cli": GeminiCli,
 }
 
 
