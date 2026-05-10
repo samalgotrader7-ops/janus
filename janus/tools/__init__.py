@@ -49,6 +49,8 @@ from .codex_cli import CodexCli
 from .gemini_cli import GeminiCli
 # v1.39.1 — Inter-agent message bus tools (Phase 10.3.1).
 from .bus import BusSend, BusRecv
+# v1.40.2 — A2A client (Phase 10.4.2): Janus calls other A2A peers.
+from .a2a_call import A2ACall
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -174,6 +176,11 @@ _BUILTIN_TOOL_FACTORIES = {
     # tokens: bus.send (+ run_id target), bus.recv is read-only.
     "bus_send": BusSend,
     "bus_recv": BusRecv,
+    # v1.40.2 — Phase 10.4.2: A2A client. Calls another A2A-
+    # compliant agent's /a2a JSON-RPC endpoint after discovering
+    # its Agent Card. Capability token: a2a.call + agent_url
+    # target so skills can pre-grant specific peer URLs.
+    "a2a_call": A2ACall,
 }
 
 
