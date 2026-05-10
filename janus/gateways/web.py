@@ -1728,6 +1728,88 @@ def _build_app():
         except Exception as e:
             return JSONResponse({"error": f"triggers list failed: {e}"})
 
+    # v1.35.5 — Phase 8.4: triggers CRUD (enable/disable/delete).
+    # Run-now deferred (needs the daemon's event-loop context).
+
+    def _trigger_path(name: str):
+        """Resolve a trigger YAML path safely (no path traversal)."""
+        import re as _re
+        if not _re.match(r"^[a-zA-Z0-9_-]+$", name or ""):
+            return None
+        return config.TRIGGERS_DIR / f"{name}.yaml"
+
+    def _trigger_set_enabled(name: str, enabled: bool):
+        path = _trigger_path(name)
+        if path is None or not path.exists():
+            return False, "trigger not found"
+        try:
+            text = path.read_text(encoding="utf-8")
+            import re as _re
+            new_val = "true" if enabled else "false"
+            # Replace `enabled: <anything>` line; if missing, append.
+            pattern = _re.compile(r"^(enabled\s*:\s*)\S+\s*$", _re.MULTILINE)
+            if pattern.search(text):
+                text = pattern.sub(rf"\1{new_val}", text)
+            else:
+                if not text.endswith("\n"):
+                    text += "\n"
+                text += f"enabled: {new_val}\n"
+            path.write_text(text, encoding="utf-8")
+            return True, ""
+        except Exception as e:
+            return False, str(e)
+
+    @app.post("/api/triggers/{name}/enable")
+    async def api_trigger_enable(name: str, request: Request):
+        auth_sid, err, _ip = _gate_post(request, f"/api/triggers/{name}")
+        if err is not None:
+            return err
+        ok, msg = _trigger_set_enabled(name, True)
+        if not ok:
+            return JSONResponse(status_code=404 if "not found" in msg else 400,
+                                 content={"error": msg})
+        try:
+            from .. import audit_log
+            audit_log.record("trigger.enable", name=name)
+        except Exception:
+            pass
+        return JSONResponse({"status": "ok", "enabled": True})
+
+    @app.post("/api/triggers/{name}/disable")
+    async def api_trigger_disable(name: str, request: Request):
+        auth_sid, err, _ip = _gate_post(request, f"/api/triggers/{name}")
+        if err is not None:
+            return err
+        ok, msg = _trigger_set_enabled(name, False)
+        if not ok:
+            return JSONResponse(status_code=404 if "not found" in msg else 400,
+                                 content={"error": msg})
+        try:
+            from .. import audit_log
+            audit_log.record("trigger.disable", name=name)
+        except Exception:
+            pass
+        return JSONResponse({"status": "ok", "enabled": False})
+
+    @app.post("/api/triggers/{name}/delete")
+    async def api_trigger_delete(name: str, request: Request):
+        auth_sid, err, _ip = _gate_post(request, f"/api/triggers/{name}")
+        if err is not None:
+            return err
+        path = _trigger_path(name)
+        if path is None or not path.exists():
+            return JSONResponse(status_code=404, content={"error": "trigger not found"})
+        try:
+            path.unlink()
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": f"delete failed: {e}"})
+        try:
+            from .. import audit_log
+            audit_log.record("trigger.delete", name=name)
+        except Exception:
+            pass
+        return JSONResponse({"status": "ok", "deleted": name})
+
     # ---------- v1.29.1 — MCP catalog browser ----------
 
     # ---------- v1.34.0 — Generic incoming webhooks (Phase 7.5) ----------
