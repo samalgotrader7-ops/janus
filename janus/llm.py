@@ -135,6 +135,46 @@ def _post_with_retry(
     raise RuntimeError("retry loop fell through")
 
 
+# v1.35.1 — Phase 9.3: provider-detection helpers for prompt cache.
+# The cache_control marker is Anthropic-flavored; providers that
+# accept it: openrouter (forwards to Anthropic), api.anthropic.com
+# direct, AWS Bedrock (via Anthropic models). Providers that ignore
+# it harmlessly: OpenAI, Ollama, generic OpenAI-compatible endpoints
+# (extra fields are dropped). Providers known to ERROR on extra
+# fields: very strict OpenAI clones — unlikely in practice.
+def detect_provider(api_base: str | None = None) -> str:
+    """Return a coarse provider name from JANUS_API_BASE."""
+    base = (api_base if api_base is not None else config.API_BASE) or ""
+    base_lower = base.lower()
+    if "openrouter.ai" in base_lower:
+        return "openrouter"
+    if "anthropic.com" in base_lower:
+        return "anthropic"
+    if "bedrock" in base_lower:
+        return "bedrock"
+    if "openai.com" in base_lower:
+        return "openai"
+    if "googleapis.com" in base_lower or "vertex" in base_lower:
+        return "vertex"
+    if "127.0.0.1" in base_lower or "localhost" in base_lower or ":11434" in base_lower:
+        return "ollama"
+    return "unknown"
+
+
+# Providers that benefit from Anthropic-style cache_control markers
+# (i.e., they forward to Anthropic's prompt cache). Used for the
+# heads-up log when JANUS_PROMPT_CACHE=1 is set but the provider
+# wouldn't actually save tokens.
+CACHE_BENEFICIARIES: frozenset[str] = frozenset({
+    "openrouter", "anthropic", "bedrock",
+})
+
+
+def cache_supported(provider: str) -> bool:
+    """True iff `provider` is known to honor cache_control markers."""
+    return provider in CACHE_BENEFICIARIES
+
+
 def apply_cache_markers(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Wrap select messages in Anthropic-style content blocks with
     `cache_control: ephemeral`. OpenRouter forwards to Anthropic's
