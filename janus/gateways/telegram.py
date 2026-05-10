@@ -1115,6 +1115,28 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await _run_chat_turn(update, ctx, chat_id, sess, req)
 
+    # v1.37.3 — Phase 10.1.3: /goal Ralph Loop server-side auto-
+    # continue. _run_chat_turn's goal hook queues the next prompt
+    # onto sess._goal_next_prompt; we drain it here, capped at
+    # JANUS_GOAL_ITERS_PER_MSG (default 5) per inbound user message
+    # so a runaway loop can't burn the whole budget in one turn.
+    # Cycle detection + budget exhaustion (in goal_loop.after_turn)
+    # are the deeper safety nets — this cap is just a per-message
+    # ceiling.
+    try:
+        max_iters = int(_os.environ.get("JANUS_GOAL_ITERS_PER_MSG", "5"))
+    except ValueError:
+        max_iters = 5
+    iter_count = 0
+    while iter_count < max_iters:
+        next_prompt = getattr(sess, "_goal_next_prompt", None)
+        if not next_prompt:
+            break
+        sess._goal_next_prompt = None  # clear before chaining so a
+                                       # downstream judge can re-set it
+        await _run_chat_turn(update, ctx, chat_id, sess, next_prompt)
+        iter_count += 1
+
 
 # v1.5.1: photo/document upload handlers. Without these, attachments
 # silently never reach any callback (the bot didn't even know the user
@@ -1522,20 +1544,18 @@ async def _run_chat_turn(
             except Exception:
                 pass
         elif _decision.next_prompt:
-            # v1.37.2: surface the suggested next step so the user
-            # can decide whether to advance manually. v1.37.3 will
-            # auto-fire it via re-entrant _run_chat_turn.
+            # v1.37.3: queue the next prompt onto the session so the
+            # outer on_text loop can chain another _run_chat_turn
+            # invocation (server-side auto-continue). Capped per-
+            # message by JANUS_GOAL_ITERS_PER_MSG to prevent runaway.
             try:
+                sess._goal_next_prompt = _decision.next_prompt
                 preview = _decision.next_prompt
-                if len(preview) > 250:
-                    preview = preview[:247] + "..."
+                if len(preview) > 200:
+                    preview = preview[:197] + "..."
                 await ctx.bot.send_message(
                     chat_id=chat_id,
-                    text=(
-                        f"→ goal next step: {preview}\n"
-                        f"_(send any message to advance — auto-continue "
-                        f"lands in v1.37.3)_"
-                    ),
+                    text=f"→ goal continuing: _{preview}_",
                     parse_mode="Markdown",
                 )
             except Exception:
