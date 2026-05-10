@@ -518,6 +518,90 @@ def _build_app():
         from .. import a2a
         return JSONResponse(a2a.build_agent_card())
 
+    @app.post("/a2a")
+    async def a2a_jsonrpc(request: Request):
+        """v1.40.1 — A2A JSON-RPC tasks endpoint.
+
+        Methods supported:
+          tasks/send    — submit a task; runs synchronously and
+                          returns COMPLETED with one artifact
+          tasks/get     — fetch a task's current state by id
+          tasks/cancel  — request cancellation (no-op for synchronous
+                          tasks already in a terminal state)
+
+        Auth: bearer token via Authorization header. Configurable
+        via JANUS_A2A_AUTH (bearer | none) + JANUS_A2A_TOKEN. When
+        JANUS_A2A_AUTH=none, no auth is enforced (use only for
+        local dev / behind a trusted reverse proxy).
+        """
+        from .. import a2a as _a2a
+
+        # Auth: bearer or none.
+        if _a2a.auth_required():
+            expected = _a2a.a2a_bearer_token()
+            if not expected:
+                # Misconfigured: auth required but no token set.
+                return JSONResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "error": {
+                            "code": -32000,
+                            "message": (
+                                "A2A misconfigured: JANUS_A2A_TOKEN not "
+                                "set. Set it or JANUS_A2A_AUTH=none."
+                            ),
+                        },
+                        "id": None,
+                    },
+                    status_code=503,
+                )
+            auth_header = request.headers.get("authorization", "")
+            if not auth_header.lower().startswith("bearer "):
+                return JSONResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "error": {
+                            "code": -32001,
+                            "message": "Unauthorized: bearer token required",
+                        },
+                        "id": None,
+                    },
+                    status_code=401,
+                )
+            presented = auth_header[len("bearer "):].strip()
+            import hmac
+            if not hmac.compare_digest(presented, expected):
+                return JSONResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "error": {
+                            "code": -32001,
+                            "message": "Unauthorized: invalid token",
+                        },
+                        "id": None,
+                    },
+                    status_code=401,
+                )
+
+        # Parse JSON body.
+        try:
+            envelope = await request.json()
+        except Exception:
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "code": -32700,
+                        "message": "Parse error: body must be JSON",
+                    },
+                    "id": None,
+                },
+                status_code=400,
+            )
+
+        response = _a2a.dispatch(envelope)
+        return JSONResponse(response)
+
     @app.get("/login")
     async def login_page(request: Request, error: str = ""):
         # If already authenticated, send the user to the index instead
