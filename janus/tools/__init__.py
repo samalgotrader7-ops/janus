@@ -36,6 +36,8 @@ from .ssh_exec import SshExec
 from .shell_bg import ShellRunBg, ShellOutput, ShellKill, ShellList
 from .plan_mode import ExitPlanMode
 from .memory_search import MemorySearch
+# v1.34.2 — image generation (Phase 7.3).
+from .image_gen import ImageGen
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -131,6 +133,10 @@ _BUILTIN_TOOL_FACTORIES = {
     # FTS5-backed card store mid-turn (complements pre-injection recall).
     # Restricts to current origin scope unless caller passes scope=global.
     "memory_search": MemorySearch,
+    # v1.34.2 — image generation (Phase 7.3). Wraps DALL-E (default) or
+    # other OpenAI-compatible image providers via JANUS_IMAGE_PROVIDER.
+    # risk='exec' — costs money + writes files to ~/.janus/images/.
+    "image_gen": ImageGen,
 }
 
 
