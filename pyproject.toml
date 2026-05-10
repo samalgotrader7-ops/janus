@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "janus-agent"
-version = "1.33.0"
+version = "1.33.1"
 description = "Claude Code's UX, on any model, with plain-text state and a learning loop."
 readme = "README.md"
 requires-python = ">=3.10"

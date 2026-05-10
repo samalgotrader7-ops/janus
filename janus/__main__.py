@@ -1219,6 +1219,13 @@ def main():
         from . import onboarding
         ok = onboarding.run_wizard()
         sys.exit(0 if ok else 1)
+    # v1.33.1 — backup / restore for production state preservation.
+    if sub == "backup":
+        from . import backup as _bk
+        sys.exit(_bk.cmd_backup(args[1:]))
+    if sub == "restore":
+        from . import backup as _bk
+        sys.exit(_bk.cmd_restore(args[1:]))
     if sub == "service":
         from . import services
         sub_args = args[1:] if len(args) > 1 else ["status"]
