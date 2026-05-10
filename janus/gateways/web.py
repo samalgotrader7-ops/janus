@@ -439,6 +439,41 @@ def _build_app():
 
     app = FastAPI(title="janus", version=branding.VERSION)
 
+    # v1.33.3 — token-bucket rate limiter for /login + /api/* (Phase 6.4).
+    # Health endpoint is exempt; monitoring probes constantly. Real
+    # client IP comes from X-Real-IP / X-Forwarded-For when behind
+    # the reverse proxy from Phase 6.1.
+    from .. import web_rate_limit as _rl
+
+    @app.middleware("http")
+    async def _rate_limit_mw(request, call_next):
+        path = request.url.path
+        if not _rl.is_rate_limited_path(path):
+            return await call_next(request)
+        limiter = _rl.get_default_limiter()
+        # Build identity from headers + raw socket fallback.
+        try:
+            headers = dict(request.headers)
+        except Exception:
+            headers = {}
+        client_host = (
+            request.client.host if getattr(request, "client", None) else ""
+        )
+        key = _rl.client_ip_from_headers(headers, fallback=client_host) or "unknown"
+        allowed, retry_after = limiter.consume(key)
+        if not allowed:
+            from fastapi.responses import JSONResponse as _Resp
+            ra = max(1, int(retry_after) + 1)
+            return _Resp(
+                status_code=429,
+                content={
+                    "error": "rate limit exceeded",
+                    "retry_after_seconds": ra,
+                },
+                headers={"Retry-After": str(ra)},
+            )
+        return await call_next(request)
+
     # v1.22: mount static assets at /static (CSS, JS, vendor libraries
     # later). The HTML templates with placeholders go through dedicated
     # routes that substitute __VERSION__ / __MODEL__ / __CSRF_TOKEN__
