@@ -1,5 +1,6 @@
 """
-tools/aider.py — Aider CLI wrapper (v1.38.1, Phase 10.2.1).
+tools/aider.py — Aider CLI wrapper (v1.38.1, refactored in v1.38.4
+to use external_cli_base).
 
 WHY:
 Aider is a popular open-source CLI coding agent that pairs an LLM
@@ -24,51 +25,38 @@ SAFETY:
   * Timeout default 300s, hard-cap JANUS_EXTERNAL_CLI_TIMEOUT.
   * Output capped at 50KB.
 
-NOT IN SCOPE FOR v1.38.1:
-  * --architect / --editor split (let users opt in via a custom
-    skill that pins extra args).
-  * Granular control over aider's git behavior (auto-commits, etc.)
-  * Custom model selection per call (use AIDER_MODEL env var instead).
+ENV OVERRIDES:
+  JANUS_AIDER_BIN     absolute path to the aider binary
 """
 
 from __future__ import annotations
 
 import os
-import re
-import shutil
-import subprocess
 from typing import Iterable
 
 from . import base
 from .. import config
+from . import external_cli_base as _eb
 
 
-DEFAULT_TIMEOUT = 300
-TIMEOUT_MAX = int(os.environ.get("JANUS_EXTERNAL_CLI_TIMEOUT", "600"))
-MAX_OUTPUT_BYTES = 50_000
+DEFAULT_TIMEOUT = _eb.DEFAULT_TIMEOUT
+TIMEOUT_MAX = _eb.TIMEOUT_MAX
+MAX_OUTPUT_BYTES = _eb.MAX_OUTPUT_BYTES
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+shutil = _eb.shutil  # noqa: F401  — tests patch ai.shutil.which
 
 
 def _strip_ansi(s: str) -> str:
-    return _ANSI_RE.sub("", s)
+    return _eb.strip_ansi(s)
 
 
 def _truncate(s: str, limit: int = MAX_OUTPUT_BYTES) -> str:
-    if len(s) <= limit:
-        return s
-    return s[: limit - 64] + f"\n[... output truncated at {limit} bytes ...]"
+    return _eb.truncate(s, limit)
 
 
 def _aider_binary() -> str | None:
     """Find aider on PATH, with JANUS_AIDER_BIN override."""
-    pinned = os.environ.get("JANUS_AIDER_BIN", "").strip()
-    if pinned:
-        if shutil.which(pinned):
-            return shutil.which(pinned)
-        if os.path.isabs(pinned) and os.path.isfile(pinned):
-            return pinned
-    return shutil.which("aider")
+    return _eb.find_binary("aider", "JANUS_AIDER_BIN")
 
 
 def _normalize_files(raw: Iterable | str | None) -> list[str]:
@@ -154,12 +142,9 @@ class Aider(base.Tool):
         if not os.path.isdir(cwd):
             return f"aider: cwd does not exist: {cwd}"
 
-        try:
-            timeout = int(args.get("timeout") or DEFAULT_TIMEOUT)
-        except (ValueError, TypeError):
-            timeout = DEFAULT_TIMEOUT
-        timeout = max(1, min(timeout, TIMEOUT_MAX))
-
+        timeout = _eb.clamp_timeout(
+            args.get("timeout"), DEFAULT_TIMEOUT, TIMEOUT_MAX,
+        )
         files = _normalize_files(args.get("files"))
 
         binary = _aider_binary()
@@ -170,9 +155,21 @@ class Aider(base.Tool):
                 "or set JANUS_AIDER_BIN to its absolute path."
             )
 
-        # Build the command. --yes-always disables aider's per-edit
-        # confirmation prompts (the user already approved at the
-        # Janus level). --no-stream keeps stdout simple to capture.
+        files_summary = (
+            f"   files: {', '.join(files[:5])}{'…' if len(files) > 5 else ''}\n"
+            if files else ""
+        )
+        ok = _eb.request_approval(
+            approver=approver,
+            name="aider",
+            prompt=prompt,
+            cwd=cwd,
+            timeout=timeout,
+            extra_lines=files_summary,
+        )
+        if not ok:
+            return "aider: refused by user."
+
         cmd: list[str] = [
             binary,
             "--message", prompt,
@@ -182,60 +179,10 @@ class Aider(base.Tool):
         for f in files:
             cmd.extend(["--file", f])
 
-        # Approval prompt — show prompt + cwd + files + timeout.
-        files_summary = (
-            f"   files: {', '.join(files[:5])}{'…' if len(files) > 5 else ''}"
-            if files else ""
-        )
-        details = (
-            f"prompt: {prompt[:200]}{'…' if len(prompt) > 200 else ''}\n"
-            f"cwd:    {cwd}{files_summary}\n"
-            f"timeout: {timeout}s"
-        )
-        ok = approver(
-            "run aider",
-            details,
-            capability=("external_cli", "aider", "exec"),
-        )
-        if not ok:
-            return "aider: refused by user."
-
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as e:
-            partial_out = _truncate(_strip_ansi(e.stdout or ""))
-            partial_err = _truncate(_strip_ansi(e.stderr or ""))
-            return (
-                f"aider: timed out after {timeout}s.\n"
-                f"--- partial stdout ---\n{partial_out}\n"
-                f"--- partial stderr ---\n{partial_err}"
-            )
-        except FileNotFoundError:
-            return (
-                f"aider: binary not executable: {binary}. "
-                f"Verify with `{binary} --version` from your shell."
-            )
-        except OSError as e:
-            return f"aider: spawn failed: {type(e).__name__}: {e}"
-
-        stdout = _truncate(_strip_ansi(proc.stdout or ""))
-        stderr = _truncate(_strip_ansi(proc.stderr or ""))
-        rc = proc.returncode
-
-        if rc == 0:
-            if not stdout.strip():
-                return "aider: completed (exit 0, no stdout)."
-            return stdout
-
-        return (
-            f"aider: exit {rc}.\n"
-            f"--- stderr ---\n{stderr}\n"
-            f"--- stdout ---\n{stdout}"
+        return _eb.execute(
+            cmd=cmd,
+            cwd=cwd,
+            timeout=timeout,
+            name="aider",
+            binary_path=binary,
         )

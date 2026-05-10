@@ -1,5 +1,6 @@
 """
-tools/claude_code.py — Claude Code CLI wrapper (v1.38.0, Phase 10.2.0).
+tools/claude_code.py — Claude Code CLI wrapper (v1.38.0, refactored
+in v1.38.4 to use external_cli_base).
 
 WHY:
 Sam wants Janus to ORCHESTRATE other coding agents, not just be one
@@ -21,69 +22,49 @@ SAFETY:
   * risk='exec' — fits the standard mode matrix.
   * Capability ("external_cli", "claude_code", "exec") — skills
     can pre-grant.
-  * cwd defaults to config.WORKSPACE; if a caller passes a path
-    OUTSIDE the workspace, we accept it (delegating to Claude
-    Code's own boundary) — the user sees the path in the approval
-    prompt and decides.
-  * Timeout enforced at the subprocess level; default 300s, hard-
-    cap at JANUS_EXTERNAL_CLI_TIMEOUT (env, default 600s).
-  * Output capped at MAX_OUTPUT_BYTES (50KB) — same limit shell
-    uses, so big logs from Claude Code don't overrun the context.
+  * Default timeout 300s, hard-cap JANUS_EXTERNAL_CLI_TIMEOUT/600s.
+  * Output capped at 50KB.
 
-NOT IN SCOPE FOR v1.38.0:
-  * Streaming Claude Code output back into the parent (the wrap
-    is one-shot — caller waits for completion).
-  * Bidirectional handoff (Claude Code asking Janus questions
-    mid-task). That'd require A2A (Phase 10.4).
-  * Authentication: assumes the user has run ``claude login`` and
-    a session is on disk. We don't manage credentials.
+ENV OVERRIDES:
+  JANUS_CLAUDE_BIN     absolute path to the claude binary
+
+NOT IN SCOPE:
+  * Streaming Claude Code output back into the parent (one-shot wrap)
+  * Bidirectional handoff (would require A2A — Phase 10.4)
+  * Authentication: assumes `claude login` was run; we don't manage
+    credentials.
 """
 
 from __future__ import annotations
 
 import os
-import re
-import subprocess
-import shutil
 
 from . import base
 from .. import config
+from . import external_cli_base as _eb
 
 
-DEFAULT_TIMEOUT = 300
-TIMEOUT_MAX = int(os.environ.get("JANUS_EXTERNAL_CLI_TIMEOUT", "600"))
-MAX_OUTPUT_BYTES = 50_000
+# Re-export shared constants at module level so existing tests
+# (which patch cc.MAX_OUTPUT_BYTES / cc.TIMEOUT_MAX) keep working.
+DEFAULT_TIMEOUT = _eb.DEFAULT_TIMEOUT
+TIMEOUT_MAX = _eb.TIMEOUT_MAX
+MAX_OUTPUT_BYTES = _eb.MAX_OUTPUT_BYTES
 
-# ANSI escape sequences (CSI). Claude Code colors its terminal output;
-# strip before returning to the model so the text stays clean.
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+# Re-export helpers for tests that import them directly.
+shutil = _eb.shutil  # noqa: F401  — tests patch cc.shutil.which
 
 
 def _strip_ansi(s: str) -> str:
-    return _ANSI_RE.sub("", s)
+    return _eb.strip_ansi(s)
 
 
 def _truncate(s: str, limit: int = MAX_OUTPUT_BYTES) -> str:
-    if len(s) <= limit:
-        return s
-    return s[: limit - 64] + f"\n[... output truncated at {limit} bytes ...]"
+    return _eb.truncate(s, limit)
 
 
 def _claude_binary() -> str | None:
-    """Find the `claude` binary on PATH, or None if missing.
-
-    JANUS_CLAUDE_BIN env var lets the user pin a specific path
-    (useful when the binary isn't on the system PATH but the
-    user knows where it lives — e.g. ~/.local/bin/claude).
-    """
-    pinned = os.environ.get("JANUS_CLAUDE_BIN", "").strip()
-    if pinned:
-        if shutil.which(pinned):
-            return shutil.which(pinned)
-        # Allow absolute path even if shutil.which doesn't resolve it
-        if os.path.isabs(pinned) and os.path.isfile(pinned):
-            return pinned
-    return shutil.which("claude")
+    """Find claude on PATH, with JANUS_CLAUDE_BIN absolute-path override."""
+    return _eb.find_binary("claude", "JANUS_CLAUDE_BIN")
 
 
 class ClaudeCode(base.Tool):
@@ -156,11 +137,9 @@ class ClaudeCode(base.Tool):
         if not os.path.isdir(cwd):
             return f"claude_code: cwd does not exist: {cwd}"
 
-        try:
-            timeout = int(args.get("timeout") or DEFAULT_TIMEOUT)
-        except (ValueError, TypeError):
-            timeout = DEFAULT_TIMEOUT
-        timeout = max(1, min(timeout, TIMEOUT_MAX))
+        timeout = _eb.clamp_timeout(
+            args.get("timeout"), DEFAULT_TIMEOUT, TIMEOUT_MAX,
+        )
 
         output_format = str(args.get("output_format") or "text").lower()
         if output_format not in ("text", "json"):
@@ -175,64 +154,22 @@ class ClaudeCode(base.Tool):
                 "install, run `claude login` once to authenticate."
             )
 
-        # Approval prompt — the user sees the prompt + cwd + timeout
-        # before Claude Code runs. Capability tokens can pre-approve
-        # via skills.
-        details = (
-            f"prompt: {prompt[:200]}{'…' if len(prompt) > 200 else ''}\n"
-            f"cwd:    {cwd}\n"
-            f"timeout: {timeout}s   format: {output_format}"
-        )
-        ok = approver(
-            "run claude_code",
-            details,
-            capability=("external_cli", "claude_code", "exec"),
+        ok = _eb.request_approval(
+            approver=approver,
+            name="claude_code",
+            prompt=prompt,
+            cwd=cwd,
+            timeout=timeout,
+            extra_lines=f"format: {output_format}\n",
         )
         if not ok:
             return "claude_code: refused by user."
 
         cmd = [binary, "-p", prompt, "--output-format", output_format]
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as e:
-            partial_out = _truncate(_strip_ansi(e.stdout or ""))
-            partial_err = _truncate(_strip_ansi(e.stderr or ""))
-            return (
-                f"claude_code: timed out after {timeout}s.\n"
-                f"--- partial stdout ---\n{partial_out}\n"
-                f"--- partial stderr ---\n{partial_err}"
-            )
-        except FileNotFoundError:
-            return (
-                f"claude_code: binary not executable: {binary}. "
-                f"Verify with `{binary} --version` from your shell."
-            )
-        except OSError as e:
-            return f"claude_code: spawn failed: {type(e).__name__}: {e}"
-
-        stdout = _truncate(_strip_ansi(proc.stdout or ""))
-        stderr = _truncate(_strip_ansi(proc.stderr or ""))
-        rc = proc.returncode
-
-        if rc == 0:
-            # Happy path — return stdout. If Claude Code wrote nothing
-            # (rare), include a short status so the parent agent
-            # doesn't think the call silently no-op'd.
-            if not stdout.strip():
-                return "claude_code: completed (exit 0, no stdout)."
-            return stdout
-
-        # Non-zero exit — show stderr first so the failure reason
-        # leads. Include stdout below for context.
-        return (
-            f"claude_code: exit {rc}.\n"
-            f"--- stderr ---\n{stderr}\n"
-            f"--- stdout ---\n{stdout}"
+        return _eb.execute(
+            cmd=cmd,
+            cwd=cwd,
+            timeout=timeout,
+            name="claude_code",
+            binary_path=binary,
         )

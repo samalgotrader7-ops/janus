@@ -1,98 +1,51 @@
 """
-tools/gemini_cli.py — Google Gemini CLI wrapper (v1.38.3, Phase 10.2.3).
+tools/gemini_cli.py — Google Gemini CLI wrapper (v1.38.3, refactored
+in v1.38.4 to use external_cli_base).
 
 WHY:
 Wraps Google's open-source gemini-cli
-(https://github.com/google-gemini/gemini-cli) so Janus can hand
-focused tasks to Gemini's coding agent. Non-interactive mode is
-``gemini -p "<prompt>"`` — symmetric with claude_code's ``-p``
-flag (and the historical "print mode" pattern across these CLIs).
-
-USAGE:
-The model passes a prompt + optional cwd / timeout / extra_args.
-We run ``gemini -p [extra_args...] <prompt>`` in the cwd.
-
-EXTRA ARGS:
-gemini-cli supports ``--all-files`` (include every workspace file
-in context), ``--model <id>`` (pin a specific Gemini model),
-``--sandbox`` (sandboxed execution), etc. Janus exposes these via
-the ``extra_args`` array param so the model can opt in.
+(https://github.com/google-gemini/gemini-cli). Non-interactive
+mode is ``gemini -p [extra_args...] <prompt>``.
 
 ENV OVERRIDES:
   JANUS_GEMINI_BIN     absolute path to the gemini binary
   JANUS_GEMINI_FLAGS   space-separated default flags
-
-SAFETY:
-  * dangerous=True — gemini can edit files in cwd
-  * risk='exec'
-  * Capability ("external_cli", "gemini_cli", "exec")
-  * Default timeout 300s; cap JANUS_EXTERNAL_CLI_TIMEOUT/600s
-  * 50KB output truncation, ANSI strip
-
-NOT IN SCOPE FOR v1.38.3:
-  * gemini chat sessions (multi-turn) — one-shot wrap only
-  * gemini's tool-call output — captured as raw stdout
 """
 
 from __future__ import annotations
 
 import os
-import re
-import shutil
-import shlex
-import subprocess
-from typing import Iterable
 
 from . import base
 from .. import config
+from . import external_cli_base as _eb
 
 
-DEFAULT_TIMEOUT = 300
-TIMEOUT_MAX = int(os.environ.get("JANUS_EXTERNAL_CLI_TIMEOUT", "600"))
-MAX_OUTPUT_BYTES = 50_000
+DEFAULT_TIMEOUT = _eb.DEFAULT_TIMEOUT
+TIMEOUT_MAX = _eb.TIMEOUT_MAX
+MAX_OUTPUT_BYTES = _eb.MAX_OUTPUT_BYTES
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+shutil = _eb.shutil  # noqa: F401  — tests patch gc.shutil.which
 
 
 def _strip_ansi(s: str) -> str:
-    return _ANSI_RE.sub("", s)
+    return _eb.strip_ansi(s)
 
 
 def _truncate(s: str, limit: int = MAX_OUTPUT_BYTES) -> str:
-    if len(s) <= limit:
-        return s
-    return s[: limit - 64] + f"\n[... output truncated at {limit} bytes ...]"
+    return _eb.truncate(s, limit)
 
 
 def _gemini_binary() -> str | None:
-    pinned = os.environ.get("JANUS_GEMINI_BIN", "").strip()
-    if pinned:
-        if shutil.which(pinned):
-            return shutil.which(pinned)
-        if os.path.isabs(pinned) and os.path.isfile(pinned):
-            return pinned
-    return shutil.which("gemini")
+    return _eb.find_binary("gemini", "JANUS_GEMINI_BIN")
 
 
-def _normalize_extra_args(raw: Iterable | str | None) -> list[str]:
-    if raw is None:
-        return []
-    if isinstance(raw, str):
-        return shlex.split(raw)
-    out: list[str] = []
-    try:
-        for item in raw:
-            s = str(item).strip()
-            if s:
-                out.append(s)
-    except TypeError:
-        pass
-    return out
+def _normalize_extra_args(raw):
+    return _eb.normalize_extra_args(raw)
 
 
-def _env_flags() -> list[str]:
-    raw = os.environ.get("JANUS_GEMINI_FLAGS", "").strip()
-    return shlex.split(raw) if raw else []
+def _env_flags():
+    return _eb.env_flags("JANUS_GEMINI_FLAGS")
 
 
 class GeminiCli(base.Tool):
@@ -160,14 +113,12 @@ class GeminiCli(base.Tool):
         if not os.path.isdir(cwd):
             return f"gemini_cli: cwd does not exist: {cwd}"
 
-        try:
-            timeout = int(args.get("timeout") or DEFAULT_TIMEOUT)
-        except (ValueError, TypeError):
-            timeout = DEFAULT_TIMEOUT
-        timeout = max(1, min(timeout, TIMEOUT_MAX))
+        timeout = _eb.clamp_timeout(
+            args.get("timeout"), DEFAULT_TIMEOUT, TIMEOUT_MAX,
+        )
 
         extra = _normalize_extra_args(args.get("extra_args"))
-        env_flags = _env_flags()
+        env_flags_v = _env_flags()
 
         binary = _gemini_binary()
         if not binary:
@@ -177,64 +128,30 @@ class GeminiCli(base.Tool):
                 "set JANUS_GEMINI_BIN to its absolute path."
             )
 
-        # Command shape: gemini -p [env_flags...] [extra_args...] <prompt>
-        cmd = [binary, "-p"] + env_flags + extra + [prompt]
+        cmd = [binary, "-p"] + env_flags_v + extra + [prompt]
 
         flags_summary = ""
-        if env_flags or extra:
-            shown = (env_flags + extra)[:6]
-            ellipsis = "…" if len(env_flags + extra) > 6 else ""
+        all_flags = env_flags_v + extra
+        if all_flags:
+            shown = all_flags[:6]
+            ellipsis = "…" if len(all_flags) > 6 else ""
             flags_summary = f"   flags: {' '.join(shown)}{ellipsis}\n"
-        details = (
-            f"prompt: {prompt[:200]}{'…' if len(prompt) > 200 else ''}\n"
-            f"cwd:    {cwd}\n"
-            f"{flags_summary}"
-            f"timeout: {timeout}s"
-        )
-        ok = approver(
-            "run gemini_cli",
-            details,
-            capability=("external_cli", "gemini_cli", "exec"),
+
+        ok = _eb.request_approval(
+            approver=approver,
+            name="gemini_cli",
+            prompt=prompt,
+            cwd=cwd,
+            timeout=timeout,
+            extra_lines=flags_summary,
         )
         if not ok:
             return "gemini_cli: refused by user."
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as e:
-            partial_out = _truncate(_strip_ansi(e.stdout or ""))
-            partial_err = _truncate(_strip_ansi(e.stderr or ""))
-            return (
-                f"gemini_cli: timed out after {timeout}s.\n"
-                f"--- partial stdout ---\n{partial_out}\n"
-                f"--- partial stderr ---\n{partial_err}"
-            )
-        except FileNotFoundError:
-            return (
-                f"gemini_cli: binary not executable: {binary}. "
-                f"Verify with `{binary} --version` from your shell."
-            )
-        except OSError as e:
-            return f"gemini_cli: spawn failed: {type(e).__name__}: {e}"
-
-        stdout = _truncate(_strip_ansi(proc.stdout or ""))
-        stderr = _truncate(_strip_ansi(proc.stderr or ""))
-        rc = proc.returncode
-
-        if rc == 0:
-            if not stdout.strip():
-                return "gemini_cli: completed (exit 0, no stdout)."
-            return stdout
-
-        return (
-            f"gemini_cli: exit {rc}.\n"
-            f"--- stderr ---\n{stderr}\n"
-            f"--- stdout ---\n{stdout}"
+        return _eb.execute(
+            cmd=cmd,
+            cwd=cwd,
+            timeout=timeout,
+            name="gemini_cli",
+            binary_path=binary,
         )
