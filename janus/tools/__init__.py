@@ -43,6 +43,8 @@ from .image_gen import ImageGen
 from .claude_code import ClaudeCode
 # v1.38.1 — Aider via `aider --message` (Phase 10.2.1).
 from .aider import Aider
+# v1.38.2 — OpenAI Codex CLI via `codex exec` (Phase 10.2.2).
+from .codex_cli import CodexCli
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -152,6 +154,11 @@ _BUILTIN_TOOL_FACTORIES = {
     # `aider --message --yes-always`. Pair-programming agent that
     # auto-commits to git. Capability token external_cli.aider.exec.
     "aider": Aider,
+    # v1.38.2 — Phase 10.2.2: OpenAI Codex CLI
+    # (https://github.com/openai/codex) via `codex exec`. Supports
+    # extra_args for --json structured output / --model overrides.
+    # JANUS_CODEX_BIN + JANUS_CODEX_FLAGS env overrides.
+    "codex_cli": CodexCli,
 }
 
 
