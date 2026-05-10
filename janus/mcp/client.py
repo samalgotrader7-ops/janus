@@ -448,6 +448,13 @@ def register_client(name: str, client: "McpClient") -> None:
         except Exception:
             pass
     _ACTIVE_CLIENTS[name] = client
+    # v1.33.5 — audit MCP connections so production operators can
+    # answer "when did this server come online?".
+    try:
+        from .. import audit_log
+        audit_log.record("mcp.connect", server=name)
+    except Exception:
+        pass
 
 
 def unregister_client(name: str) -> bool:
@@ -457,6 +464,12 @@ def unregister_client(name: str) -> bool:
         return False
     try:
         client.close()
+    except Exception:
+        pass
+    # v1.33.5 — audit MCP disconnections.
+    try:
+        from .. import audit_log
+        audit_log.record("mcp.disconnect", server=name)
     except Exception:
         pass
     return True

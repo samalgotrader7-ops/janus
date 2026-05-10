@@ -425,9 +425,22 @@ def promote(name: str, new_state: str) -> Skill:
     skill = load(name)
     if skill is None:
         raise PromotionError(f"no skill named '{name}'")
+    from_state = skill.state
     skill.state = new_state
     skill.last_promoted = _now()
     save(skill)
+    # v1.33.5 — audit skill state changes so production operators
+    # can grep `janus audit --action skill.` for the trail.
+    try:
+        from . import audit_log
+        audit_log.record(
+            "skill.promote",
+            name=name,
+            from_state=from_state,
+            to_state=new_state,
+        )
+    except Exception:
+        pass
     return skill
 
 

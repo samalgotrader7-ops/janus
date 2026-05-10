@@ -1226,6 +1226,10 @@ def main():
     if sub == "restore":
         from . import backup as _bk
         sys.exit(_bk.cmd_restore(args[1:]))
+    # v1.33.5 — audit log filter (Phase 6.6).
+    if sub == "audit":
+        from . import audit_log
+        sys.exit(audit_log.cmd_audit(args[1:]))
     if sub == "service":
         from . import services
         sub_args = args[1:] if len(args) > 1 else ["status"]
