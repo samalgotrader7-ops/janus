@@ -1,8 +1,8 @@
 """v1.21 web security regressions.
 
-Sam's pre-v1.21 instance at http://vps.example.com:8765/ exposed `/chat`,
-`/memory`, `/cost`, and `/home` to the internet with no authentication.
-`/memory` and `/cost` were ALWAYS open even when pairing was enabled.
+Pre-v1.21 the web gateway exposed `/chat`, `/memory`, `/cost`, and
+`/home` to the internet with no authentication. `/memory` and
+`/cost` were ALWAYS open even when pairing was enabled.
 
 These tests pin the contract that EVERY mutating or sensitive route
 requires authentication. If a future change re-introduces an

@@ -3,11 +3,10 @@ gateways/web_auth.py — v1.21 web UI authentication primitives.
 
 PROBLEM:
 The pre-v1.21 web gateway exposed `/chat`, `/memory`, `/cost`, and
-`/home` to the internet with no authentication. Sam ran an instance on
-a public VPS at http://vps.example.com:8765/ — anyone could read full
-memory dumps, drive the agent, and burn tokens. `/memory` and `/cost`
-were ALWAYS open; pairing-code auth (when enabled) only gated `/chat`
-and `/home`.
+`/home` to the internet with no authentication. Earlier deployments
+ran on public VPS hosts — anyone could read full memory dumps, drive
+the agent, and burn tokens. `/memory` and `/cost` were ALWAYS open;
+pairing-code auth (when enabled) only gated `/chat` and `/home`.
 
 DESIGN:
 Two-token model:

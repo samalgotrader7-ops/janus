@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "janus-agent"
-version = "1.34.3"
+version = "1.34.4"
 description = "Claude Code's UX, on any model, with plain-text state and a learning loop."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Sam" }]
+authors = [{ name = "Sam", email = "janusalgoai@gmail.com" }]
 keywords = ["agent", "llm", "cli", "local-first", "safety"]
 classifiers = [
     "Development Status :: 4 - Beta",
