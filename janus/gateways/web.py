@@ -2254,12 +2254,32 @@ def _build_app():
             return JSONResponse({"error": f"kill failed: {e}"})
 
     @app.get("/api/logs")
-    async def api_logs(request: Request, limit: int = 100):
-        """v1.22.3: tail of ~/.janus/log.jsonl. Live SSE deferred."""
+    async def api_logs(
+        request: Request,
+        limit: int = 100,
+        since: str | None = None,
+        until: str | None = None,
+        mode: str | None = None,
+        model: str | None = None,
+        q: str | None = None,
+    ):
+        """v1.22.3 / v1.34.7: tail of ~/.janus/log.jsonl with filters.
+
+        Query params:
+          limit:  max entries to return (default 100, capped at 1000)
+          since:  ISO timestamp, return only entries with ts >= since
+          until:  ISO timestamp, return only entries with ts <= until
+          mode:   filter by permission mode (default/acceptEdits/...)
+          model:  substring match on model id
+          q:      substring match on the request field (case-insensitive)
+
+        Filters are AND-combined. Returns most-recent first.
+        """
         auth_sid, err_resp = _gate_get(request)
         if err_resp is not None:
             return err_resp
         try:
+            limit = max(1, min(int(limit or 100), 1000))
             entries: list[dict] = []
             log_path = config.LOG_FILE
             if log_path.is_file():
@@ -2267,16 +2287,44 @@ def _build_app():
                     lines = log_path.read_text(encoding="utf-8").splitlines()
                 except OSError:
                     lines = []
-                for raw in lines[-limit:]:
+                # Apply filters BEFORE limit so a tight filter doesn't
+                # only see the last 100 raw lines.
+                import json as _json
+                q_lower = (q or "").lower() if q else None
+                model_lower = (model or "").lower() if model else None
+                for raw in lines:
                     raw = raw.strip()
                     if not raw:
                         continue
                     try:
-                        import json as _json
-                        entries.append(_json.loads(raw))
+                        rec = _json.loads(raw)
                     except Exception:
-                        entries.append({"raw": raw})
-            return JSONResponse({"entries": entries[::-1]})
+                        # Keep raw entries when no filter is active so
+                        # users see corrupted lines instead of silent
+                        # gaps.
+                        if not (since or until or mode or model or q):
+                            entries.append({"raw": raw})
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    ts = str(rec.get("ts", ""))
+                    if since and ts < since:
+                        continue
+                    if until and ts > until:
+                        continue
+                    if mode and str(rec.get("mode", "")) != mode:
+                        continue
+                    if model_lower:
+                        rec_model = str(rec.get("model", "")).lower()
+                        if model_lower not in rec_model:
+                            continue
+                    if q_lower:
+                        rec_req = str(rec.get("request", "")).lower()
+                        if q_lower not in rec_req:
+                            continue
+                    entries.append(rec)
+            # Most recent first, capped at limit.
+            return JSONResponse({"entries": entries[-limit:][::-1]})
         except Exception as e:
             return JSONResponse({"error": f"logs read failed: {e}"})
 

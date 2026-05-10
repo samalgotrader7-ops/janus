@@ -1088,18 +1088,91 @@
     logsState.eventSource = es;
   }
 
+  // v1.34.7 — Phase 8.5: filtered logs view. When any filter is set,
+  // the panel calls /api/logs?<filters> and renders the result;
+  // SSE stream is paused so server-side filters don't fight live
+  // appends. Empty filters resume SSE for the live tail.
+  function _logsHasActiveFilter() {
+    const q = (document.getElementById('logs-q') || {}).value || '';
+    const mode = (document.getElementById('logs-mode') || {}).value || '';
+    const model = (document.getElementById('logs-model') || {}).value || '';
+    const since = (document.getElementById('logs-since') || {}).value || '';
+    const until = (document.getElementById('logs-until') || {}).value || '';
+    return Boolean(q || mode || model || since || until);
+  }
+
+  function _logsBuildQuery() {
+    const params = new URLSearchParams();
+    const q = (document.getElementById('logs-q') || {}).value || '';
+    const mode = (document.getElementById('logs-mode') || {}).value || '';
+    const model = (document.getElementById('logs-model') || {}).value || '';
+    const since = (document.getElementById('logs-since') || {}).value || '';
+    const until = (document.getElementById('logs-until') || {}).value || '';
+    if (q) params.set('q', q);
+    if (mode) params.set('mode', mode);
+    if (model) params.set('model', model);
+    // <input type=datetime-local> emits "YYYY-MM-DDTHH:MM" — append
+    // ":00Z" so it sorts lexically vs the JSONL-recorded ISO ts.
+    if (since) params.set('since', since + ':00Z');
+    if (until) params.set('until', until + ':00Z');
+    params.set('limit', '500');
+    return params.toString();
+  }
+
+  async function _logsApplyFilters() {
+    if (!logsState.list) return;
+    _logsCloseStream();
+    clear(logsState.list);
+    const query = _logsBuildQuery();
+    try {
+      const r = await api('/api/logs?' + query);
+      const entries = (r.data && r.data.entries) || [];
+      if (entries.length === 0) {
+        logsState.list.appendChild(el(
+          'div', { class: 'item' },
+          el('div', { class: 'item-meta' }, '(no matches)')));
+        return;
+      }
+      for (const e of entries) {
+        logsState.list.appendChild(_renderLogEntry(e));
+      }
+    } catch (err) {
+      logsState.list.appendChild(el(
+        'div', { class: 'item' },
+        el('div', { class: 'item-meta', style: 'color:#c43;' },
+           'filter failed: ' + err)));
+    }
+  }
+
+  function _logsClearFilters() {
+    for (const id of ['logs-q', 'logs-mode', 'logs-model', 'logs-since', 'logs-until']) {
+      const el_ = document.getElementById(id);
+      if (el_) el_.value = '';
+    }
+  }
+
   registerPanel('logs', {
     async mount() {
       const list = document.getElementById('logs-list');
       const refresh = document.getElementById('logs-refresh');
+      const apply = document.getElementById('logs-apply');
+      const clearBtn = document.getElementById('logs-clear');
       if (!list) return;
       logsState.list = list;
       const reload = async () => {
         clear(list);
-        // Re-attach SSE stream — its bootstrap sends the last 20.
-        _logsAttachStream();
+        if (_logsHasActiveFilter()) {
+          await _logsApplyFilters();
+        } else {
+          _logsAttachStream();
+        }
       };
       if (refresh) refresh.onclick = reload;
+      if (apply) apply.onclick = _logsApplyFilters;
+      if (clearBtn) clearBtn.onclick = async () => {
+        _logsClearFilters();
+        await reload();
+      };
       await reload();
     },
   });

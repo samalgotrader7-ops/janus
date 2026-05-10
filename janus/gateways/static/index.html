@@ -213,11 +213,34 @@
       <div class="panel-toolbar">
         <button id="logs-refresh" class="secondary" type="button">refresh</button>
         <span style="color:#999; font-size:0.85em;">
-          tail of ~/.janus/log.jsonl &mdash; live streaming in v1.22.3+.
+          tail of ~/.janus/log.jsonl &mdash; SSE live + v1.34.7 filters.
         </span>
       </div>
+      <!-- v1.34.7 — Phase 8.5 filter row. AND-combined, applied
+           server-side via /api/logs query params. Empty inputs = no
+           filter. SSE stream is paused while a filter is active so
+           the server-applied filter doesn't fight live appends. -->
+      <div class="panel-toolbar" id="logs-filters" style="margin-top:6px; flex-wrap:wrap; gap:6px;">
+        <input id="logs-q" class="secondary" type="search"
+               placeholder="search request..." style="flex:1; min-width:160px;" />
+        <select id="logs-mode" class="secondary">
+          <option value="">any mode</option>
+          <option value="default">default</option>
+          <option value="acceptEdits">acceptEdits</option>
+          <option value="plan">plan</option>
+          <option value="bypassPermissions">bypassPermissions</option>
+        </select>
+        <input id="logs-model" class="secondary" type="text"
+               placeholder="model contains..." style="width:160px;" />
+        <input id="logs-since" class="secondary" type="datetime-local"
+               title="entries on/after this time" />
+        <input id="logs-until" class="secondary" type="datetime-local"
+               title="entries on/before this time" />
+        <button id="logs-apply" class="secondary" type="button">apply</button>
+        <button id="logs-clear" class="secondary" type="button">clear</button>
+      </div>
       <div id="logs-list" class="item-list"
-           style="overflow-y:auto; max-height: calc(100vh - 200px);"></div>
+           style="overflow-y:auto; max-height: calc(100vh - 240px);"></div>
     </section>
 
     <!-- ---------- Cost panel ---------- -->
