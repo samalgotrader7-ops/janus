@@ -79,6 +79,13 @@ except ImportError:
 
 GATEWAY_NAME = "web"
 
+# v1.33.2 — process start timestamp for the /api/health endpoint's
+# uptime_seconds field. Module import time is close enough to
+# server-start time for monitoring purposes (delta is the FastAPI
+# bootstrap, ~ms).
+import time as _time
+_PROCESS_START_TS = _time.time()
+
 
 def _pairing_required() -> bool:
     """When binding non-localhost, require pairing unless explicitly off."""
@@ -1687,6 +1694,81 @@ def _build_app():
             return JSONResponse({"error": f"triggers list failed: {e}"})
 
     # ---------- v1.29.1 — MCP catalog browser ----------
+
+    # ---------- v1.33.2 — Health endpoint (Phase 6.3) ----------
+
+    @app.get("/api/health")
+    async def api_health(request: Request):
+        """Health endpoint for monitoring (Uptime Kuma / Better Stack /
+        etc.). NOT auth-gated — health endpoints are conventionally
+        public so monitoring can probe without credentials.
+
+        Response: 200 with JSON:
+          {
+            "version": "1.33.2",
+            "uptime_seconds": 1234.56,
+            "last_turn_age_seconds": 42.0,    // null if no turns yet
+            "services_active": ["janus-web", ...],  // [] if systemctl unavailable
+            "status": "healthy" | "degraded"
+          }
+
+        Always 200 — clients use the `status` field to decide. This
+        keeps the endpoint compatible with simple uptime monitors that
+        treat any 2xx as "up". Operators can extend the check to
+        require status=='healthy' if they want."""
+        import time
+        import json as _json
+        try:
+            from .. import branding as _br
+            version = _br.VERSION
+        except Exception:
+            version = "unknown"
+
+        uptime = max(0.0, time.time() - _PROCESS_START_TS)
+
+        last_turn_age: float | None = None
+        try:
+            log_path = config.HOME / "log.jsonl"
+            if log_path.exists() and log_path.stat().st_size > 0:
+                # Tail-based: stat mtime tracks the last write to the
+                # log, which is the last logged event (turn or tool).
+                last_turn_age = max(
+                    0.0, time.time() - log_path.stat().st_mtime,
+                )
+        except Exception:
+            last_turn_age = None
+
+        services_active: list[str] = []
+        try:
+            import shutil
+            import subprocess
+            if shutil.which("systemctl"):
+                for svc in ("janus-web", "janus-telegram", "janus-daemon"):
+                    r = subprocess.run(
+                        ["systemctl", "--user", "is-active", f"{svc}.service"],
+                        capture_output=True, text=True, timeout=2,
+                    )
+                    if (r.stdout or "").strip() == "active":
+                        services_active.append(svc)
+        except Exception:
+            services_active = []
+
+        # Healthy if web is alive at all (we're answering this
+        # request) AND last turn within last 24h (or no turns yet).
+        # Degraded otherwise — ops can decide whether to alert.
+        status = "healthy"
+        if last_turn_age is not None and last_turn_age > 86400:
+            status = "degraded"
+
+        return JSONResponse({
+            "version": version,
+            "uptime_seconds": round(uptime, 3),
+            "last_turn_age_seconds": (
+                round(last_turn_age, 3) if last_turn_age is not None else None
+            ),
+            "services_active": services_active,
+            "status": status,
+        })
 
     @app.get("/api/mcp/catalog")
     async def api_mcp_catalog(request: Request):
