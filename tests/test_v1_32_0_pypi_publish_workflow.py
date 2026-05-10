@@ -158,9 +158,12 @@ def test_publish_uses_skip_existing(workflow_text):
 
 
 def test_publish_uses_token_username(workflow_text):
-    """PyPI API tokens require username='__token__'."""
+    """PyPI API tokens require username='__token__'. Secret can be
+    named either PYPI (Sam's existing name) or PYPI_API_TOKEN
+    (the documented name) — workflow accepts both since v1.34.3."""
     assert "__token__" in workflow_text
-    assert "PYPI_API_TOKEN" in workflow_text
+    # At least one of the two acceptable secret names is referenced.
+    assert "PYPI_API_TOKEN" in workflow_text or "secrets.PYPI" in workflow_text
 
 
 # -------------------- Documentation pins --------------------

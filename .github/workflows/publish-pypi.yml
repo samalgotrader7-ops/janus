@@ -1,7 +1,7 @@
 name: Publish to PyPI
 
 # Phase 5.1 — Distribution. Build sdist + wheel on tag push, validate
-# the package, and upload to PyPI when the PYPI_API_TOKEN secret is
+# the package, and upload to PyPI when a PyPI token secret is
 # configured. Without the secret the workflow runs in DORMANT mode:
 # it still builds + validates, but skips the upload step gracefully.
 #
@@ -12,11 +12,12 @@ name: Publish to PyPI
 #      of name-squatting risk if you delay).
 #   3. Generate an API token at https://pypi.org/manage/account/token/
 #      with scope limited to `janus-agent`.
-#   4. Add the token to the GitHub repo as a secret named
-#      `PYPI_API_TOKEN` (Settings → Secrets and variables → Actions
-#      → New repository secret).
+#   4. Add the token to the GitHub repo as a secret named EITHER
+#      `PYPI` or `PYPI_API_TOKEN` (Settings → Secrets and variables
+#      → Actions → New repository secret). The workflow checks both.
 #
-# After step 4, the next tag push (v1.32.1+) auto-publishes.
+# After step 4, the next tag push (or a re-run of an existing one
+# via `gh run rerun`) auto-publishes.
 
 on:
   push:
@@ -87,9 +88,6 @@ jobs:
     # Only auto-publish on a real tag push. workflow_dispatch builds
     # but does not upload (lets users dry-run the workflow).
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    environment:
-      name: pypi
-      url: https://pypi.org/p/janus-agent
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -106,12 +104,15 @@ jobs:
       - name: Publish to PyPI
         env:
           TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          # v1.34.3 — read from `PYPI` repo secret (matches the
+          # name Sam already configured); fall back to
+          # `PYPI_API_TOKEN` for users who follow the docs literally.
+          TWINE_PASSWORD: ${{ secrets.PYPI || secrets.PYPI_API_TOKEN }}
         run: |
           set -euo pipefail
           if [[ -z "${TWINE_PASSWORD:-}" ]]; then
-            echo "::warning::PYPI_API_TOKEN secret not configured — workflow is DORMANT."
-            echo "::warning::Add the secret in Settings → Secrets to enable real publishing."
+            echo "::warning::PyPI token secret not configured — workflow is DORMANT."
+            echo "::warning::Add either PYPI or PYPI_API_TOKEN in Settings → Secrets to enable real publishing."
             echo "Build artifacts are still attached to this run; no upload performed."
             exit 0
           fi
