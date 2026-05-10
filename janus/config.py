@@ -100,6 +100,36 @@ APPROVAL_MODE: str = os.getenv("JANUS_APPROVAL", "manual")
 
 # --- Phase 2: memory ---
 MEMORY_PROPOSE_MODEL: str = os.getenv("JANUS_MEMORY_MODEL", "")
+# v1.35.0 — Phase 9.4: multi-model routing per purpose. Each env var
+# falls back to MODEL when unset, so existing setups stay on the
+# main model unchanged. Cost dashboard splits per-purpose so the
+# user can see if a cheaper memory/verify/subagent model is paying
+# off.
+VERIFY_MODEL: str = os.getenv("JANUS_VERIFY_MODEL", "")
+SUBAGENT_MODEL: str = os.getenv("JANUS_SUBAGENT_MODEL", "")
+TITLE_MODEL: str = os.getenv("JANUS_TITLE_MODEL", "")
+
+
+def model_for_purpose(purpose: str) -> str:
+    """v1.35.0 — return the configured model for a given purpose,
+    falling back to the main MODEL when no override is set.
+
+    Purposes:
+      'chat'      — main turn (== MODEL always)
+      'memory'    — memory diff propose loop (cheap default OK)
+      'verify'    — post-edit pytest output classification
+      'subagent'  — spawned subagent leaf
+      'title'     — conversation title generation
+      anything else → MODEL
+    """
+    table = {
+        "memory": MEMORY_PROPOSE_MODEL,
+        "verify": VERIFY_MODEL,
+        "subagent": SUBAGENT_MODEL,
+        "title": TITLE_MODEL,
+    }
+    override = table.get(purpose, "")
+    return override or MODEL
 MEMORY_PREPEND_BYTES: int = int(os.getenv("JANUS_MEMORY_BYTES", "4096"))
 MEMORY_PROPOSE_ENABLED: bool = os.getenv("JANUS_MEMORY_PROPOSE", "1") not in ("0", "false", "no")
 
