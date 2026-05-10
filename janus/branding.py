@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-VERSION = "1.39.1"
+VERSION = "1.40.0"
 TAGLINE = "the agent that learns from you · plain-text everything"
 
 

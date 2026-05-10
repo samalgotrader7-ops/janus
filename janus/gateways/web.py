@@ -502,6 +502,22 @@ def _build_app():
             media_type="image/svg+xml",
         )
 
+    @app.get("/.well-known/agent.json")
+    async def agent_card():
+        """v1.40.0 — A2A Agent Card.
+
+        Per A2A spec, this is the discovery endpoint other agents
+        hit to learn this agent's identity, skills, and how to
+        reach it. PUBLIC — no auth, by spec design.
+
+        Configuration via env: JANUS_A2A_NAME, JANUS_A2A_URL (the
+        publicly-reachable URL where /a2a/tasks lives — REQUIRED if
+        you want callbacks to work), JANUS_A2A_DESCRIPTION,
+        JANUS_A2A_PROVIDER, JANUS_A2A_AUTH (bearer | none).
+        """
+        from .. import a2a
+        return JSONResponse(a2a.build_agent_card())
+
     @app.get("/login")
     async def login_page(request: Request, error: str = ""):
         # If already authenticated, send the user to the index instead
