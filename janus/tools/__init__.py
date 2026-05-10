@@ -38,6 +38,9 @@ from .plan_mode import ExitPlanMode
 from .memory_search import MemorySearch
 # v1.34.2 — image generation (Phase 7.3).
 from .image_gen import ImageGen
+# v1.38.0 — external CLI agent wrappers (Phase 10.2.0). First entry:
+# Claude Code via its non-interactive `-p` Print Mode.
+from .claude_code import ClaudeCode
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -137,6 +140,12 @@ _BUILTIN_TOOL_FACTORIES = {
     # other OpenAI-compatible image providers via JANUS_IMAGE_PROVIDER.
     # risk='exec' — costs money + writes files to ~/.janus/images/.
     "image_gen": ImageGen,
+    # v1.38.0 — Phase 10.2.0: External CLI agent wrappers. Hands a
+    # focused sub-task off to Anthropic's Claude Code via `claude -p`
+    # Print Mode. risk='exec' (can edit files in cwd); capability
+    # token external_cli.claude_code.exec. Future v10.2.x adds
+    # aider, codex_cli, gemini_cli on the same shape.
+    "claude_code": ClaudeCode,
 }
 
 
