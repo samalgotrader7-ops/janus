@@ -175,19 +175,45 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
     exit 1
 fi
 
-# Write the merged file.
+# Write the merged file. Known REQUIRED + OPTIONAL vars come first
+# in stable order so the file is readable; any other JANUS_* keys
+# the user already had (e.g. JANUS_TELEGRAM_CHATS, JANUS_BRAVE_API_KEY,
+# JANUS_WHATSAPP_*) are preserved verbatim afterward — we don't drop
+# user-defined keys just because they're not on our whitelist.
 {
     echo "# Janus environment file — auto-managed by install_services.sh"
     echo "# Edit values directly; re-run with FORCE_ENV=1 to overwrite from shell."
     echo "# This file is read by systemd via EnvironmentFile=-${ENV_FILE}"
     echo
+    EMITTED=()
     for var in "${REQUIRED_VARS[@]}" "${OPTIONAL_VARS[@]}"; do
         if [[ -n "${MERGED[$var]:-}" ]]; then
-            # Quote values containing spaces or special chars.
             val="${MERGED[$var]}"
             echo "${var}=${val}"
+            EMITTED+=("$var")
         fi
     done
+    # Preserve any other JANUS_* keys the user had (e.g. CHATS,
+    # BRAVE_API_KEY, WHATSAPP_*) so we don't silently strip user
+    # config. Sort for deterministic output.
+    declare -a EXTRA_KEYS
+    for key in "${!MERGED[@]}"; do
+        is_known=0
+        for known in "${EMITTED[@]}"; do
+            if [[ "$key" == "$known" ]]; then is_known=1; break; fi
+        done
+        if [[ "$is_known" == "0" && "$key" =~ ^JANUS_ ]]; then
+            EXTRA_KEYS+=("$key")
+        fi
+    done
+    if [[ ${#EXTRA_KEYS[@]} -gt 0 ]]; then
+        echo
+        echo "# Other JANUS_* vars (preserved from existing .env / shell)"
+        # Bash doesn't have a clean way to sort an array; pipe through sort.
+        printf '%s\n' "${EXTRA_KEYS[@]}" | sort | while read -r key; do
+            echo "${key}=${MERGED[$key]}"
+        done
+    fi
 } > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 ok "Wrote $ENV_FILE (mode 0600, ${#MERGED[@]} variables)"
