@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "janus": {
+      "command": "python",
+      "args": ["-m", "janus.mcp.server"]
+    }
+  }
+}

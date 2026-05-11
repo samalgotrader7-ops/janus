@@ -109,6 +109,8 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/triggers",     "list configured triggers",                            "built-in"),
     SlashCommand("/swarm",        "agent swarms — list | describe | run | status | cancel", "built-in"),
     SlashCommand("/goal",         "manage standing objective: /goal <text> | status | pause | resume | clear | budget <N>", "built-in"),
+    SlashCommand("/agent",        "first-class agents — /agent list | /agent <name> <prompt>", "built-in"),
+    SlashCommand("/claude",       "shorthand for /agent claude <prompt> — delegate to Claude Code", "built-in"),
     SlashCommand("/help",         "show all available slash commands grouped by source", "built-in"),
     SlashCommand("/quit",         "exit the CLI",                                        "built-in"),
     SlashCommand("/exit",         "alias for /quit",                                     "built-in"),
@@ -493,6 +495,50 @@ def _h_goal(ctx: SlashContext, arg: str) -> str:
     )
 
 
+def _h_agent(ctx: SlashContext, arg: str) -> str:
+    """v1.41.0: /agent list | /agent <name> <prompt>
+
+    Surfaces the new janus.agents abstraction (Phase 11.0). Each
+    agent has Identity / Memory / Tools / Skills and is dispatched
+    via janus.agents.dispatch().
+    """
+    from . import agents
+    sub, rest = split_subcommand(arg)
+    if not sub or sub == "list":
+        all_agents = agents.list_agents()
+        if not all_agents:
+            return (
+                "No agents discovered. Bundled live in "
+                "janus/agents/bundled/; user-defined in ~/.janus/agents/."
+            )
+        lines = ["Available agents:"]
+        for a in all_agents:
+            d = a.to_dict()
+            tools = ", ".join(d["tool_names"]) or "(none)"
+            lines.append(
+                f"  /agent {d['name']:<12} [{d['style']:<7}] tools=({tools})"
+            )
+            if d["description"]:
+                lines.append(f"      {d['description']}")
+        return "\n".join(lines)
+
+    # /agent <name> <prompt>
+    name = sub
+    prompt = rest.strip()
+    if not prompt:
+        return f"usage: /agent {name} <prompt>"
+    return agents.dispatch(name, prompt)
+
+
+def _h_claude(ctx: SlashContext, arg: str) -> str:
+    """v1.41.0: /claude <prompt> — shorthand for /agent claude <prompt>."""
+    from . import agents
+    prompt = (arg or "").strip()
+    if not prompt:
+        return "usage: /claude <prompt>"
+    return agents.dispatch("claude", prompt)
+
+
 def register_shared_handlers(registry: SlashRegistry) -> None:
     """Register the v1.24.1 shared handlers on a surface's registry.
 
@@ -516,3 +562,5 @@ def register_shared_handlers(registry: SlashRegistry) -> None:
     registry.register("/uptime", _h_uptime)
     registry.register("/provider", _h_provider)
     registry.register("/goal", _h_goal)
+    registry.register("/agent", _h_agent)
+    registry.register("/claude", _h_claude)
