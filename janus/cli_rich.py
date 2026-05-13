@@ -2477,6 +2477,43 @@ def _maybe_propose_memory(console, req: str, output: str,
     # into the buffer — when the user pressed Enter, the answer didn't
     # match "y"/"yes" and was silently denied, leaving the CLI in a
     # confusing "stuck" state.
+
+    # v1.42.4 — when a /goal auto-continue loop is active, the apply?
+    # prompt intercepts the next keystroke and blocks the autonomous
+    # loop. Sam 2026-05-13: model wrote "Now writing the full report",
+    # the prompt fired, and the report scrolled off-screen while the
+    # user typed `y`. Detect active /goal and either auto-apply (when
+    # the cards look benign — small count, no overwrites) or skip.
+    _goal_active = False
+    try:
+        from . import goal_loop as _gl
+        _goal_active = _gl.is_active(_gl.scope_for_surface("cli_rich"))
+    except Exception:
+        pass
+    if _goal_active:
+        # Auto-apply silently: user has given the goal-loop authority
+        # to make progress; pausing for a y/N defeats the loop. Cards
+        # are append-only — worst case the user can /memory <cmd> them
+        # away later.
+        if ops:
+            try:
+                memory.apply(ops)
+            except Exception as e:
+                console.print(f"[dim]auto-applied (goal active) failed: {e}[/]")
+                return
+        if refusal_cards:
+            try:
+                from . import memory as _mem
+                _mem.apply([{"op": "append", "card": c} for c in refusal_cards])
+            except Exception:
+                pass
+        if ops or refusal_cards:
+            console.print(
+                f"[dim]auto-applied {len(ops) + len(refusal_cards)} "
+                f"memory card(s) silently (/goal active)[/]"
+            )
+        return
+
     try:
         if HAVE_RICH:
             from prompt_toolkit import prompt as _pt_prompt
@@ -2889,8 +2926,14 @@ def main() -> None:
             # underlying iteration goes through app.chat_events so any
             # future event-level features (hook_fired, memory_recall,
             # keepalive…) reach this surface for free.
+            # v1.42.4 — trim conversation history before sending so a
+            # long /goal loop or accumulated tool results don't blow
+            # the LLM's request size limit. session file still keeps
+            # the full history; we only trim what goes to the API.
+            from . import context_trim as _ct
+            trimmed = _ct.trim_messages(state["messages"])
             output, trace = app.run_turn(
-                messages=state["messages"],
+                messages=trimmed,
                 user_input=req,
                 tools=tools,
                 approver=approver,
@@ -3259,10 +3302,26 @@ def _render_step_factory(console, state=None):
                 sl.set_verb("nudging stalled model")
             reason = step.get("reason", "?")
             preview = step.get("preview", "")
-            console.print(
-                f"[magenta dim]↻ nudge ({reason}) — "
-                f"{('model stalled: ' + preview[:60]) if preview else 'retrying'}[/]"
-            )
+            # v1.42.4 — make the nudge UX informative. Pre-v1.42.4 this
+            # printed three identical "↻ nudge (empty) — retrying" lines
+            # when a reasoning model burned its output budget on thinking
+            # and emitted no content. Now we explain what's happening so
+            # the user can /goal pause instead of staring at retries.
+            if reason == "empty" and not preview:
+                console.print(
+                    "[yellow dim]↻ nudge (empty) — model returned no "
+                    "content (reasoning model may have spent its output "
+                    "budget on thinking). retrying…[/]"
+                )
+                console.print(
+                    "[dim]    if this repeats: /goal pause, then shorten "
+                    "the prompt or raise JANUS_MAX_CONTEXT_CHARS.[/]"
+                )
+            else:
+                console.print(
+                    f"[magenta dim]↻ nudge ({reason}) — "
+                    f"{('model stalled: ' + preview[:60]) if preview else 'retrying'}[/]"
+                )
         elif step["type"] == "stream_chunk":
             text = step.get("text", "")
             if text:
