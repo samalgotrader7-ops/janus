@@ -61,11 +61,23 @@ class Clarify(Tool):
     name = "clarify"
     description = (
         "Ask the user ONE question and block until they answer. Use "
-        "ONLY for genuine ambiguity that affects what work to do "
-        "(which file? which branch? which chat? send-or-save?). Don't "
-        "use for confirmation — default to ACT per Rule 7. Don't use "
-        "when you could grep / fs_read / session_recent the answer "
-        "instead. Returns the user's answer as a string."
+        "SPARINGLY — each call interrupts the conversation, which costs "
+        "the user even when it costs you nothing. Use ONLY when:\n"
+        "  • Genuine ambiguity prevents action (which file? which "
+        "branch? which of these mutually-exclusive options?)\n"
+        "  • A required fact is missing and can't be discovered via "
+        "fs_read / grep / session_recent\n"
+        "DO NOT use for:\n"
+        "  • Confirmation ('should I proceed?') — default to ACT per "
+        "Rule 7\n"
+        "  • Small-talk responses or casual user messages\n"
+        "  • Questions with any defensible default — pick one and let "
+        "the user correct you\n"
+        "  • Replying to a friendly greeting or open-ended hello\n"
+        "  • Plan-mode responses (the plan review already has "
+        "Yes/No/Draft/Cancel buttons)\n"
+        "When in doubt, ACT and adjust on the next turn. Returns the "
+        "user's answer as a string."
     )
     parameters = {
         "type": "object",

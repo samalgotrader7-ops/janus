@@ -501,7 +501,14 @@ def _make_telegram_clarify_cb(chat_id: int, app, sess: Session, loop: asyncio.Ab
         # as v1.31.7: model-generated questions might contain
         # underscores / asterisks that break Telegram's parse_mode
         # "Markdown". Plain text always delivers.
-        body = f"❓ clarify\n\n{question[:1000]}"
+        # v1.41.3 — render as a more visually distinct "card" with a
+        # separator line so users don't read it as a normal chat reply.
+        body = (
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "❓ QUESTION FROM JANUS\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{question[:1000]}"
+        )
         if choices:
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             kb_rows = []
