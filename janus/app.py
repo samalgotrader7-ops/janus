@@ -238,7 +238,29 @@ def chat_events(
 
     try:
         while True:
-            item = q.get()
+            # v1.41.3: poll with a short timeout instead of blocking
+            # indefinitely on q.get(). If the producer thread dies without
+            # putting _END (e.g. low-level fault that bypassed the queue
+            # try/except, or a daemon-thread teardown race) we'd otherwise
+            # hang forever — Sam hit this on 2026-05-13. The 1-second
+            # alive-check is invisible during normal operation (queue
+            # almost always has items) but surfaces stalled producers
+            # within a second so the user sees a real error.
+            try:
+                item = q.get(timeout=1.0)
+            except queue.Empty:
+                if not thread.is_alive():
+                    yield {
+                        "type": "turn_error",
+                        "error": RuntimeError(
+                            "chat producer thread exited without signaling end — "
+                            "an exception likely bypassed the queue handler. "
+                            "Check the journal/log for the underlying error."
+                        ),
+                    }
+                    yield {"type": "turn_end"}
+                    return
+                continue
             if item is _END:
                 break
             # If executor.chat ever yields something un-typed (shouldn't
