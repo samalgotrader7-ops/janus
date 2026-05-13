@@ -3137,6 +3137,20 @@ def _build_app():
         web_audit.mutate(auth_sid, ip, f"/api/clarify/{request_id}", ["answer"])
         return JSONResponse({"ok": True})
 
+    # v1.42.1 — Kanban board web UI. Routes are registered in a
+    # dedicated module so this 3000-line file doesn't grow further.
+    from . import web_kanban
+    web_kanban.register_kanban_routes(
+        app,
+        Body=Body,
+        Request=Request,
+        JSONResponse=JSONResponse,
+        HTMLResponse=HTMLResponse,
+        check_auth=_check_auth,
+        check_csrf=_check_csrf,
+        web_auth=web_auth,
+    )
+
     return app
 
 
