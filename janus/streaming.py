@@ -74,6 +74,11 @@ def _stream_one(
             )
         r.raise_for_status()
         accumulated = ""
+        # Reasoning models (MiMo-V2.5-Pro, DeepSeek-R1, OpenAI o-series) emit
+        # reasoning_content separately from content and REQUIRE it to be sent
+        # back in subsequent turns — without it the provider 400s on the next
+        # request. Accumulate and thread it through.
+        reasoning_accumulated = ""
         # Tool-call accumulation: provider streams partial deltas, we
         # merge by index. Each entry: {id, type, function: {name, arguments}}
         tool_acc: dict[int, dict] = {}
@@ -107,6 +112,10 @@ def _stream_one(
                 accumulated += text
                 yield text
 
+            r_text = delta.get("reasoning_content")
+            if r_text:
+                reasoning_accumulated += r_text
+
             for tc in delta.get("tool_calls") or []:
                 idx = tc.get("index", 0)
                 slot = tool_acc.setdefault(idx, {
@@ -133,6 +142,8 @@ def _stream_one(
         "role": "assistant",
         "content": accumulated,
     }
+    if reasoning_accumulated:
+        final["reasoning_content"] = reasoning_accumulated
     if tool_acc:
         final["tool_calls"] = [tool_acc[i] for i in sorted(tool_acc)]
     yield final
