@@ -26,6 +26,16 @@ import html
 import json
 from typing import Any
 
+# v1.42.2: FastAPI types are imported at module level so route
+# annotations (`request: Request`) resolve through typing.get_type_hints
+# in the same module the route is defined in. Closure-scope imports
+# triggered FastAPI's 422 "field required" because it treated the
+# `request` parameter as a query field. web_kanban.py is only imported
+# from web.py which already gated FastAPI's availability — safe to
+# do here unconditionally.
+from fastapi import Body, Request
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+
 from .. import branding
 from ..kanban import dispatcher as _kd
 from ..kanban import state as _state
@@ -297,19 +307,10 @@ def register_kanban_routes(
     `web_auth` is the module providing `make_csrf_token(sid)` for the
     page renderer.
     """
-    # v1.42.1 fix — import FastAPI types at registration time so the
-    # route annotations resolve to FastAPI's actual classes. Passing
-    # them in as kwargs broke FastAPI's injection: `request: Request`
-    # got treated as a query parameter instead of the special Request
-    # object, returning 422 Field-required on every GET.
-    from fastapi import Body, Request
-    from fastapi.responses import JSONResponse, HTMLResponse
-
     @app.get("/kanban")
     async def kanban_page(request: Request):
         sid, err = check_auth(request)
         if err:
-            from starlette.responses import RedirectResponse
             return RedirectResponse(url="/login", status_code=303)
         csrf = web_auth.make_csrf_token(sid)
         return HTMLResponse(_kanban_page(csrf_token=csrf))
