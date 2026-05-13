@@ -820,11 +820,24 @@ def _make_mode_approver(console, mode_state: permissions.ModeState, *, state: di
                         )
                         return "cancel"
                     return False
-            except Exception:
-                # Fall through to the generic mode-based path on
-                # render failure — better to show a generic prompt
-                # than auto-allow silently.
-                pass
+            except Exception as _plan_err:
+                # v1.41.8 — DO NOT fall through. Falling through to the
+                # generic mode-based path treats exit_plan_mode as a
+                # 'read' risk in plan mode, which auto-ALLOWs → silent
+                # plan approval → mode flip → unintended execution.
+                # Render failure must DENY pending manual review.
+                try:
+                    console.print(
+                        f"[red]⚠ plan review render failed:[/] "
+                        f"{type(_plan_err).__name__}: {_plan_err}"
+                    )
+                    console.print(
+                        "[yellow]plan auto-DENIED for safety. "
+                        "ask the model to rewrite the plan and retry.[/]"
+                    )
+                except Exception:
+                    pass
+                return False
 
         risk = kw.get("risk") or permissions.risk_from_verb(
             (kw.get("capability") or (None, "", None))[1]

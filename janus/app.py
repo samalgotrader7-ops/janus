@@ -353,10 +353,24 @@ def run_turn(
         if on_step is not None:
             try:
                 on_step(event)
-            except Exception:
+            except Exception as _step_err:
                 # Mirror executor.chat's on_step contract — renderer
-                # exceptions never break the loop.
-                pass
+                # exceptions never break the loop. v1.41.8 — also log
+                # to ~/.janus/log.jsonl so renderer crashes don't
+                # disappear silently. (Pre-v1.41.8 audit found this
+                # masked status-line / step formatter bugs that
+                # cascaded into apparent stalls.)
+                try:
+                    from . import logger as _logger
+                    _logger.write({
+                        "ts": _logger.now_iso(),
+                        "event": "on_step_exception",
+                        "error_type": type(_step_err).__name__,
+                        "error": str(_step_err)[:500],
+                        "event_type": (event or {}).get("type", "?"),
+                    })
+                except Exception:
+                    pass
         if event["type"] == "final":
             output = event.get("text", "") or ""
     return output, trace

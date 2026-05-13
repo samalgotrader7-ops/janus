@@ -127,13 +127,28 @@ def _trim_messages(messages: list[dict], max_chars: int = _MAX_CONTEXT_CHARS) ->
         system_msgs = [messages[0]]
         rest = messages[1:]
 
-    # Walk backwards through rest, keeping messages until budget is exhausted
+    # Walk backwards through rest, keeping messages until budget is exhausted.
+    # v1.41.8 — fix budget breach when first message alone exceeds max_chars:
+    # if the most-recent message is huge, truncate its content to fit instead
+    # of letting the budget invariant break (which previously caused 500s on
+    # huge single messages).
     kept = []
     kept_chars = sum(len(m.get("content", "") if isinstance(m.get("content"), str) else "")
                      for m in system_msgs)
     for m in reversed(rest):
         m_chars = len(m.get("content", "") if isinstance(m.get("content"), str) else "")
-        if kept_chars + m_chars > max_chars and kept:
+        if kept_chars + m_chars > max_chars:
+            if not kept and isinstance(m.get("content"), str):
+                # First message and it doesn't fit — truncate its content
+                # to use whatever budget remains (minus a 200-char header).
+                budget_for_msg = max(500, max_chars - kept_chars - 200)
+                trimmed_msg = dict(m)
+                trimmed_msg["content"] = (
+                    m["content"][:budget_for_msg]
+                    + f"\n\n[message truncated from {m_chars} to "
+                    f"{budget_for_msg} chars to fit context window]"
+                )
+                kept.append(trimmed_msg)
             break
         kept.append(m)
         kept_chars += m_chars
@@ -261,14 +276,22 @@ class Session:
 
 
 SESSIONS: dict[int, Session] = {}
+# v1.41.8 — concurrent_updates(True) at line ~1917 means on_text / on_callback
+# can interleave for the same chat_id. Without a lock, two requests both see
+# `SESSIONS.get(chat_id) is None`, both construct a Session, and the second
+# write wins — orphaning the first Session's approval/clarify futures so the
+# callback handler can never resolve them. Lock the get-or-create.
+import threading as _threading
+_SESSION_LOCK = _threading.Lock()
 
 
 def _session(chat_id: int) -> Session:
-    s = SESSIONS.get(chat_id)
-    if s is None:
-        s = Session(chat_id)
-        SESSIONS[chat_id] = s
-    return s
+    with _SESSION_LOCK:
+        s = SESSIONS.get(chat_id)
+        if s is None:
+            s = Session(chat_id)
+            SESSIONS[chat_id] = s
+        return s
 
 
 def _user_label(update: Update) -> str:
@@ -1098,7 +1121,13 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "n", "no", "refine", "decline", "reject", "stop",
             )
             if normalized in approve_words:
-                fut.set_result(True)
+                # v1.41.8 — guard double set_result. If the keyboard
+                # already resolved this future (e.g. user tapped Yes
+                # then sent "y" as a text), the second set_result
+                # raises InvalidStateError which gets silently
+                # swallowed and the second reply path crashes.
+                if not fut.done():
+                    fut.set_result(True)
                 sess.pending_plan_review = None
                 log.info(
                     "on_text: plan APPROVED via text reply token=%s "
@@ -1112,7 +1141,8 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     log.warning("on_text: reply_text raised: %r", e)
                 return
             if normalized in refine_words:
-                fut.set_result(False)
+                if not fut.done():
+                    fut.set_result(False)
                 sess.pending_plan_review = None
                 log.info(
                     "on_text: plan REFINED via text reply token=%s "
@@ -1722,9 +1752,11 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
             return
         # Numeric index → resolve immediately (callback maps to choice text).
-        fut.set_result(choice)
+        # v1.41.8 — guard against double-resolve (rapid double-tap).
+        if not fut.done():
+            fut.set_result(choice)
         try:
-            await q.answer(text=f"chose option {int(choice) + 1}")
+            await q.answer(text=f"chose option {int(choice) + 1}" if str(choice).isdigit() else "ok")
         except Exception:
             pass
         try:
@@ -1789,7 +1821,9 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if choice == "always" and cap_key:
         sess.grant_always(str(cap_key))
 
-    fut.set_result(granted)
+    # v1.41.8 — guard double-resolve (timeout already fired / user double-tapped).
+    if not fut.done():
+        fut.set_result(granted)
     log.info(
         "on_callback: fut.set_result(%s) for token=%s — chat-turn should wake",
         granted, token,

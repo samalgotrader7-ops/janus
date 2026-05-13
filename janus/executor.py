@@ -392,8 +392,30 @@ def execute(
 
         # Execute each tool call requested by the model.
         for call in tool_calls:
-            fn = call["function"]
-            name = fn["name"]
+            # v1.41.8 — defensive: malformed model output can omit
+            # function name or call id. Previously we'd KeyError out
+            # of the loop and the user saw a crash; now we synthesize
+            # an error result and let the model self-correct on the
+            # next turn.
+            fn = call.get("function") or {}
+            name = fn.get("name") or ""
+            call_id = call.get("id") or ""
+            if not name:
+                step_record = {
+                    "step": step, "type": "tool_call",
+                    "tool": "?", "args": {},
+                    "result_preview": "error: tool call missing function name",
+                    "malformed": True,
+                }
+                trace.append(step_record)
+                if on_step:
+                    on_step({**step_record, "type": "tool_result"})
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id or "_missing_",
+                    "content": "error: tool call missing function name",
+                })
+                continue
             try:
                 args = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
@@ -461,7 +483,7 @@ def execute(
 
             messages.append({
                 "role": "tool",
-                "tool_call_id": call["id"],
+                "tool_call_id": call_id or "_missing_",
                 "content": content_for_model,
             })
 
@@ -1153,7 +1175,11 @@ def chat(
                     # visible history so the next iteration sees a clean
                     # conversation followed by the nudge. The trace
                     # still records what happened for debugging.
-                    messages.pop()
+                    # v1.41.8 — guard pop on empty list (defensive: should
+                    # never happen because we just appended msg above, but
+                    # cheaper than crashing).
+                    if messages:
+                        messages.pop()
                     messages.append({"role": "system", "content": nudge_msg})
                     nudge_count += 1
                     trace.append({
@@ -1190,8 +1216,27 @@ def chat(
             return text, trace
 
         for call in tool_calls:
-            fn = call["function"]
-            name = fn["name"]
+            # v1.41.8 — defensive same as the auto-mode loop above.
+            # Malformed tool_calls used to KeyError out of the loop.
+            fn = call.get("function") or {}
+            name = fn.get("name") or ""
+            call_id = call.get("id") or ""
+            if not name:
+                step_record = {
+                    "step": step, "type": "tool_call",
+                    "tool": "?", "args": {},
+                    "result_preview": "error: tool call missing function name",
+                    "malformed": True,
+                }
+                trace.append(step_record)
+                if on_step:
+                    on_step({**step_record, "type": "tool_result"})
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id or "_missing_",
+                    "content": "error: tool call missing function name",
+                })
+                continue
             try:
                 args = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
@@ -1283,7 +1328,7 @@ def chat(
 
             messages.append({
                 "role": "tool",
-                "tool_call_id": call["id"],
+                "tool_call_id": call_id or "_missing_",
                 "content": content_for_model,
             })
 
