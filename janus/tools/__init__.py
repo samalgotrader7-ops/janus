@@ -51,6 +51,8 @@ from .gemini_cli import GeminiCli
 from .bus import BusSend, BusRecv
 # v1.40.2 — A2A client (Phase 10.4.2): Janus calls other A2A peers.
 from .a2a_call import A2ACall
+# v1.42.0 — Kanban board tools (multi-agent coordination).
+from .kanban import KanbanAdd, KanbanList, KanbanShow
 
 
 _BUILTIN_TOOL_FACTORIES = {
@@ -181,6 +183,13 @@ _BUILTIN_TOOL_FACTORIES = {
     # its Agent Card. Capability token: a2a.call + agent_url
     # target so skills can pre-grant specific peer URLs.
     "a2a_call": A2ACall,
+    # v1.42.0 — Kanban board for multi-agent coordination. Tasks are
+    # claimed and executed by the background dispatcher in
+    # janus.kanban.dispatcher; these tools let an agent grow the
+    # board from inside its own turn (delegate-by-task pattern).
+    "kanban_add": KanbanAdd,
+    "kanban_list": KanbanList,
+    "kanban_show": KanbanShow,
 }
 
 

@@ -110,6 +110,7 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/swarm",        "agent swarms — list | describe | run | status | cancel", "built-in"),
     SlashCommand("/goal",         "manage standing objective: /goal <text> | status | pause | resume | clear | budget <N>", "built-in"),
     SlashCommand("/agent",        "first-class agents — /agent list | /agent <name> <prompt>", "built-in"),
+    SlashCommand("/kanban",       "multi-agent task board — /kanban add | list | show | done | fail | block | unblock | delete | status | start | stop", "built-in"),
     SlashCommand("/claude",       "shorthand for /agent claude <prompt> — delegate to Claude Code", "built-in"),
     SlashCommand("/help",         "show all available slash commands grouped by source", "built-in"),
     SlashCommand("/quit",         "exit the CLI",                                        "built-in"),
@@ -529,6 +530,229 @@ def _h_goal(ctx: SlashContext, arg: str) -> str:
     )
 
 
+def _h_kanban(ctx: SlashContext, arg: str) -> str:
+    """v1.42.0 — multi-agent task board (Hermes-style Kanban).
+
+    Subcommands:
+      /kanban add <title> [--agent <name>] [--workspace <path>]
+                          [--parent <id>] [--description <text>]
+                          [--prompt <text>]   add a new task
+      /kanban list [--status <state>] [--agent <name>]   list tasks
+      /kanban show <id>                                  show one task
+      /kanban done <id> [--output <text>]                mark COMPLETED
+      /kanban fail <id> [--error <text>]                 mark FAILED
+      /kanban block <id>                                 pause
+      /kanban unblock <id>                               resume
+      /kanban delete <id>                                remove
+      /kanban status                                     counts + dispatcher state
+      /kanban start                                      start the dispatcher
+      /kanban stop                                       stop the dispatcher
+    """
+    from .kanban import store as _ks
+    from .kanban import state as _kst
+    from .kanban import dispatcher as _kd
+
+    sub, rest = split_subcommand(arg)
+    sub = sub.lower().strip()
+
+    # `/kanban` with no args → quick status overview.
+    if not arg.strip() or sub in ("status", "stat"):
+        counts = _ks.counts_by_status()
+        running = _kd.is_running()
+        lines = [f"kanban dispatcher: {'running' if running else 'stopped'}"]
+        for s in (_kst.BACKLOG, _kst.READY, _kst.IN_PROGRESS,
+                  _kst.BLOCKED, _kst.COMPLETED, _kst.FAILED):
+            lines.append(f"  {s:<12} {counts.get(s, 0)}")
+        return "\n".join(lines)
+
+    if sub == "start":
+        _kd.start()
+        return "kanban dispatcher started."
+    if sub == "stop":
+        _kd.stop()
+        return "kanban dispatcher stopped."
+
+    if sub == "list":
+        flt_status, flt_agent = _parse_kv_flags(
+            rest, allowed={"status", "agent"},
+        )
+        tasks = _ks.list_tasks(status=flt_status, agent_profile=flt_agent)
+        if not tasks:
+            return "no tasks. /kanban add <title> --agent <name> to start."
+        lines = []
+        for t in tasks:
+            deps = f" (deps: {t.parent_ids})" if t.parent_ids else ""
+            ws = f" [{t.workspace}]" if t.workspace else ""
+            lines.append(
+                f"  #{t.id:<3} [{t.status:<11}] @{t.agent_profile:<10} "
+                f"{t.title}{deps}{ws}"
+            )
+        return "\n".join(lines)
+
+    if sub == "show":
+        try:
+            tid = int(rest.strip().split()[0])
+        except (ValueError, IndexError):
+            return "usage: /kanban show <id>"
+        t = _ks.get_task(tid)
+        if not t:
+            return f"task #{tid} not found."
+        body = (
+            f"#{t.id} [{t.status}] @{t.agent_profile}\n"
+            f"  title:       {t.title}\n"
+            f"  description: {t.description or '-'}\n"
+            f"  workspace:   {t.workspace or '-'}\n"
+            f"  prompt:      {t.prompt or '-'}\n"
+            f"  parents:     {t.parent_ids or '-'}\n"
+            f"  created:     {t.created_at}\n"
+        )
+        if t.claimed_at:
+            body += f"  claimed:     {t.claimed_at}\n"
+        if t.completed_at:
+            body += f"  completed:   {t.completed_at}\n"
+        if t.last_error:
+            body += f"  last_error:  {t.last_error}\n"
+        if t.output:
+            body += f"  output:      {t.output[:300]}{'…' if len(t.output) > 300 else ''}\n"
+        return body.rstrip()
+
+    if sub == "add":
+        parsed = _parse_kanban_add(rest)
+        if isinstance(parsed, str):
+            return parsed  # error message
+        try:
+            t = _ks.create_task(**parsed)
+        except ValueError as e:
+            return f"error: {e}"
+        return (
+            f"created #{t.id} [{t.status}] @{t.agent_profile}: {t.title}"
+            + (f" (parents: {t.parent_ids})" if t.parent_ids else "")
+        )
+
+    if sub in ("done", "complete"):
+        return _kanban_quick_status(rest, _kst.COMPLETED)
+    if sub == "fail":
+        return _kanban_quick_status(rest, _kst.FAILED)
+    if sub == "block":
+        return _kanban_quick_status(rest, _kst.BLOCKED)
+    if sub in ("unblock", "resume"):
+        return _kanban_quick_status(rest, _kst.BACKLOG)
+
+    if sub in ("delete", "rm"):
+        try:
+            tid = int(rest.strip().split()[0])
+        except (ValueError, IndexError):
+            return "usage: /kanban delete <id>"
+        return (
+            f"deleted #{tid}." if _ks.delete_task(tid)
+            else f"task #{tid} not found."
+        )
+
+    return (
+        f"unknown subcommand: {sub!r}. "
+        f"try /kanban (no args) for status, or see /help kanban."
+    )
+
+
+def _parse_kv_flags(
+    text: str, *, allowed: set,
+) -> tuple[str | None, str | None]:
+    """Parse `--status X --agent Y` style flags. Returns (status, agent)."""
+    status_val: str | None = None
+    agent_val: str | None = None
+    parts = text.strip().split()
+    i = 0
+    while i < len(parts):
+        tok = parts[i]
+        if tok == "--status" and i + 1 < len(parts):
+            status_val = parts[i + 1]
+            i += 2
+            continue
+        if tok == "--agent" and i + 1 < len(parts):
+            agent_val = parts[i + 1]
+            i += 2
+            continue
+        i += 1
+    return status_val, agent_val
+
+
+def _parse_kanban_add(text: str):
+    """Parse the `/kanban add` flag soup. Returns a kwargs dict for
+    store.create_task, or an error string on bad input.
+
+    Title is everything before the first `--flag` (or the whole string
+    if no flags). Flags: --agent, --workspace, --parent, --description,
+    --prompt, --max-retries.
+    """
+    import shlex
+    try:
+        tokens = shlex.split(text)
+    except ValueError as e:
+        return f"error parsing args: {e}"
+    title_words: list[str] = []
+    kwargs: dict[str, object] = {
+        "agent_profile": "developer",
+        "parent_ids": [],
+    }
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("--"):
+            flag = tok[2:]
+            val = tokens[i + 1] if i + 1 < len(tokens) else ""
+            if flag == "agent":
+                kwargs["agent_profile"] = val
+            elif flag == "workspace":
+                kwargs["workspace"] = val
+            elif flag == "description":
+                kwargs["description"] = val
+            elif flag == "prompt":
+                kwargs["prompt"] = val
+            elif flag == "parent":
+                try:
+                    kwargs["parent_ids"].append(int(val))  # type: ignore[union-attr]
+                except ValueError:
+                    return f"error: --parent expects an integer, got {val!r}"
+            elif flag in ("max-retries", "max_retries"):
+                try:
+                    kwargs["max_retries"] = int(val)
+                except ValueError:
+                    return f"error: --max-retries expects an integer"
+            else:
+                return f"error: unknown flag --{flag}"
+            i += 2
+        else:
+            title_words.append(tok)
+            i += 1
+    title = " ".join(title_words).strip()
+    if not title:
+        return "usage: /kanban add <title> [--agent NAME] [--workspace PATH] [--parent ID]…"
+    kwargs["title"] = title
+    return kwargs
+
+
+def _kanban_quick_status(rest: str, new_status: str) -> str:
+    """Shared body for /kanban done | fail | block | unblock."""
+    from .kanban import store as _ks
+    try:
+        tid = int(rest.strip().split()[0])
+    except (ValueError, IndexError):
+        return "usage: /kanban <done|fail|block|unblock> <id>"
+    extra: dict = {}
+    after = rest.strip().split(None, 1)
+    if len(after) > 1 and after[1].startswith("--"):
+        flag, _, val = after[1][2:].partition(" ")
+        if flag == "output":
+            extra["output"] = val
+        elif flag == "error":
+            extra["last_error"] = val
+    try:
+        t = _ks.set_status(tid, new_status, **extra)
+    except ValueError as e:
+        return f"error: {e}"
+    return f"#{t.id} → [{t.status}]"
+
+
 def _h_agent(ctx: SlashContext, arg: str) -> str:
     """v1.41.0: /agent list | /agent <name> <prompt>
 
@@ -598,3 +822,4 @@ def register_shared_handlers(registry: SlashRegistry) -> None:
     registry.register("/goal", _h_goal)
     registry.register("/agent", _h_agent)
     registry.register("/claude", _h_claude)
+    registry.register("/kanban", _h_kanban)
