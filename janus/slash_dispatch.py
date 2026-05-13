@@ -412,6 +412,25 @@ def _goal_scope(ctx: SlashContext) -> str:
     return ctx.surface or "default"
 
 
+def _queue_goal_kickoff(ctx: SlashContext, goal_text: str) -> None:
+    """v1.41.9 — queue an auto-continue prompt so the very next REPL
+    iteration starts working on the goal. Without this, the user has
+    to type something manually after /goal to bootstrap the loop.
+
+    Idempotent: skips if something else has already queued an input.
+    No-op on surfaces (Telegram) that don't honor state["__auto_continue_input__"].
+    """
+    if ctx is None or ctx.state is None:
+        return
+    if ctx.state.get("__auto_continue_input__"):
+        return
+    ctx.state["__auto_continue_input__"] = (
+        f"Start working toward the standing goal: {goal_text}\n"
+        f"What's the first concrete step? "
+        f"Take it now if it's safe to do so."
+    )
+
+
 def _h_goal(ctx: SlashContext, arg: str) -> str:
     """`/goal` — manage the standing objective for this scope."""
     from . import goals as _g
@@ -441,6 +460,9 @@ def _h_goal(ctx: SlashContext, arg: str) -> str:
         if g is None:
             return "no goal set."
         if g.status == "active":
+            # v1.41.9 — kick off the very next turn automatically.
+            # See the long comment near `set_goal` below for why.
+            _queue_goal_kickoff(ctx, g.text)
             return f"goal resumed.\n{_g.format_status(g)}"
         return f"goal is {g.status}, can't resume.\n{_g.format_status(g)}"
 
@@ -467,6 +489,18 @@ def _h_goal(ctx: SlashContext, arg: str) -> str:
     # all their words.
     text = arg.strip()
     g = _g.set_goal(scope, text)
+
+    # v1.41.9 — kick off the very next turn automatically. Without
+    # this, the auto-continue loop never starts because
+    # goal_loop.after_turn() only fires AFTER an assistant turn —
+    # and setting /goal from a slash command doesn't produce a turn.
+    # The CLI's main loop pops state["__auto_continue_input__"] at
+    # the top of each iteration; queuing the kickoff there is
+    # exactly the same path used by post-turn judge continuations,
+    # so the first turn looks identical to subsequent ones.
+    # Surfaces without this state key (Telegram) just ignore it —
+    # users there will still have to send one message to bootstrap.
+    _queue_goal_kickoff(ctx, g.text)
 
     # v1.37.1 — Phase 10.1.1: plan-mode auto-leave. A goal in plan
     # mode is a contradiction (plan blocks writes; the loop needs
