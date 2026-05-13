@@ -44,6 +44,10 @@ from .base import Tool
 # Sentinels the chat surface watches for.
 PLAN_APPROVED = "PLAN_APPROVED"
 PLAN_REFUSED = "PLAN_REFUSED"
+# v1.41.3 — explicit Draft / Cancel responses. Neither switches mode.
+# Draft persists the plan body to ~/.janus/plans/drafts/; Cancel discards.
+PLAN_DRAFTED = "PLAN_DRAFTED"
+PLAN_CANCELLED = "PLAN_CANCELLED"
 
 # v1.31.13 — model-facing mode-awareness messages. Field-validation
 # finding from Sam's VPS (2026-05-08): after PLAN_REFUSED, the
@@ -77,6 +81,20 @@ PLAN_REFUSED_MESSAGE = (
     "call exit_plan_mode again with the revised plan when ready. "
     "The user must switch mode (/mode default or /mode auto) "
     "BEFORE any execution can happen."
+)
+PLAN_DRAFTED_MESSAGE = (
+    "PLAN_DRAFTED — user saved the plan as a draft and is NOT "
+    "executing it now. Mode is STILL 'plan'. Do NOT call "
+    "exit_plan_mode again with the same plan. Reply briefly (one or "
+    "two lines: 'saved' / 'noted') and wait for the user's next "
+    "request. If they want to revisit later, they'll bring it back "
+    "themselves."
+)
+PLAN_CANCELLED_MESSAGE = (
+    "PLAN_CANCELLED — user discarded the plan entirely. Mode is "
+    "STILL 'plan'. Do NOT retry the same plan or call exit_plan_mode "
+    "again. Reply briefly acknowledging the cancellation and wait "
+    "for the user's next request — they decide what comes next."
 )
 
 
@@ -115,20 +133,25 @@ class ExitPlanMode(Tool):
     # still allows exit_plan_mode itself to run.
     risk = "read"
 
-    def run(self, args: dict, approver: Callable[..., bool]) -> str:
+    def run(self, args: dict, approver: Callable[..., object]) -> str:
         plan = (args.get("plan") or "").strip()
         if not plan:
             return "error: plan body is required"
         # The approver SHOWS the plan and asks. Capability key is fixed —
         # plan-exit isn't really capability-scoped (it's a meta-operation).
-        ok = approver(
+        decision = approver(
             "exit_plan_mode",
             plan[:4000],
             capability=("plan", "exit", "session"),
         )
-        # v1.31.13 — return the full guidance message instead of the
-        # bare sentinel. Sentinel substrings ("PLAN_APPROVED" /
-        # "PLAN_REFUSED") remain literal at the start of each
-        # message so existing detectors (cli_rich post-turn mode
-        # switch) keep working unchanged.
-        return PLAN_APPROVED_MESSAGE if ok else PLAN_REFUSED_MESSAGE
+        # v1.41.3 — approver may return True (approve), False (refine),
+        # "draft" (save plan, stay in plan mode), or "cancel" (discard,
+        # stay in plan mode). Other tools' approvers still return bool;
+        # only the plan-mode-specific approver branch emits the strings.
+        if decision is True:
+            return PLAN_APPROVED_MESSAGE
+        if decision == "draft":
+            return PLAN_DRAFTED_MESSAGE
+        if decision == "cancel":
+            return PLAN_CANCELLED_MESSAGE
+        return PLAN_REFUSED_MESSAGE

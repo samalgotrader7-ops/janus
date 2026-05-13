@@ -754,7 +754,10 @@ def _make_mode_approver(console, mode_state: permissions.ModeState, *, state: di
                     console.print(panel)
                     # Plan-mode prompt is intentionally narrow — no
                     # session/always grants for "approve this plan".
-                    prompt_text = "[Y]es proceed  [N]o refine  > "
+                    prompt_text = (
+                        "[Y]es proceed  [N]o refine  "
+                        "[D]raft (save)  [C]ancel  > "
+                    )
                     # v1.31.6: pause + clear the active StatusLine
                     # before the prompt. Without this, the background
                     # status redraw (every 400ms via \r\033[K) wipes
@@ -786,6 +789,36 @@ def _make_mode_approver(console, mode_state: permissions.ModeState, *, state: di
                                 pass
                     if ans in ("y", "yes"):
                         return True
+                    # v1.41.3 — explicit Draft / Cancel options. Each
+                    # returns a non-bool sentinel that exit_plan_mode
+                    # inspects to pick the right PLAN_* response. Other
+                    # tools never see these strings because this branch
+                    # only fires for exit_plan_mode.
+                    if ans in ("d", "draft"):
+                        try:
+                            import time as _t
+                            from pathlib import Path as _P
+                            from . import config as _cfg
+                            drafts_dir = _P(_cfg.HOME) / "plans" / "drafts"
+                            drafts_dir.mkdir(parents=True, exist_ok=True)
+                            stamp = _t.strftime("%Y%m%d-%H%M%S")
+                            path = drafts_dir / f"draft_{stamp}.md"
+                            path.write_text(details, encoding="utf-8")
+                            console.print(
+                                f"[green]✓ plan saved as draft:[/] "
+                                f"[dim]{path}[/]"
+                            )
+                        except Exception as _e:
+                            console.print(
+                                f"[red]failed to save draft:[/] {_e}"
+                            )
+                        return "draft"
+                    if ans in ("c", "cancel", "q", "quit"):
+                        console.print(
+                            "[yellow]plan cancelled — staying in plan "
+                            "mode. send a new request or /mode default.[/]"
+                        )
+                        return "cancel"
                     return False
             except Exception:
                 # Fall through to the generic mode-based path on
