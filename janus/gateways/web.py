@@ -869,9 +869,13 @@ def _build_app():
             # iteration over app.chat_events (replacing to_thread
             # entirely) is a follow-up cleanup — Phase 0 only needs
             # the substrate plumbing.
+            # v1.41.2 â trim conversation history to fit the LLM's
+            # context window. Long sessions exceed provider size limits.
+            from .telegram import _trim_messages
+            trimmed = _trim_messages(messages)
             def _run_executor():
                 return janus_app.run_turn(
-                    messages=messages,
+                    messages=trimmed,
                     user_input=req,
                     tools=tools,
                     approver=approver,

@@ -97,6 +97,58 @@ _BOT_COMMANDS = [
 MAX_MSG = 3500  # leave headroom under Telegram's 4096
 GATEWAY_NAME = "telegram"
 
+# v1.41.2 â context window budget. When the session has many messages,
+# the full history can exceed the LLM provider's request size limit,
+# causing 500 Internal Server Errors (especially on hosted endpoints like
+# ollama.com). Trim the conversation to fit within a character budget
+# before sending to the API. The session file still retains ALL messages;
+# only the API payload is trimmed.
+_MAX_CONTEXT_CHARS = int(_os.environ.get("JANUS_MAX_CONTEXT_CHARS", "80000"))  # ~20K tokens
+
+
+def _trim_messages(messages: list[dict], max_chars: int = _MAX_CONTEXT_CHARS) -> list[dict]:
+    """Trim conversation history to fit within a character budget.
+
+    Keeps: the system message (first if role=system) + the most recent
+    messages that fit within max_chars. Adds a note if messages were
+    dropped so the model knows context was lost.
+    """
+    if not messages:
+        return messages
+    total = sum(len(m.get("content", "") if isinstance(m.get("content"), str) else "")
+                for m in messages)
+    if total <= max_chars:
+        return messages
+
+    # Preserve the system message (first message if role=system)
+    system_msgs = []
+    rest = messages
+    if messages and messages[0].get("role") == "system":
+        system_msgs = [messages[0]]
+        rest = messages[1:]
+
+    # Walk backwards through rest, keeping messages until budget is exhausted
+    kept = []
+    kept_chars = sum(len(m.get("content", "") if isinstance(m.get("content"), str) else "")
+                     for m in system_msgs)
+    for m in reversed(rest):
+        m_chars = len(m.get("content", "") if isinstance(m.get("content"), str) else "")
+        if kept_chars + m_chars > max_chars and kept:
+            break
+        kept.append(m)
+        kept_chars += m_chars
+
+    kept.reverse()
+    result = system_msgs + kept
+    if len(result) < len(messages):
+        dropped = len(messages) - len(result)
+        # Add a note so the model knows older context was trimmed
+        result.insert(len(system_msgs), {
+            "role": "system",
+            "content": f"[Earlier conversation trimmed: {dropped} messages dropped to fit context window]",
+        })
+    return result
+
 # v1.18.2 — Telegram-specific tone/behavior preamble. Prepended above the
 # memory block when running inside the Telegram chat loop. Sam's
 # 2026-05-06 feedback: "Janus should be more friendly and do reactions
@@ -1372,10 +1424,14 @@ async def _run_chat_turn(
             chat_name=update.effective_chat.title if update.effective_chat else None,
             user=_user_label(update),
         ):
+            # v1.41.2 Ã¢ÂÂ trim conversation history to fit the LLM's
+            # context window. Without this, long sessions (200+ messages)
+            # exceed the provider's request size limit, causing 500 errors.
+            trimmed = _trim_messages(sess.messages)
             # v1.25.7 Phase 0e: route through the surface-agnostic
             # event stream (substrate is in janus/app.py since v1.25.0).
             return janus_app.run_turn(
-                messages=sess.messages,
+                messages=trimmed,
                 user_input=req,
                 tools=tools,
                 approver=approver,
