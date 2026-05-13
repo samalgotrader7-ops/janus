@@ -285,10 +285,6 @@ def _kanban_page(csrf_token: str = "") -> str:
 def register_kanban_routes(
     app,
     *,
-    Body,
-    Request,
-    JSONResponse,
-    HTMLResponse,
     check_auth,
     check_csrf,
     web_auth,
@@ -301,6 +297,13 @@ def register_kanban_routes(
     `web_auth` is the module providing `make_csrf_token(sid)` for the
     page renderer.
     """
+    # v1.42.1 fix — import FastAPI types at registration time so the
+    # route annotations resolve to FastAPI's actual classes. Passing
+    # them in as kwargs broke FastAPI's injection: `request: Request`
+    # got treated as a query parameter instead of the special Request
+    # object, returning 422 Field-required on every GET.
+    from fastapi import Body, Request
+    from fastapi.responses import JSONResponse, HTMLResponse
 
     @app.get("/kanban")
     async def kanban_page(request: Request):

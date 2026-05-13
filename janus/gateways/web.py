@@ -3142,10 +3142,6 @@ def _build_app():
     from . import web_kanban
     web_kanban.register_kanban_routes(
         app,
-        Body=Body,
-        Request=Request,
-        JSONResponse=JSONResponse,
-        HTMLResponse=HTMLResponse,
         check_auth=_check_auth,
         check_csrf=_check_csrf,
         web_auth=web_auth,
