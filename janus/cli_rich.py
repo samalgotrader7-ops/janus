@@ -29,6 +29,21 @@ from .mcp import client as mcp_client
 from .tools import default_registry, make_protected, CapabilitySet
 
 
+# v1.42.5 — shared keystroke-collision guard. Any interactive prompt
+# that can fire mid-turn (tool approval, memory-card apply, clarify
+# callback) must short-circuit when /goal is driving an autonomous
+# loop — otherwise the prompt eats the keystroke the auto-continue
+# was waiting on, and the user sees a "stuck" CLI. See the v1.42.4
+# audit notes in feedback_keystroke_collision_pattern (memory).
+def _goal_autonomous_active() -> bool:
+    """True if the cli_rich /goal auto-continue loop is currently active."""
+    try:
+        from . import goal_loop as _gl
+        return _gl.is_active(_gl.scope_for_surface("cli_rich"))
+    except Exception:
+        return False
+
+
 # Imported lazily so import failure surfaces only when this CLI is selected.
 try:
     from prompt_toolkit import PromptSession
@@ -868,6 +883,21 @@ def _make_mode_approver(console, mode_state: permissions.ModeState, *, state: di
             console.print(
                 f"[dim]⚡ {action_label}[/] "
                 f"[dim](session-approved: {tool_name})[/]"
+            )
+            return True
+
+        # v1.42.5 — /goal-driven autonomous loop. When the user has
+        # set a standing goal, they've already authorised the agent
+        # to make progress. Auto-approve NON-HIGH-RISK tools so the
+        # approval prompt doesn't intercept the keystroke the
+        # auto-continue input is waiting on. High-risk actions
+        # (delete /, force-push, force-overwrite outside workspace)
+        # still prompt — the user retains the safety brake on
+        # destructive operations.
+        if _goal_autonomous_active() and not high_risk:
+            console.print(
+                f"[dim]⚡ {action_label}[/] "
+                f"[dim](/goal-approved: {tool_name})[/]"
             )
             return True
 
@@ -2480,17 +2510,10 @@ def _maybe_propose_memory(console, req: str, output: str,
 
     # v1.42.4 — when a /goal auto-continue loop is active, the apply?
     # prompt intercepts the next keystroke and blocks the autonomous
-    # loop. Sam 2026-05-13: model wrote "Now writing the full report",
-    # the prompt fired, and the report scrolled off-screen while the
-    # user typed `y`. Detect active /goal and either auto-apply (when
-    # the cards look benign — small count, no overwrites) or skip.
-    _goal_active = False
-    try:
-        from . import goal_loop as _gl
-        _goal_active = _gl.is_active(_gl.scope_for_surface("cli_rich"))
-    except Exception:
-        pass
-    if _goal_active:
+    # loop. v1.42.5 — uses the shared _goal_autonomous_active() helper
+    # so the same gate fires consistently across the tool-approval and
+    # clarify prompts.
+    if _goal_autonomous_active():
         # Auto-apply silently: user has given the goal-loop authority
         # to make progress; pausing for a y/N defeats the loop. Cards
         # are append-only — worst case the user can /memory <cmd> them
@@ -2555,6 +2578,18 @@ def _make_console_clarify_cb(console):
     tool emits the UNAVAILABLE sentinel (model picks a default).
     """
     def _cb(question: str, choices: list[str] | None) -> str | None:
+        # v1.42.5 — short-circuit clarify during /goal autonomous loop.
+        # The clarify prompt eats the keystroke the auto-continue is
+        # waiting on. Returning None makes the clarify tool emit its
+        # UNAVAILABLE sentinel — the model picks a sensible default
+        # and proceeds instead of stalling the loop.
+        if _goal_autonomous_active():
+            console.print(
+                f"[dim]? {question[:80]}…  "
+                f"[/][yellow dim]/goal active — model will pick a "
+                f"default (clarify deferred)[/]"
+            )
+            return None
         console.print()
         console.print(f"[bold yellow]? {question}[/]")
         if choices:

@@ -176,6 +176,25 @@ def make_mode_approver(mode_state: permissions.ModeState):
                 f"{C.DIM}blocked by mode '{mode_state.current}' (risk={risk}){C.R}"
             )
             return False
+        # v1.42.5 — /goal autonomous loop: auto-approve non-high-risk
+        # tools so the prompt doesn't block the auto-continue. Mirror of
+        # cli_rich.py's logic.
+        _goal_active_cli = False
+        try:
+            from . import goal_loop as _gl
+            _goal_active_cli = _gl.is_active(_gl.scope_for_surface("cli"))
+        except Exception:
+            pass
+        # high_risk detection is owned by cli_rich; in the basic cli we
+        # treat shell-class verbs as high-risk for the goal gate.
+        _label_low = (label or "").lower()
+        _hr = any(
+            kw in _label_low for kw in
+            ("shell", "delete", "rm ", "force", "drop", "truncate")
+        )
+        if _goal_active_cli and not _hr:
+            print(f"  {C.DIM}/goal-approved: {label}{C.R}")
+            return True
         # ASK — show the panel + y/N.
         print(
             f"\n{C.YELLOW}[approval] {C.BOLD}{label}{C.R}  "
