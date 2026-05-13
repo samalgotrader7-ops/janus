@@ -49,7 +49,7 @@ def _stream_one(
     from . import llm
     payload: dict[str, Any] = {
         "model": chosen_model,
-        "messages": llm.apply_cache_markers(messages),
+        "messages": llm.apply_cache_markers(llm.backfill_reasoning_content(messages)),
         "temperature": temperature,
         "stream": True,
     }

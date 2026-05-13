@@ -175,6 +175,31 @@ def cache_supported(provider: str) -> bool:
     return provider in CACHE_BENEFICIARIES
 
 
+def backfill_reasoning_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ensure every assistant message has a `reasoning_content` field.
+
+    Reasoning models (MiMo-V2.5-Pro, DeepSeek-R1, OpenAI o-series) reject
+    multi-turn payloads with 400 "The reasoning_content in the thinking
+    mode must be passed back to the API." when a prior assistant turn
+    lacks the field. Empty string `""` satisfies them.
+
+    This guards two cases:
+      1) Sessions persisted before streaming.py was patched to capture
+         reasoning_content (legacy history without the field).
+      2) Switching mid-session from a non-reasoning model (GLM, OpenAI
+         non-o) to a reasoning model.
+
+    Non-reasoning providers ignore the extra field per OpenAI spec.
+    """
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        if m.get("role") == "assistant" and "reasoning_content" not in m:
+            out.append({**m, "reasoning_content": ""})
+        else:
+            out.append(m)
+    return out
+
+
 def apply_cache_markers(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Wrap select messages in Anthropic-style content blocks with
     `cache_control: ephemeral`. OpenRouter forwards to Anthropic's
@@ -254,7 +279,7 @@ def _chat_attempt(
     }
     payload: dict[str, Any] = {
         "model": chosen_model,
-        "messages": apply_cache_markers(messages),
+        "messages": apply_cache_markers(backfill_reasoning_content(messages)),
         "temperature": temperature,
     }
     # v1.16.2: respect JANUS_NO_TOOLS for endpoints that 404 on the tools
