@@ -38,6 +38,17 @@ DRIP_DEFAULT_PER_DAY = int(os.getenv("JANUS_INTERVIEW_DRIP_PER_DAY", "2"))
 DRIP_AUTO_PAUSE_PCT = float(os.getenv("JANUS_INTERVIEW_DRIP_PAUSE_PCT", "0.9"))
 INTERVIEW_MODES = ("idle", "one_shot", "drip")
 
+# v1.41.7 — global kill switch. Default OFF so Janus doesn't tack a
+# "Quick question:" onto every assistant reply in normal chats. Users
+# who actually want the onboarding-drip experience set this to 1
+# explicitly (and then `/interview` to enable on a given chat). Sam
+# 2026-05-13: the post-turn drip questions in Telegram conversations
+# were treated as a bug — the previous opt-OUT (`/interview pause`)
+# wasn't discoverable enough.
+DRIP_ENABLED = os.getenv(
+    "JANUS_INTERVIEW_DRIP_ENABLED", "0",
+).lower() in ("1", "true", "yes", "on")
+
 
 # Categories must EXACTLY match the v1.18 type set so answers map
 # correctly at apply time. Hardcoded (not ``tuple(memory_cards.TYPES)``)
@@ -827,6 +838,10 @@ def get_drip_question(
     Caller is responsible for prepending the returned text to the
     assistant's outgoing reply.
     """
+    # v1.41.7 — global kill switch. Default OFF; users opt in via
+    # JANUS_INTERVIEW_DRIP_ENABLED=1. See DRIP_ENABLED definition above.
+    if not DRIP_ENABLED:
+        return None
     state = load_state(gateway, chat_id)
     if state.mode != "drip":
         return None
