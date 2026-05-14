@@ -1994,7 +1994,10 @@ def _cmd_why(console, state: dict) -> bool:
 def _cmd_skill_new(console, arg: str) -> bool:
     parts = arg.strip().split(maxsplit=1)
     if not parts:
-        console.print("[red]usage:[/] /skill new | /skill review <name> | /skill import <source>")
+        console.print(
+            "[red]usage:[/] /skill new | /skill review <name> | "
+            "/skill import <source> | /skill gepa <name>"
+        )
         return True
     sub = parts[0]
     if sub == "new":
@@ -2009,7 +2012,15 @@ def _cmd_skill_new(console, arg: str) -> bool:
             console.print("[red]usage:[/] /skill import <path-or-url>")
             return True
         return _cmd_skill_import(console, parts[1].strip())
-    console.print("[red]usage:[/] /skill new | /skill review <name> | /skill import <source>")
+    if sub == "gepa":
+        if len(parts) < 2 or not parts[1].strip():
+            console.print("[red]usage:[/] /skill gepa <name>")
+            return True
+        return _cmd_skill_gepa(console, parts[1].strip())
+    console.print(
+        "[red]usage:[/] /skill new | /skill review <name> | "
+        "/skill import <source> | /skill gepa <name>"
+    )
     return True
 
 
@@ -2353,6 +2364,75 @@ def _cmd_skill_review(console, name: str) -> bool:
             "type": "skill_revision_applied",
             "skill": skill.name,
             "rationale": revision.get("rationale", ""),
+        })
+        console.print(f"  [green]applied[/] → {skill.path}")
+    return True
+
+
+def _cmd_skill_gepa(console, name: str) -> bool:
+    """v1.45.0 — /skill gepa <name>. Offline evolutionary refinement.
+
+    Streams per-variant progress as the population evolves (Sam reacts
+    strongly to silent gaps for ops > 5s — GEPA can take minutes).
+    Shows the proposed diff at the end and asks y/N. Refuses politely
+    when the skill has no replay records.
+    """
+    from . import skill_gepa
+    skill = skills.load(name)
+    if skill is None:
+        console.print(f"[red]no skill named '{name}'[/]")
+        return True
+    console.print(
+        f"[dim]running GEPA on '{name}' "
+        f"(pop={config.GEPA_POPULATION}, gen={config.GEPA_GENERATIONS}, "
+        f"records≤{config.GEPA_RECORDS_PER_RUN})…[/]"
+    )
+
+    def _on_progress(ev: dict) -> None:
+        phase = ev.get("phase")
+        if phase == "baseline":
+            console.print(f"  [dim]baseline fitness={ev['fitness']:.1f}[/]")
+        elif phase == "variant":
+            console.print(
+                f"  [dim]gen={ev['gen']} op={ev['op']} "
+                f"fitness={ev['fitness']:.1f} "
+                f"budget={ev['budget_remaining']}[/]"
+            )
+        elif phase == "selection":
+            survivors = ev.get("survivors", [])
+            top = ", ".join(f"{vid}={fit:.1f}" for vid, fit in survivors[:3])
+            console.print(f"  [dim]gen={ev['gen']} survivors: {top}[/]")
+
+    try:
+        result = skill_gepa.evolve(name, on_progress=_on_progress)
+    except Exception as e:
+        console.print(f"[red]GEPA failed:[/] {type(e).__name__}: {e}")
+        return True
+
+    console.print(Panel(
+        skill_gepa.render_result(result),
+        title=f"GEPA result for {name}", border_style="magenta",
+    ))
+
+    if result.recommendation != "apply":
+        return True
+
+    try:
+        ans = input("apply this GEPA-proposed body? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return True
+    if ans in ("y", "yes"):
+        try:
+            skill_gepa.apply_best(result)
+        except ValueError as e:
+            console.print(f"[red]apply failed:[/] {e}")
+            return True
+        logger.write({
+            "ts": logger.now_iso(),
+            "type": "skill_gepa_applied",
+            "skill": name,
+            "run_id": result.run_id,
+            "improvement": result.improvement,
         })
         console.print(f"  [green]applied[/] → {skill.path}")
     return True

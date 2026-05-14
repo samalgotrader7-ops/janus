@@ -82,7 +82,7 @@ BUILTIN_COMMANDS: list[SlashCommand] = [
     SlashCommand("/search",       "search prior interactions in the log index",          "built-in"),
     SlashCommand("/skills",       "list/filter skills, or install-bundled to copy the starter catalog", "built-in"),
     SlashCommand("/promote",      "promote a quarantined skill to a trusted state",      "built-in"),
-    SlashCommand("/skill",        "skill authoring — subcommands: new | review | import","built-in"),
+    SlashCommand("/skill",        "skill authoring — subcommands: new | review | import | gepa","built-in"),
     SlashCommand("/cost",         "show token + cost summary for this session",          "built-in"),
     SlashCommand("/project",      "show detected project type + indicators (v1.28.4)",   "built-in"),
     SlashCommand("/clear",        "clear conversation turns and cost counters",          "built-in"),

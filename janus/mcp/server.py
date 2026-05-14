@@ -244,6 +244,65 @@ def _tool_a2a_card(_args: dict) -> str:
     return json.dumps(a2a.build_agent_card(), indent=2)
 
 
+def _tool_skill_gepa(args: dict) -> str:
+    """Run a GEPA pass on a skill and return a text summary.
+
+    By default the artifact is persisted under
+    ``~/.janus/skills/_gepa/<skill>/<run_id>.json`` AND, when
+    recommendation == "apply" and ``apply`` is true, the new body is
+    written to disk. The default ``apply=false`` keeps P4: the caller
+    reads the summary, optionally fetches the artifact, then decides.
+    """
+    from .. import skill_gepa
+    name = str(args.get("skill") or "").strip()
+    if not name:
+        return "error: 'skill' is required"
+
+    def _int_opt(key: str) -> int | None:
+        raw = args.get(key)
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    generations = _int_opt("generations")
+    population = _int_opt("population")
+    record_count = _int_opt("record_count")
+    max_calls = _int_opt("max_llm_calls")
+    seed = _int_opt("seed")
+
+    try:
+        result = skill_gepa.evolve(
+            name,
+            generations=generations,
+            population=population,
+            record_count=record_count,
+            max_llm_calls=max_calls,
+            seed=seed,
+        )
+    except Exception as e:
+        return f"error: GEPA failed: {type(e).__name__}: {e}"
+
+    summary = skill_gepa.render_result(result, include_diff=False)
+
+    apply_flag = bool(args.get("apply"))
+    if apply_flag and result.recommendation == "apply":
+        try:
+            skill_gepa.apply_best(result)
+            summary += "\n\n[applied] new body persisted to skill file."
+        except ValueError as e:
+            summary += f"\n\n[apply-skipped] {e}"
+    elif apply_flag:
+        summary += (
+            f"\n\n[apply-skipped] recommendation={result.recommendation} "
+            "(set apply=false or wait for an 'apply' recommendation)"
+        )
+
+    return summary
+
+
 def _tool_a2a_dispatch(args: dict) -> str:
     """Run a tasks/send request in-process (no HTTP) and return text.
 
@@ -452,6 +511,55 @@ _register(
         "required": ["run_id"],
     },
     _tool_bus_recv,
+)
+
+_register(
+    "janus_skill_gepa",
+    (
+        "Run GEPA — the offline evolutionary skill engine — on a named "
+        "Janus skill. Evolves the skill body across N generations of M "
+        "variants each, scored by LLM-judged replay over the skill's "
+        "historical log records, and returns a text summary including "
+        "baseline vs best fitness, recommendation, and the JSON artifact "
+        "path with full provenance. P4 invariant: by default does NOT "
+        "persist the new body — pass apply=true to write the recommended "
+        "body, but only the caller (humans / orchestrators) is the gate."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "skill": {
+                "type": "string",
+                "description": "Skill name (case-sensitive, kebab-case).",
+            },
+            "generations": {
+                "type": "integer",
+                "description": "Generations to evolve (default JANUS_GEPA_GENERATIONS, normally 3).",
+            },
+            "population": {
+                "type": "integer",
+                "description": "Variants per generation (default JANUS_GEPA_POPULATION, normally 6).",
+            },
+            "record_count": {
+                "type": "integer",
+                "description": "Replay records to score against (default 10).",
+            },
+            "max_llm_calls": {
+                "type": "integer",
+                "description": "Hard cap on LLM calls per run (default 250).",
+            },
+            "seed": {
+                "type": "integer",
+                "description": "Optional seed for the variant-selection RNG (best-effort determinism).",
+            },
+            "apply": {
+                "type": "boolean",
+                "description": "If true AND recommendation==apply, persist the new body atomically.",
+            },
+        },
+        "required": ["skill"],
+    },
+    _tool_skill_gepa,
 )
 
 _register(

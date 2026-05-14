@@ -607,6 +607,52 @@ def apply_best(result: GepaResult) -> skills_mod.Skill:
     return skill
 
 
+# ============================================================
+# Render
+# ============================================================
+
+
+def render_result(result: GepaResult, *, include_diff: bool = True) -> str:
+    """Plain-text summary suitable for CLI terminals, Telegram, web JSON
+    fall-throughs. Surfaces (cli_rich) MAY wrap this in a Panel; the body
+    here is intentionally surface-neutral.
+    """
+    lines: list[str] = []
+    lines.append(f"GEPA run {result.run_id} on skill '{result.skill_name}'")
+    lines.append(
+        f"baseline fitness={result.baseline.fitness:.1f} "
+        f"best fitness={result.best.fitness:.1f} "
+        f"improvement={result.improvement:+.1f}"
+    )
+    cfg = result.config
+    lines.append(
+        f"config: pop={cfg.get('population')} gen={cfg.get('generations')} "
+        f"records={cfg.get('record_count')} "
+        f"calls_remaining={cfg.get('budget_remaining')}"
+    )
+    lines.append(f"recommendation: {result.recommendation}")
+    if result.notes:
+        lines.append("notes:")
+        for n in result.notes:
+            lines.append(f"  - {n}")
+    if include_diff and result.best.id != "baseline":
+        lines.append("")
+        lines.append("--- current body ---")
+        lines.append(result.baseline.body)
+        lines.append("")
+        lines.append("--- proposed body ---")
+        lines.append(result.best.body)
+        lines.append("")
+        lines.append(
+            f"(via {result.best.operator}, "
+            f"parents={','.join(result.best.parents) or 'baseline'})"
+        )
+    if result.artifact_path:
+        lines.append("")
+        lines.append(f"full artifact: {result.artifact_path}")
+    return "\n".join(lines)
+
+
 __all__ = [
     "Variant",
     "Generation",
@@ -614,4 +660,5 @@ __all__ = [
     "collect_records",
     "evolve",
     "apply_best",
+    "render_result",
 ]
