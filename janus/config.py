@@ -188,6 +188,18 @@ SKILL_PRUNE_TRASH_DAYS: int = int(
 # ``stale_warning`` frontmatter flag — never auto-deleted/demoted.
 SKILL_STALE_DAYS: int = int(os.getenv("JANUS_SKILL_STALE_DAYS", "60"))
 
+# v1.44.0 — GEPA evolutionary engine tunables.
+# Defaults give ~200 LLM calls per run (pop=6 × records=10 × gen=3 plus
+# mutations + baseline). Acceptable on Ollama Turbo / local. Crank
+# JANUS_GEPA_MAX_LLM_CALLS down for paid endpoints.
+GEPA_GENERATIONS: int = int(os.getenv("JANUS_GEPA_GENERATIONS", "3"))
+GEPA_POPULATION: int = int(os.getenv("JANUS_GEPA_POPULATION", "6"))
+GEPA_RECORDS_PER_RUN: int = int(os.getenv("JANUS_GEPA_RECORDS_PER_RUN", "10"))
+GEPA_MAX_LLM_CALLS: int = int(os.getenv("JANUS_GEPA_MAX_LLM_CALLS", "250"))
+# Minimum improvement (0-100 score points) over baseline before
+# recommendation flips from "no_change" to "apply".
+GEPA_PROMOTE_MARGIN: float = float(os.getenv("JANUS_GEPA_PROMOTE_MARGIN", "5.0"))
+
 # v1.25.2 — single-user mode. When true, ``user_turn`` card extractions
 # default to ``scope=global`` instead of the per-origin scope (telegram:
 # <chat_id>, web:<session>, cli, etc.). The privacy invariant for
