@@ -168,6 +168,26 @@ MEMORY_PROTECTED_DURABILITY: float = float(
     os.getenv("JANUS_MEMORY_PROTECTED_DURABILITY", "0.7")
 )
 
+# v1.43.0 — daemon-managed periodic prune cadence. Both memory_prune
+# and skill_prune are pure-compute (no LLM cost), so default-on with
+# a 24h cadence is safe. Disable individually with ``=0``.
+MEMORY_PRUNE_HOURS: int = int(os.getenv("JANUS_MEMORY_PRUNE_HOURS", "24"))
+SKILL_PRUNE_HOURS: int = int(os.getenv("JANUS_SKILL_PRUNE_HOURS", "24"))
+
+# v1.43.0 — skill_prune thresholds.
+# Quarantined skills not promoted within this window AND with no runs
+# get moved to ``SKILLS_DIR/_trash/``. Reversible by `mv` back.
+SKILL_PRUNE_QUARANTINE_DAYS: int = int(
+    os.getenv("JANUS_SKILL_PRUNE_QUARANTINE_DAYS", "30")
+)
+# Trashed skills older than this get permanently unlinked.
+SKILL_PRUNE_TRASH_DAYS: int = int(
+    os.getenv("JANUS_SKILL_PRUNE_TRASH_DAYS", "30")
+)
+# Trusted (promoted) skills inactive for this many days get a
+# ``stale_warning`` frontmatter flag — never auto-deleted/demoted.
+SKILL_STALE_DAYS: int = int(os.getenv("JANUS_SKILL_STALE_DAYS", "60"))
+
 # v1.25.2 — single-user mode. When true, ``user_turn`` card extractions
 # default to ``scope=global`` instead of the per-origin scope (telegram:
 # <chat_id>, web:<session>, cli, etc.). The privacy invariant for

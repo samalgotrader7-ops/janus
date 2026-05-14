@@ -460,6 +460,31 @@ def run_daemon(*, once: bool = False) -> None:
                     )
         except Exception as e:
             print(f"  [!] memory consolidate tick failed: {e}")
+        # v1.43.0 — pruning ticks. Pure-compute, default-on at 24h.
+        try:
+            from .. import prune_cron
+            mp = prune_cron.tick_memory(
+                on_fire=lambda: print("  [+] memory prune"),
+            )
+            if mp.get("fired"):
+                if mp.get("error"):
+                    print(f"      [!] memory prune failed: {mp['error']}")
+                else:
+                    print(f"      → removed={mp.get('removed', 0)}")
+            sp = prune_cron.tick_skill(
+                on_fire=lambda: print("  [+] skill prune"),
+            )
+            if sp.get("fired"):
+                if sp.get("error"):
+                    print(f"      [!] skill prune failed: {sp['error']}")
+                else:
+                    print(
+                        f"      → trashed={sp.get('trashed', 0)} "
+                        f"stale_marked={sp.get('stale_marked', 0)} "
+                        f"unlinked={sp.get('unlinked', 0)}"
+                    )
+        except Exception as e:
+            print(f"  [!] prune tick failed: {e}")
         if once:
             return
         time.sleep(config.DAEMON_POLL_SECONDS)
